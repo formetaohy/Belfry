@@ -373,12 +373,7 @@ impl Edit {
                 continue;
             }
             match key {
-                Key::Character(character) => {
-                    if character.is_control() {
-                        continue;
-                    }
-                    self.insert(&character.to_string(), time);
-                }
+                Key::Character(_) | Key::Function(_) => {}
                 Key::Backspace if modifiers.control || modifiers.logo => {
                     self.erase_word_before(time);
                 }

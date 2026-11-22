@@ -158,6 +158,10 @@ fn translate(event: &WindowEvent) -> Option<Event> {
         WindowEvent::KeyboardInput { event, .. } => match event.physical_key {
             PhysicalKey::Code(code) => Some(Event::Key {
                 code,
+                character: match &event.logical_key {
+                    winit::keyboard::Key::Character(text) => text.chars().next(),
+                    _ => None,
+                },
                 pressed: event.state == ElementState::Pressed,
                 repeat: event.repeat,
                 text: event.text.as_ref().map(ToString::to_string),

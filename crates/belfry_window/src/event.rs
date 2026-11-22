@@ -13,6 +13,7 @@ pub enum Event {
     Focused(bool),
     Key {
         code: KeyCode,
+        character: Option<char>,
         pressed: bool,
         repeat: bool,
         text: Option<String>,

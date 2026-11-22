@@ -29,20 +29,32 @@ impl Input {
             }
             WindowEvent::Key {
                 code,
+                character,
                 pressed,
                 repeat,
                 text,
             } => {
-                if let Some(key) = key_of(*code) {
-                    self.push(Event::Key {
+                let named = key_of(*code);
+                match (named, character) {
+                    (Some(key), _) => self.push(Event::Key {
                         key,
                         pressed: *pressed,
                         repeat: *repeat,
-                    });
+                    }),
+                    (None, Some(character)) => self.push(Event::Key {
+                        key: Key::Character(*character),
+                        pressed: *pressed,
+                        repeat: *repeat,
+                    }),
+                    (None, None) => {}
                 }
                 if *pressed && let Some(text) = text {
                     let modifiers = self.modifiers();
-                    if !modifiers.control && !modifiers.alt && !modifiers.logo {
+                    if !modifiers.control
+                        && !modifiers.alt
+                        && !modifiers.logo
+                        && text.chars().any(|held| !held.is_control())
+                    {
                         self.push(Event::Text(text.clone()));
                     }
                 }
@@ -88,6 +100,18 @@ fn key_of(code: KeyCode) -> Option<Key> {
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
         KeyCode::Tab => Key::Tab,
+        KeyCode::F1 => Key::Function(1),
+        KeyCode::F2 => Key::Function(2),
+        KeyCode::F3 => Key::Function(3),
+        KeyCode::F4 => Key::Function(4),
+        KeyCode::F5 => Key::Function(5),
+        KeyCode::F6 => Key::Function(6),
+        KeyCode::F7 => Key::Function(7),
+        KeyCode::F8 => Key::Function(8),
+        KeyCode::F9 => Key::Function(9),
+        KeyCode::F10 => Key::Function(10),
+        KeyCode::F11 => Key::Function(11),
+        KeyCode::F12 => Key::Function(12),
         _ => return None,
     })
 }

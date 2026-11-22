@@ -1,5 +1,32 @@
 use belfry_ecs::{LocalTransform, Parent, World, propagate};
 use belfry_math::{Quat, Transform, Vec3};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct Counting;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATIONS.try_with(|held| held.set(held.get() + 1));
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        let _ = ALLOCATIONS.try_with(|held| held.set(held.get().saturating_sub(1)));
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn allocations() -> usize {
+    ALLOCATIONS.with(Cell::get)
+}
 
 #[test]
 fn a_parent_carries_its_child_into_world_space() {
@@ -25,4 +52,47 @@ fn a_parent_carries_its_child_into_world_space() {
         .expect("the child holds its world transform");
     assert_eq!(held.translation, Vec3::new(3.0, 2.0, 3.0));
     assert_eq!(held.scale, Vec3::splat(2.0));
+}
+
+#[test]
+fn a_settled_hierarchy_propagates_without_touching_the_heap() {
+    let mut world = World::new();
+    let root = world.spawn();
+    world.insert(root, LocalTransform(Transform::IDENTITY));
+    let mut deepest = root;
+    for index in 0..64 {
+        let child = world.spawn();
+        world.insert(
+            child,
+            LocalTransform(Transform::from_translation(Vec3::new(
+                index as f32,
+                0.0,
+                0.0,
+            ))),
+        );
+        world.insert(child, Parent(deepest));
+        deepest = child;
+    }
+    propagate(&mut world);
+    for round in 0..2 {
+        world.insert(
+            root,
+            LocalTransform(Transform::from_translation(Vec3::new(
+                round as f32,
+                1.0,
+                0.0,
+            ))),
+        );
+        let before = allocations();
+        propagate(&mut world);
+        assert_eq!(
+            allocations(),
+            before,
+            "a settled hierarchy of 65 nodes allocates while it propagates",
+        );
+    }
+    let held = *world
+        .get::<Transform>(deepest)
+        .expect("the deepest node holds its world transform");
+    assert_eq!(held.translation, Vec3::new(2017.0, 1.0, 0.0));
 }

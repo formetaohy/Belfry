@@ -247,7 +247,7 @@ impl<A: Clone> Ui<A> {
                 | InputKey::Down
                 | InputKey::Home
                 | InputKey::End => true,
-                InputKey::PageUp | InputKey::PageDown => false,
+                InputKey::PageUp | InputKey::PageDown | InputKey::Function(_) => false,
             };
         }
         if self.focus_visible || self.popup_open_any() || self.modal_open() {

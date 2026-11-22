@@ -1,6 +1,7 @@
 use crate::column::Column;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
+use crate::hierarchy::{LocalTransform, Parent};
 use crate::resource::Resource;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ pub struct World {
     columns: Vec<Box<dyn ErasedColumn>>,
     index: HashMap<TypeId, usize>,
     resources: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    hierarchy: u64,
 }
 
 impl World {
@@ -49,6 +51,7 @@ impl World {
         for column in &mut self.columns {
             column.remove_entity(entity);
         }
+        self.hierarchy = self.hierarchy.wrapping_add(1);
         true
     }
 
@@ -73,6 +76,9 @@ impl World {
             self.entities.is_alive(entity),
             "a component belongs to a live entity"
         );
+        if Self::moves_hierarchy::<T>() {
+            self.hierarchy = self.hierarchy.wrapping_add(1);
+        }
         self.column_or_insert::<T>().insert(entity, value)
     }
 
@@ -103,8 +109,20 @@ impl World {
     }
 
     pub fn column_mut<T: Component>(&mut self) -> Option<&mut Column<T>> {
+        if Self::moves_hierarchy::<T>() {
+            self.hierarchy = self.hierarchy.wrapping_add(1);
+        }
         let index = *self.index.get(&TypeId::of::<T>())?;
         self.columns[index].as_any_mut().downcast_mut()
+    }
+
+    pub fn hierarchy_change(&self) -> u64 {
+        self.hierarchy
+    }
+
+    fn moves_hierarchy<T: Component>() -> bool {
+        let held = TypeId::of::<T>();
+        held == TypeId::of::<LocalTransform>() || held == TypeId::of::<Parent>()
     }
 
     pub fn iter<T: Component>(&self) -> impl Iterator<Item = (Entity, &T)> + '_ {

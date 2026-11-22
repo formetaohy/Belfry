@@ -8,9 +8,7 @@ use crate::ring;
 use crate::spatial::{self, Listener};
 use belfry_ecs::{Entity, World};
 use belfry_math::Transform;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -157,17 +155,9 @@ impl Audio {
     }
 
     fn sync_buses(&mut self, world: &World) {
-        let mut hasher = DefaultHasher::new();
-        let mut count = 0u64;
-        for (entity, bus) in world.iter::<AudioBus>() {
-            count += 1;
-            entity.index().hash(&mut hasher);
-            bus.id().hash(&mut hasher);
-            bus.parent().hash(&mut hasher);
-            bus.send().hash(&mut hasher);
-        }
-        let fingerprint = if count == 0 { 0 } else { hasher.finish() };
-        let rebuilt = if count == 0 {
+        let fingerprint = graph::fingerprint(world);
+        let empty = world.count::<AudioBus>() == 0;
+        let rebuilt = if empty {
             let synthetic = !self.layout.synthetic();
             if synthetic {
                 self.layout = Arc::new(Layout::master());
@@ -180,6 +170,7 @@ impl Audio {
             self.bus_entities = entities;
             true
         } else {
+            graph::entities(world, &self.layout, &mut self.bus_entities);
             false
         };
         self.fingerprint = fingerprint;

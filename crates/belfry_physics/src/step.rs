@@ -224,6 +224,11 @@ pub fn step(world: &mut World, delta: f32) {
             contact.feature,
             solver::cache(contact),
         );
+        cache.insert_rebound(
+            bodies[contact.first].entity,
+            bodies[contact.second].entity,
+            contact.rebound,
+        );
     }
     world.insert_resource(cache);
     collisions.settle(touched);

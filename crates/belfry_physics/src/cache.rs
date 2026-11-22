@@ -5,6 +5,7 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub(crate) struct ContactCache {
     pairs: HashMap<(Entity, Entity, usize, usize, u32), Vec<CachedPoint>>,
+    rebounds: HashMap<(Entity, Entity), f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -15,6 +16,16 @@ pub(crate) struct CachedPoint {
 }
 
 impl ContactCache {
+    pub(crate) fn take_rebound(&mut self, first: Entity, second: Entity) -> f32 {
+        self.rebounds.remove(&key(first, second)).unwrap_or(0.0)
+    }
+
+    pub(crate) fn insert_rebound(&mut self, first: Entity, second: Entity, rebound: f32) {
+        if rebound > 0.0 {
+            self.rebounds.insert(key(first, second), rebound);
+        }
+    }
+
     pub(crate) fn take(
         &mut self,
         first: Entity,

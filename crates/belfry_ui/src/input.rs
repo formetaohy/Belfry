@@ -46,6 +46,7 @@ pub enum Key {
     PageDown,
     Backspace,
     Delete,
+    Function(u8),
     Character(char),
 }
 

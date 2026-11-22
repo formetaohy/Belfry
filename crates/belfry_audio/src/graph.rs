@@ -1,6 +1,8 @@
 use crate::bus::{AudioBus, AudioCompressor, AudioFilter, AudioReverb};
 use belfry_ecs::{Entity, World};
 use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub(crate) const MAX_BUSES: usize = 32;
 pub(crate) const BLOCK_FRAMES: usize = 512;
@@ -163,6 +165,45 @@ pub(crate) fn layout_of(links: &[BusLink<'_>]) -> Result<Layout, String> {
     })
 }
 
+pub(crate) fn fingerprint(world: &World) -> u64 {
+    let mut links = world
+        .iter::<AudioBus>()
+        .map(|(_, bus)| BusLink {
+            id: bus.id(),
+            parent: bus.parent(),
+            send: bus.send(),
+        })
+        .collect::<Vec<_>>();
+    if links.is_empty() {
+        return 0;
+    }
+    links.sort_by(|left, right| left.id.cmp(right.id));
+    let mut hasher = DefaultHasher::new();
+    for link in &links {
+        link.id.hash(&mut hasher);
+        link.parent.hash(&mut hasher);
+        link.send.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+pub(crate) fn entities(world: &World, layout: &Layout, out: &mut Vec<Entity>) {
+    out.clear();
+    for bus in layout.buses() {
+        let entity = world
+            .iter::<AudioBus>()
+            .find(|(_, held)| held.id() == bus.id())
+            .map(|(entity, _)| entity)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the audio layout holds the bus {}, which no entity holds",
+                    bus.id(),
+                )
+            });
+        out.push(entity);
+    }
+}
+
 pub(crate) fn params(
     world: &World,
     layout: &Layout,
@@ -289,6 +330,49 @@ fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bus_graph_holds_one_fingerprint_however_the_scene_orders_it() {
+        let build = |order: [(&str, Option<&str>, Option<&str>); 3], lead: usize| {
+            let mut world = World::new();
+            for _ in 0..lead {
+                world.spawn();
+            }
+            for (id, parent, send) in order {
+                let entity = world.spawn();
+                world.insert(
+                    entity,
+                    AudioBus::new(
+                        id,
+                        parent.map(String::from),
+                        send.map(String::from),
+                        0.0,
+                        false,
+                        0.0,
+                    ),
+                );
+            }
+            world
+        };
+        let first = build(
+            [
+                ("master", None, None),
+                ("music", Some("master"), Some("hall")),
+                ("hall", Some("master"), None),
+            ],
+            0,
+        );
+        let second = build(
+            [
+                ("hall", Some("master"), None),
+                ("master", None, None),
+                ("music", Some("master"), Some("hall")),
+            ],
+            5,
+        );
+        assert_eq!(fingerprint(&first), fingerprint(&second));
+        assert_eq!(compile(&first).0, compile(&second).0);
+    }
 
     #[test]
     fn a_bus_graph_orders_children_before_parents_and_sends() {

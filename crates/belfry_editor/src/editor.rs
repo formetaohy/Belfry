@@ -11,6 +11,7 @@ use belfry_scene::{
     MaterialAsset, MaterialEntry, MeshAsset, MeshEntry, Node, Registry, Scene, Shape, Target,
     Value, Watch,
 };
+use belfry_ui::InputKey as Key;
 use belfry_window::{
     Event, Flow, Handler, KeyCode, ModifiersState, MouseButton, Window, WindowConfig,
     run as run_window,
@@ -864,31 +865,31 @@ impl Editor {
         }
     }
 
-    fn shortcut(&mut self, code: KeyCode, scale: f32) -> bool {
+    fn shortcut(&mut self, key: Key, scale: f32) -> bool {
         let command = self.modifiers.control_key() || self.modifiers.super_key();
-        match code {
-            KeyCode::KeyS if command => self.apply(Message::Save),
-            KeyCode::KeyZ if command => {
+        match key {
+            Key::Character('s') if command => self.apply(Message::Save),
+            Key::Character('z') if command => {
                 if self.modifiers.shift_key() {
                     self.apply(Message::Redo);
                 } else {
                     self.apply(Message::Undo);
                 }
             }
-            KeyCode::KeyY if command => self.apply(Message::Redo),
-            KeyCode::F5 => {
+            Key::Character('y') if command => self.apply(Message::Redo),
+            Key::Function(5) => {
                 if self.child.is_some() {
                     self.apply(Message::Stop);
                 } else {
                     self.apply(Message::Play);
                 }
             }
-            KeyCode::KeyW => self.apply(Message::Mode(Mode::Translate)),
-            KeyCode::KeyE => self.apply(Message::Mode(Mode::Rotate)),
-            KeyCode::KeyR => self.apply(Message::Mode(Mode::Scale)),
-            KeyCode::KeyQ => self.apply(Message::ToggleSpace),
-            KeyCode::KeyF => self.apply(Message::Focus),
-            KeyCode::Delete => self.apply(Message::Remove),
+            Key::Character('w') => self.apply(Message::Mode(Mode::Translate)),
+            Key::Character('e') => self.apply(Message::Mode(Mode::Rotate)),
+            Key::Character('r') => self.apply(Message::Mode(Mode::Scale)),
+            Key::Character('q') => self.apply(Message::ToggleSpace),
+            Key::Character('f') => self.apply(Message::Focus),
+            Key::Delete => self.apply(Message::Remove),
             _ => {
                 let _ = scale;
                 return false;
@@ -896,6 +897,22 @@ impl Editor {
         }
         true
     }
+}
+
+fn shortcut_key(code: KeyCode) -> Option<Key> {
+    Some(match code {
+        KeyCode::KeyQ => Key::Character('q'),
+        KeyCode::KeyW => Key::Character('w'),
+        KeyCode::KeyE => Key::Character('e'),
+        KeyCode::KeyR => Key::Character('r'),
+        KeyCode::KeyS => Key::Character('s'),
+        KeyCode::KeyF => Key::Character('f'),
+        KeyCode::KeyY => Key::Character('y'),
+        KeyCode::KeyZ => Key::Character('z'),
+        KeyCode::Delete => Key::Delete,
+        KeyCode::F5 => Key::Function(5),
+        _ => return None,
+    })
 }
 
 impl Handler for Editor {
@@ -922,12 +939,13 @@ impl Handler for Editor {
                 pressed: true,
                 ..
             } => {
-                let editing = self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.ui.editing());
-                if !editing {
-                    self.shortcut(*code, scale);
+                if let Some(key) = shortcut_key(*code)
+                    && !self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.ui.claims_key(key))
+                {
+                    self.shortcut(key, scale);
                 }
             }
             Event::CursorMoved { x, y } => {

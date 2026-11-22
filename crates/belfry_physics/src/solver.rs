@@ -20,6 +20,7 @@ pub(crate) struct Contact {
     pub friction: f32,
     pub restitution: f32,
     pub points: Vec<ContactPoint>,
+    pub rebound: f32,
 }
 
 pub(crate) struct ContactPoint {
@@ -104,6 +105,7 @@ pub(crate) fn contact(
         friction,
         restitution,
         points,
+        rebound: cache.take_rebound(held.entity, other.entity),
     }
 }
 
@@ -128,21 +130,24 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
             let relative =
                 second.point_velocity(offset_second) - first.point_velocity(offset_first);
             let velocity = relative.dot(normal);
+            let rebound = if velocity < -RESTITUTION_VELOCITY {
+                -contact.restitution * velocity
+            } else {
+                0.0
+            };
             if point.separation > LINEAR_SLOP {
                 if -velocity * delta > point.separation {
                     point.active = true;
                     point.target = -point.separation / delta;
+                    contact.rebound = contact.rebound.max(rebound);
                 } else {
                     point.active = false;
                     point.target = 0.0;
                 }
             } else {
                 point.active = true;
-                point.target = if velocity < -RESTITUTION_VELOCITY {
-                    -contact.restitution * velocity
-                } else {
-                    0.0
-                };
+                point.target = contact.rebound.max(rebound);
+                contact.rebound = 0.0;
             }
         }
     }

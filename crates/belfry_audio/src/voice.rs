@@ -7,6 +7,7 @@ const MIN_PITCH: f32 = 0.01;
 const MAX_PITCH: f32 = 16.0;
 const MIN_GAIN: f32 = 0.0;
 const MAX_GAIN: f32 = 8.0;
+const FADE_STEP: f32 = 1.0 / 256.0;
 
 pub(crate) struct Settings {
     pub(crate) gain: f32,
@@ -32,6 +33,8 @@ pub(crate) struct Voice {
     states: [f32; 2],
     left: f32,
     right: f32,
+    fade: f32,
+    fading: bool,
 }
 
 impl Voice {
@@ -56,7 +59,13 @@ impl Voice {
             states: [0.0; 2],
             left: 0.0,
             right: 0.0,
+            fade: 1.0,
+            fading: false,
         }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.fading = true;
     }
 
     pub(crate) fn id(&self) -> VoiceId {
@@ -103,15 +112,24 @@ impl Voice {
             1.0
         };
         let mut finished = false;
+        let mut fade = self.fade;
         for frame in 0..frames {
             let held = self.input.sample(self.cursor, self.looping);
             self.states[0] += self.alpha * (held[0] - self.states[0]);
             self.states[1] += self.alpha * (held[1] - self.states[1]);
             self.left += left_step;
             self.right += right_step;
-            out[frame * 2] += self.states[0] * self.left;
-            out[frame * 2 + 1] += self.states[1] * self.right;
+            out[frame * 2] += self.states[0] * self.left * fade;
+            out[frame * 2 + 1] += self.states[1] * self.right * fade;
             self.cursor += self.step;
+            if self.fading {
+                fade -= FADE_STEP;
+                if fade <= 0.0 {
+                    fade = 0.0;
+                    finished = true;
+                    break;
+                }
+            }
             if let Some(count) = self.loop_frames()
                 && self.cursor >= count as f64
             {
@@ -122,6 +140,7 @@ impl Voice {
                 break;
             }
         }
+        self.fade = fade;
         self.left = target_left;
         self.right = target_right;
         finished

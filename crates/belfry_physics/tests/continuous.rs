@@ -131,6 +131,35 @@ fn a_fast_sphere_bounces_off_a_thin_floor() {
 }
 
 #[test]
+fn a_rebound_holds_the_speed_of_its_impact_whatever_gap_the_step_lands_on() {
+    let mut rebounds = Vec::new();
+    for gap in [0.02, 0.25, 0.5, 1.0] {
+        let mut world = world(Vec3::ZERO);
+        thin_floor(&mut world, 1.0);
+        let sphere = spawn(
+            &mut world,
+            Vec3::new(0.0, 0.25 + gap, 0.0),
+            Shape::sphere(0.25),
+            BodyKind::Dynamic,
+            Vec3::new(0.0, -60.0, 0.0),
+            1.0,
+        );
+        settle(&mut world, 3);
+        let velocity = world
+            .get::<RigidBody>(sphere)
+            .expect("the sphere holds its body")
+            .linear_velocity();
+        rebounds.push((gap, velocity.y));
+    }
+    for (gap, rebound) in rebounds {
+        assert!(
+            (rebound - 60.0).abs() < 3.0,
+            "a sphere whose step lands {gap} above the floor leaves at {rebound} where it arrived at 60",
+        );
+    }
+}
+
+#[test]
 fn a_fast_sphere_lands_on_a_triangle_mesh() {
     let mut world = world(Vec3::ZERO);
     let floor = world.spawn();

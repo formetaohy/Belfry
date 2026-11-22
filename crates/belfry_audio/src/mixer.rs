@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const MAX_VOICES: usize = 256;
+const RETIRING: usize = 16;
 
 struct Bus {
     buffer: Vec<f32>,
@@ -61,12 +62,14 @@ pub(crate) struct Mixer {
     commands: Consumer<Command>,
     events: Producer<Event>,
     voices: Vec<Option<Assigned>>,
+    retiring: [Option<Assigned>; RETIRING],
     buses: Vec<Bus>,
     layout: Arc<Layout>,
     used: usize,
     active: Arc<AtomicUsize>,
     master: f32,
     master_target: f32,
+    pause: f32,
     paused: bool,
     sequence: u64,
 }
@@ -85,12 +88,14 @@ impl Mixer {
             commands,
             events,
             voices: (0..MAX_VOICES).map(|_| None).collect(),
+            retiring: [const { None }; RETIRING],
             buses,
             layout,
             used: 1,
             active,
             master: 1.0,
             master_target: 1.0,
+            pause: 1.0,
             paused: false,
             sequence: 0,
         }
@@ -102,7 +107,7 @@ impl Mixer {
         }
         out.fill(0.0);
         let frames = out.len() / 2;
-        if self.paused || frames == 0 {
+        if self.paused && self.pause <= 0.0 || frames == 0 {
             self.active
                 .store(self.voices.iter().flatten().count(), Ordering::Relaxed);
             return;
@@ -112,13 +117,16 @@ impl Mixer {
             self.render_block(chunk, &layout);
         }
         let step = (self.master_target - self.master) / frames as f32;
+        let held = (if self.paused { 0.0 } else { 1.0 } - self.pause) / frames as f32;
         for frame in 0..frames {
             self.master += step;
-            let master = self.master.clamp(0.0, 1.0);
+            self.pause += held;
+            let master = self.master.clamp(0.0, 1.0) * self.pause.clamp(0.0, 1.0);
             out[frame * 2] = (out[frame * 2] * master).clamp(-1.0, 1.0);
             out[frame * 2 + 1] = (out[frame * 2 + 1] * master).clamp(-1.0, 1.0);
         }
         self.master = self.master_target;
+        self.pause = if self.paused { 0.0 } else { 1.0 };
         self.active
             .store(self.voices.iter().flatten().count(), Ordering::Relaxed);
     }
@@ -128,6 +136,18 @@ impl Mixer {
         let samples = frames * 2;
         for bus in &mut self.buses[..self.used] {
             bus.buffer[..samples].fill(0.0);
+        }
+        for slot in &mut self.retiring {
+            let Some(assigned) = slot else {
+                continue;
+            };
+            let index = assigned.index.min(self.used - 1);
+            if assigned
+                .voice
+                .mix(&mut self.buses[index].buffer[..samples], self.rate)
+            {
+                *slot = None;
+            }
         }
         for slot in &mut self.voices {
             let Some(assigned) = slot else {
@@ -244,7 +264,9 @@ impl Mixer {
                     .iter_mut()
                     .find(|slot| slot.as_ref().is_some_and(|held| held.voice.id() == voice))
                 {
-                    *slot = None;
+                    let mut assigned = slot.take().expect("the stopped slot holds its voice");
+                    assigned.voice.stop();
+                    self.retire(assigned);
                 }
             }
             Command::Buses(layout) => {
@@ -318,12 +340,34 @@ impl Mixer {
         }
         let id = assigned.voice.id();
         let position = assigned.voice.position();
-        self.voices[victim] = None;
+        let mut held = self.voices[victim]
+            .take()
+            .expect("a victim of voice stealing holds its voice");
+        held.voice.stop();
+        self.retire(held);
         let _ = self.events.send(Event::Stolen {
             voice: id,
             position,
         });
         Some(victim)
+    }
+
+    fn retire(&mut self, mut assigned: Assigned) {
+        let free = self
+            .retiring
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| {
+                self.retiring
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, slot)| slot.as_ref().map_or(u64::MAX, |held| held.sequence))
+                    .map(|(index, _)| index)
+                    .expect("a retiring pool holds the slot it replaces")
+            });
+        assigned.sequence = self.sequence;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.retiring[free] = Some(assigned);
     }
 
     fn voice_mut(&mut self, voice: VoiceId) -> Option<&mut Playing> {
@@ -381,6 +425,50 @@ mod tests {
             .collect::<Vec<_>>();
         let layout = crate::graph::layout_of(&links).expect("the test buses hold a graph");
         Arc::new(layout)
+    }
+
+    #[test]
+    fn a_stopped_voice_ramps_out_of_the_mix() {
+        let (mut producer, command_consumer) = ring::channel(8);
+        let (event_producer, mut events) = ring::channel(8);
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut mixer = Mixer::new(
+            48_000,
+            command_consumer,
+            event_producer,
+            Arc::clone(&active),
+        );
+        producer
+            .send(command(1, tone(vec![1.0; 48_000]), None))
+            .expect("the mixer accepts a voice");
+        let mut block = [0.0f32; 960];
+        mixer.render(&mut block);
+        let level = block[958].abs();
+        assert!(level > 0.5, "a held voice mixes at {level}");
+        producer
+            .send(Command::Stop { voice: VoiceId(1) })
+            .expect("the mixer stops a voice");
+        mixer.render(&mut block);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(
+            block[0].abs() > level * 0.5,
+            "a stopped voice steps out of the mix at {} where it played {level}",
+            block[0],
+        );
+        assert!(
+            block[958].abs() < 1.0e-4,
+            "a stopped voice leaves {} where it fades into silence",
+            block[958],
+        );
+        for pair in block[..956].as_chunks::<2>().0.windows(2) {
+            let left = pair[0][0].abs().max(pair[0][1].abs());
+            let right = pair[1][0].abs().max(pair[1][1].abs());
+            assert!(
+                left + 1.0e-6 >= right,
+                "a stopped voice ramps down from {left} to {right}",
+            );
+        }
+        assert!(events.take().is_none());
     }
 
     #[test]
