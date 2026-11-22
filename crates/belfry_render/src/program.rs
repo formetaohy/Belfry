@@ -1,8 +1,9 @@
 use crate::abi::{
-    BloomRecord, BloomUpRecord, CascadeRecord, DebugLineRecord, DrawRecord, HzbLevelRecord,
-    HzbStepRecord, InstanceRecord, JointRecord, LIGHT_CAPACITY, LIGHT_SLICES, LIGHT_STRIDE,
-    LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord, SHADOW_CASCADES,
-    SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord, TransparentRecord,
+    AtlasRecord, BakeLevelRecord, BloomRecord, BloomUpRecord, CascadeRecord, DebugLineRecord,
+    DrawRecord, HzbLevelRecord, HzbStepRecord, IRRADIANCE_PARTIALS, InstanceRecord,
+    IrradianceRecord, IrradianceSetupRecord, JointRecord, LIGHT_CAPACITY, LIGHT_SLICES,
+    LIGHT_STRIDE, LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord,
+    SHADOW_CASCADES, SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord, TransparentRecord,
     TransparentSetupRecord, VERTEX_FLOATS, ViewRecord, WORKGROUP,
 };
 use belfry_gpu::AtomicU32;
@@ -69,6 +70,19 @@ pub(crate) const SHADE_BRDF_SAMPLER: u32 = 5;
 pub(crate) const SKY_VIEW: u32 = 0;
 pub(crate) const SKY_RADIANCE: u32 = 0;
 pub(crate) const SKY_SAMPLER: u32 = 1;
+
+pub(crate) const PREFILTER_LEVEL: u32 = 0;
+pub(crate) const PREFILTER_PANORAMA: u32 = 0;
+pub(crate) const PREFILTER_SAMPLER: u32 = 1;
+pub(crate) const CAPTURE_SETUP: u32 = 0;
+pub(crate) const CAPTURE_ATLAS: u32 = 0;
+pub(crate) const CAPTURE_SAMPLER: u32 = 1;
+pub(crate) const INTEGRATION_SETUP: u32 = 0;
+pub(crate) const INTEGRATION_PARTIALS: u32 = 1;
+pub(crate) const INTEGRATION_PANORAMA: u32 = 0;
+pub(crate) const INTEGRATION_SAMPLER: u32 = 1;
+pub(crate) const REDUCTION_PARTIALS: u32 = 0;
+pub(crate) const REDUCTION_TOTAL: u32 = 1;
 
 pub(crate) const BLOOM_SETTINGS: u32 = 0;
 pub(crate) const EXTRACT_SOURCE: u32 = 0;
@@ -140,6 +154,14 @@ const _: () = assert!(
 const _: () = assert!(
     LIGHT_TILE > 0 && LIGHT_SLICES > 0,
     "a light cluster covers a tile of at least one pixel and one depth slice",
+);
+const _: () = assert!(
+    IRRADIANCE_PARTIALS == 1024 && crate::abi::IRRADIANCE_WORDS == 36,
+    "the irradiance reduction walks the partials and record words its shader counts",
+);
+const _: () = assert!(
+    crate::environment::SPECULAR_SAMPLES == 128,
+    "the prefilter samples the half vectors its shader counts",
 );
 
 #[belfry_gpu::kernel(workgroup_size = 64)]
@@ -1963,6 +1985,321 @@ mod sky {
 
 pub(crate) fn sky_program() -> GraphicsProgram {
     sky()
+}
+
+#[belfry_gpu::graphics]
+mod prefilter {
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x, y);
+    }
+
+    #[fragment]
+    fn fragment(
+        level: Read<BakeLevelRecord>,
+        panorama: Texture2D,
+        sampler: Sampler,
+        at: In<Fvec2>,
+        target: Out<Fvec4>,
+    ) {
+        let held = level[0u32];
+        let normal = ray(fvec2(at.x * 0.5 + 0.5, at.y * held.vertical + 0.5));
+        let radiance = prefiltered(panorama, sampler, normal, held.roughness);
+        target = fvec4(radiance.x, radiance.y, radiance.z, 1.0);
+    }
+
+    fn prefiltered(panorama: Texture2D, sampler: Sampler, normal: Fvec4, roughness: f32) -> Fvec4 {
+        if roughness <= 0.0 {
+            return sample_lod(panorama, sampler, equirect(normal), 0.0);
+        }
+        let view = normalized(normal);
+        let mut sign = -1.0;
+        if view.z >= 0.0 {
+            sign = 1.0;
+        }
+        let frame = -1.0 / (sign + view.z);
+        let cross = view.x * view.y * frame;
+        let tangent = fvec4(
+            1.0 + sign * view.x * view.x * frame,
+            sign * cross,
+            -sign * view.x,
+            0.0,
+        );
+        let bitangent = fvec4(cross, sign + view.y * view.y * frame, -view.y, 0.0);
+        let alpha = roughness * roughness;
+        let mut sum = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut weight = 0.0;
+        for index in stride(0u32, 128u32, 1u32) {
+            let rank = radical(index);
+            let phi = (710.0 / 113.0) * (index as f32 * (1.0 / 128.0));
+            let cosine = sqrt(max(
+                (1.0 - rank) / (1.0 + (alpha * alpha - 1.0) * rank),
+                0.0,
+            ));
+            let sine = sqrt(max(1.0 - cosine * cosine, 0.0));
+            let half = tangent * (sine * cos(phi)) + bitangent * (sine * sin(phi)) + view * cosine;
+            let light = normalized(half * (2.0 * dot3(view, half)) - view);
+            let incidence = max(dot3(view, light), 0.0);
+            if incidence > 0.0 {
+                sum = sum + sample_lod(panorama, sampler, equirect(light), 0.0) * incidence;
+                weight += incidence;
+            }
+        }
+        if weight == 0.0 {
+            return sample_lod(panorama, sampler, equirect(view), 0.0);
+        }
+        sum * (1.0 / weight)
+    }
+
+    fn radical(bits: u32) -> f32 {
+        let mut weight = 0.5;
+        let mut value = 0.0;
+        for bit in stride(0u32, 7u32, 1u32) {
+            if ((bits >> bit) & 1u32) == 1u32 {
+                value += weight;
+            }
+            weight *= 0.5;
+        }
+        value
+    }
+
+    fn ray(at: Fvec2) -> Fvec4 {
+        let phi = (at.x - 0.5) * (710.0 / 113.0);
+        let theta = at.y * (355.0 / 113.0);
+        let sine = sin(theta);
+        fvec4(sine * sin(phi), cos(theta), -sine * cos(phi), 0.0)
+    }
+
+    fn equirect(direction: Fvec4) -> Fvec2 {
+        let unit = normalized(direction);
+        fvec2(
+            atan2(unit.x, -unit.z) * (113.0 / 710.0) + 0.5,
+            acos(clamped(unit.y, -1.0, 1.0)) * (113.0 / 355.0),
+        )
+    }
+
+    fn dot3(left: Fvec4, right: Fvec4) -> f32 {
+        left.x * right.x + left.y * right.y + left.z * right.z
+    }
+
+    fn normalized(vector: Fvec4) -> Fvec4 {
+        let inverse =
+            1.0 / sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z + 0.0000001);
+        vector * inverse
+    }
+
+    fn clamped(value: f32, low: f32, high: f32) -> f32 {
+        min(max(value, low), high)
+    }
+}
+
+#[belfry_gpu::graphics]
+mod integration {
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x * 0.5 + 0.5, y * 0.5 + 0.5);
+    }
+
+    #[fragment]
+    fn fragment(
+        setup: Read<IrradianceSetupRecord>,
+        partials: ReadWrite<IrradianceRecord>,
+        panorama: Texture2D,
+        sampler: Sampler,
+        at: In<Fvec2>,
+        target: Out<Fvec4>,
+    ) {
+        let held = setup[0u32];
+        let index = floor(at.x * held.partials as f32) as u32;
+        let width = held.width;
+        let height = held.height;
+        let width_f = width as f32;
+        let height_f = height as f32;
+        let solid = ((710.0 / 113.0) / width_f) * ((355.0 / 113.0) / height_f);
+        let mut first = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut second = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut third = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut fourth = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut fifth = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut sixth = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut seventh = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut eighth = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut ninth = fvec4(0.0, 0.0, 0.0, 0.0);
+        for texel in stride(index, held.texels, held.partials) {
+            let column = texel % width;
+            let row = texel / width;
+            let u = (column as f32 + 0.5) / width_f;
+            let v = (row as f32 + 0.5) / height_f;
+            let phi = (u - 0.5) * (710.0 / 113.0);
+            let theta = v * (355.0 / 113.0);
+            let sine = sin(theta);
+            let axis_x = sine * sin(phi);
+            let axis_y = cos(theta);
+            let axis_z = -sine * cos(phi);
+            let radiance = sample_lod(panorama, sampler, fvec2(u, v), 0.0)
+                * (sin(v * (355.0 / 113.0)) * solid);
+            first = first + radiance * 0.886227;
+            second = second + radiance * (1.0233276 * axis_y);
+            third = third + radiance * (1.0233276 * axis_z);
+            fourth = fourth + radiance * (1.0233276 * axis_x);
+            fifth = fifth + radiance * (0.8580851 * axis_x * axis_y);
+            sixth = sixth + radiance * (0.8580851 * axis_y * axis_z);
+            seventh = seventh + radiance * (0.2477083 * (3.0 * axis_z * axis_z - 1.0));
+            eighth = eighth + radiance * (0.8580851 * axis_x * axis_z);
+            ninth = ninth + radiance * (0.429041 * (axis_x * axis_x - axis_y * axis_y));
+        }
+        partials[index].coefficient0 = first;
+        partials[index].coefficient1 = second;
+        partials[index].coefficient2 = third;
+        partials[index].coefficient3 = fourth;
+        partials[index].coefficient4 = fifth;
+        partials[index].coefficient5 = sixth;
+        partials[index].coefficient6 = seventh;
+        partials[index].coefficient7 = eighth;
+        partials[index].coefficient8 = ninth;
+        target = fvec4(0.0, 0.0, 0.0, 1.0);
+    }
+}
+
+#[belfry_gpu::kernel(workgroup_size = 64)]
+mod irradiance_reduction {
+    #[kernel]
+    fn irradiance_reduction(lid: u32, partials: Read<f32>, total: ReadWrite<f32>) {
+        if lid < 27u32 {
+            let at = (lid / 3u32) * 4u32 + lid % 3u32;
+            let mut sum = 0.0;
+            for index in stride(0u32, 1024u32, 1u32) {
+                sum += partials[index * 36u32 + at];
+            }
+            total[lid] = sum;
+        }
+    }
+}
+
+pub(crate) fn prefiltering() -> GraphicsProgram {
+    prefilter()
+}
+
+pub(crate) fn integrating() -> GraphicsProgram {
+    integration()
+}
+
+pub(crate) fn irradiance_reduction_program() -> ComputeProgram {
+    irradiance_reduction()
+}
+
+#[belfry_gpu::graphics]
+mod capture_atlas {
+    #[binding]
+    fn setup(setup: Read<AtlasRecord>) {}
+
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x, y);
+    }
+
+    #[fragment]
+    fn fragment(atlas: Texture2D, sampler: Sampler, at: In<Fvec2>, target: Out<Fvec4>) {
+        let held = setup[0u32];
+        let direction = ray(fvec2(at.x * 0.5 + 0.5, at.y * held.vertical + 0.5));
+        let lit = sample_lod(
+            atlas,
+            sampler,
+            face_of(direction, held.face, held.texel),
+            0.0,
+        );
+        target = fvec4(lit.x, lit.y, lit.z, 1.0);
+    }
+
+    fn face_of(direction: Fvec4, face: f32, texel: f32) -> Fvec2 {
+        let unit = normalized(direction);
+        let across = abs(unit.x);
+        let up = abs(unit.y);
+        let forward = abs(unit.z);
+        let mut index = 0.0;
+        let mut horizontal = -unit.z;
+        let mut vertical = -unit.y;
+        let mut major = across;
+        if across >= up && across >= forward {
+            if unit.x < 0.0 {
+                index = 1.0;
+                horizontal = unit.z;
+            }
+        } else if up >= forward {
+            major = up;
+            index = 2.0;
+            horizontal = unit.x;
+            vertical = unit.z;
+            if unit.y < 0.0 {
+                index = 3.0;
+                vertical = -unit.z;
+            }
+        } else {
+            major = forward;
+            index = 4.0;
+            horizontal = unit.x;
+            vertical = -unit.y;
+            if unit.z < 0.0 {
+                index = 5.0;
+                horizontal = -unit.x;
+            }
+        }
+        let span = max(major, 0.000001);
+        let left = 0.5 + 0.5 * horizontal / span;
+        let top = 0.5 - 0.5 * vertical / span;
+        fvec2(
+            (index + clamped(left, texel, 1.0 - texel)) * face,
+            clamped(top, texel, 1.0 - texel),
+        )
+    }
+
+    fn ray(at: Fvec2) -> Fvec4 {
+        let phi = (at.x - 0.5) * (710.0 / 113.0);
+        let theta = at.y * (355.0 / 113.0);
+        let sine = sin(theta);
+        fvec4(sine * sin(phi), cos(theta), -sine * cos(phi), 0.0)
+    }
+
+    fn normalized(vector: Fvec4) -> Fvec4 {
+        let inverse =
+            1.0 / sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z + 0.0000001);
+        vector * inverse
+    }
+
+    fn clamped(value: f32, low: f32, high: f32) -> f32 {
+        min(max(value, low), high)
+    }
+}
+
+pub(crate) fn capture_conversion() -> GraphicsProgram {
+    capture_atlas()
 }
 
 pub(crate) fn bloom_extract() -> GraphicsProgram {

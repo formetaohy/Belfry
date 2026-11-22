@@ -189,6 +189,7 @@ fn environment(entry: &EnvironmentEntry) -> Toml {
                 ("altitude", Toml::from(atmosphere.altitude)),
             ]),
         )),
+        EnvironmentSource::Capture => fields.push(("capture", Toml::boolean(true))),
     }
     Toml::object(fields)
 }

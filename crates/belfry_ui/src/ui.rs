@@ -127,13 +127,13 @@ impl<A: Clone> Ui<A> {
         self.invalidate();
     }
 
-    pub fn register_texture(
+    pub fn set_textures<'a>(
         &mut self,
-        name: &str,
-        texture: &Texture,
-        sampler: belfry_gpu_device::SamplerDesc,
+        textures: impl IntoIterator<Item = (&'a str, &'a Texture, belfry_gpu_device::SamplerDesc)>,
     ) {
-        self.textures.register(name, texture, sampler);
+        if self.textures.sync(textures) {
+            self.invalidate();
+        }
     }
 
     pub fn input_mut(&mut self) -> &mut Input {

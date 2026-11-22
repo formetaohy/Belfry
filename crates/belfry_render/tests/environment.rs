@@ -1,79 +1,75 @@
-use belfry_render::environment::{
-    LEVELS, Panorama, brdf, decode, encode, filter, irradiance, specular,
-};
+use belfry_gpu_device::{AddressMode, Backend, Filter, GpuContext, GpuRequest};
+use belfry_render::environment::{LEVELS, Panorama, SPECULAR_WIDTH};
+use belfry_render::{Renderer, SamplerDesc, TextureFormat};
 use std::f32::consts::PI;
 
 const WIDTH: u32 = 32;
 const HEIGHT: u32 = 16;
 
 #[test]
-fn a_uniform_sky_lights_every_direction_the_same() {
-    let panorama = Panorama::new(WIDTH, HEIGHT, &vec![1.0; (WIDTH * HEIGHT * 3) as usize]);
-    let held = irradiance(&panorama);
-    assert!((held[0].x * 0.282_095 - PI).abs() < 1e-2);
-    assert!((held[0].y - held[0].x).abs() < 1e-2);
-    assert!((held[0].z - held[0].x).abs() < 1e-2);
-    for coefficient in &held[1..] {
-        assert!(coefficient.length() < 0.1, "{:?}", coefficient);
-    }
-    let prefiltered = specular(&panorama);
-    assert_eq!(prefiltered.levels.len() as u32, LEVELS);
-    for level in &prefiltered.levels {
-        for texel in &level.texels {
-            assert!((texel[0] - 1.0).abs() < 2e-2);
-            assert!((texel[1] - 1.0).abs() < 2e-2);
-            assert!((texel[2] - 1.0).abs() < 2e-2);
-        }
-    }
-    for texel in brdf(16) {
-        assert!((0.0..=1.0).contains(&texel[0]));
-        assert!((0.0..=1.0).contains(&texel[1]));
-        assert!(texel[0] + texel[1] <= 1.001);
+fn a_baked_environment_lights_a_uniform_sky_evenly_and_holds_its_hemispheres_apart() {
+    for backend in belfry_gpu_device::PREFERENCE {
+        baked(*backend);
     }
 }
 
-#[test]
-fn a_prefiltered_environment_survives_its_cache() {
-    let mut rgb = Vec::new();
-    for _ in 0..4 {
-        for x in 0..8 {
-            if !(2..6).contains(&x) {
-                rgb.extend_from_slice(&[2.0, 0.0, 0.0]);
-            } else {
-                rgb.extend_from_slice(&[0.0, 0.0, 2.0]);
-            }
-        }
-    }
-    let panorama = Panorama::new(8, 4, &rgb);
-    let held = filter(&panorama);
-    let bytes = encode(&held);
-    let restored = decode(&bytes).expect("a cached environment loads its prefiltered sky");
-    assert_eq!(restored.levels.len(), held.levels.len());
-    for (left, right) in held.levels.iter().zip(&restored.levels) {
-        assert_eq!((left.width, left.height), (right.width, right.height));
-        assert_eq!(left.texels.len(), right.texels.len());
-        for (left, right) in left.texels.iter().zip(&right.texels) {
-            for channel in 0..4 {
-                assert!((left[channel] - right[channel]).abs() < 2e-3);
-            }
-        }
-    }
+fn baked(backend: Backend) {
+    let context = GpuContext::open(&GpuRequest {
+        backend: Some(backend),
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("no {backend:?} device bakes an environment: {error}"));
+    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    let sampler = renderer.sampler(SamplerDesc {
+        min_filter: Filter::Linear,
+        mag_filter: Filter::Linear,
+        mip_filter: Filter::Linear,
+        address_u: AddressMode::Repeat,
+        address_v: AddressMode::ClampToEdge,
+    });
+    let uniform = Panorama::new(WIDTH, HEIGHT, &vec![1.0; (WIDTH * HEIGHT * 3) as usize]);
+    let texture = uniform.texture(&renderer, "uniform sky");
+    let held = renderer.bake(&texture, &sampler);
+    assert_eq!(held.levels, LEVELS);
+    assert_eq!(held.radiance.format(), TextureFormat::Rgba16Float);
+    assert_eq!(held.radiance.mip_count(), LEVELS);
     assert_eq!(
-        (held.sky.width, held.sky.height),
-        (restored.sky.width, restored.sky.height)
+        (held.radiance.width(), held.radiance.height()),
+        (SPECULAR_WIDTH, SPECULAR_WIDTH / 2),
     );
-    for (left, right) in held.sky.texels.iter().zip(&restored.sky.texels) {
-        for channel in 0..4 {
-            assert!((left[channel] - right[channel]).abs() < 2e-3);
+    let irradiance = held.irradiance;
+    assert!(
+        (irradiance[0].x * 0.282_095 - PI).abs() < 1e-2,
+        "a uniform sky of one bakes the ambient {irradiance:?}",
+    );
+    assert!((irradiance[0].y - irradiance[0].x).abs() < 1e-2);
+    assert!((irradiance[0].z - irradiance[0].x).abs() < 1e-2);
+    for coefficient in &irradiance[1..] {
+        assert!(
+            coefficient.length() < 0.1,
+            "{backend:?} bakes the uniform lobe {coefficient:?}",
+        );
+    }
+
+    let mut rgb = Vec::new();
+    for y in 0..HEIGHT {
+        let texel = if y < HEIGHT / 2 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        for _ in 0..WIDTH {
+            rgb.extend_from_slice(&texel);
         }
     }
-    for (left, right) in held.irradiance.iter().zip(&restored.irradiance) {
-        assert!((left.x - right.x).abs() < 2e-3);
-        assert!((left.y - right.y).abs() < 2e-3);
-        assert!((left.z - right.z).abs() < 2e-3);
-    }
-    assert!(decode(&bytes[..bytes.len() - 1]).is_none());
-    assert!(decode(&[0u8; 8]).is_none());
+    let split = Panorama::new(WIDTH, HEIGHT, &rgb);
+    let texture = split.texture(&renderer, "split sky");
+    let held = renderer.bake(&texture, &sampler);
+    assert!(
+        held.irradiance[1].x > 0.0 && held.irradiance[1].z < 0.0,
+        "{backend:?} bakes a red northern and a blue southern hemisphere into {:?}",
+        held.irradiance[1],
+    );
 }
 
 #[test]

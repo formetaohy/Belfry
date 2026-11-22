@@ -359,7 +359,7 @@ impl Editor {
     }
 
     fn add_node(&mut self, kind: &str) {
-        if !matches!(kind, "mesh" | "camera" | "sun" | "lamp" | "empty") {
+        if !matches!(kind, "mesh" | "camera" | "sun" | "lamp" | "empty" | "probe") {
             self.error = Some(format!("the editor adds no {kind}"));
             return;
         }
@@ -383,6 +383,11 @@ impl Editor {
                 "camera" => crate::default::camera(),
                 "sun" => crate::default::sun(),
                 "lamp" => crate::default::lamp(),
+                "probe" => {
+                    let id = unique_asset(edit, "environment", "probe");
+                    edit.add_capture_environment(&id)?;
+                    crate::default::probe(&id)
+                }
                 _ => Node::new(""),
             };
             node.id = match &parent {

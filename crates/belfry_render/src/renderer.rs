@@ -6,8 +6,9 @@ use crate::abi::{
     ViewRecord, WORKGROUP,
 };
 use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
+use crate::capture::{self, Capture, CaptureFrame, CaptureProbe, Captures, Probe, SceneRevision};
 use crate::environment::BRDF_SIZE;
-use crate::environment::Environment;
+use crate::environment::{Baked, Baker, Environment};
 use crate::frame::{
     Batch, Placement, Screen, ambient_of, arguments_of, bases_of, camera_of, direction_record,
     light_of, record_of, record_of_cascade, record_of_main_view, record_of_view, vector,
@@ -61,6 +62,18 @@ const SKY_BYTES: u64 = size_of::<SkyRecord>() as u64;
 const SKY_VERTICES: u32 = 3;
 const CASCADE_COUNT: u32 = SHADOW_CASCADES;
 
+struct CaptureInputs<'a> {
+    records: &'a [InstanceRecord],
+    batches: &'a [Batch],
+    bases: &'a [u32],
+    slots: u32,
+    opaque: u32,
+    joint_bytes: u64,
+    lighting_bytes: u64,
+    probe_count: u32,
+    tables: Option<BindGroup>,
+}
+
 pub enum Target<'a> {
     Texture(&'a Texture),
     Surface(SurfaceFrame),
@@ -102,6 +115,8 @@ pub struct Renderer {
     brdf_sampler: Sampler,
     radiance: Texture,
     radiance_sampler: Sampler,
+    baker: Baker,
+    captures: Captures,
     ambient: Option<(usize, usize, usize)>,
     cascades: GpuBuffer,
     instances: Growing,
@@ -285,6 +300,8 @@ impl Renderer {
             radiance_sampler.identity(),
         ));
         let probes = Probes::new(&device, &radiance, &radiance_sampler);
+        let baker = Baker::new(context);
+        let captures = Captures::new(context);
         let sky_record = GpuBuffer::new(
             &device,
             "belfry sky",
@@ -390,6 +407,7 @@ impl Renderer {
             brdf_sampler,
             radiance,
             radiance_sampler,
+            baker,
             ambient,
             cascades,
             instances,
@@ -412,6 +430,7 @@ impl Renderer {
             temporality: Temporality::new(&device),
             previous: HashMap::new(),
             probes,
+            captures,
             queue,
             device,
         }
@@ -574,6 +593,10 @@ impl Renderer {
         Sampler::new(&self.device, desc)
     }
 
+    pub fn bake(&mut self, panorama: &Texture, sampler: &Sampler) -> Baked {
+        self.baker.bake(panorama, sampler)
+    }
+
     pub fn material(&mut self, desc: MaterialDesc) -> Material {
         let material = self.materials.add(desc);
         self.materials_changed();
@@ -629,6 +652,14 @@ impl Renderer {
         let (environment, environment_transform) = match ambient.global {
             Some((environment, transform)) => (Some(environment), transform),
             None => (None, Transform::IDENTITY),
+        };
+        let probe = Self::stale_probe(world);
+        let (capture_rotation, capture_intensity) = match ambient.global {
+            Some((held, transform)) => (
+                Mat4::from_quat(transform.rotation.normalize().inverse()),
+                held.intensity,
+            ),
+            None => (Mat4::IDENTITY, 0.0),
         };
         let (probe_count, probe_textures) =
             self.probes
@@ -1065,6 +1096,23 @@ impl Renderer {
             }
             submission.submit(&self.queue);
             self.temporality.finish(pose);
+            self.capture(
+                world,
+                probe,
+                &CaptureInputs {
+                    records: &[],
+                    batches: &[],
+                    bases: &[],
+                    slots: 0,
+                    opaque: 0,
+                    joint_bytes: 0,
+                    lighting_bytes: 0,
+                    probe_count,
+                    tables: None,
+                },
+                capture_rotation,
+                capture_intensity,
+            );
             return;
         }
         self.pick_frame = Some(PickFrame {
@@ -1396,6 +1444,211 @@ impl Renderer {
         }
         submission.submit(&self.queue);
         self.temporality.finish(pose);
+        self.capture(
+            world,
+            probe,
+            &CaptureInputs {
+                records: &records,
+                batches: &batches,
+                bases: &bases,
+                slots,
+                opaque: depth_batches,
+                joint_bytes,
+                lighting_bytes,
+                probe_count,
+                tables: Some(tables.clone()),
+            },
+            capture_rotation,
+            capture_intensity,
+        );
+    }
+
+    pub fn take_captures(&mut self) -> Vec<Capture> {
+        self.captures.take()
+    }
+
+    fn stale_probe(world: &World) -> Option<Probe> {
+        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
+        world.iter::<CaptureProbe>().find_map(|(entity, probe)| {
+            let transform = *world.get::<Transform>(entity)?;
+            let environment = world.get::<Environment>(entity)?.clone();
+            probe.stale(transform, revision).then_some(Probe {
+                entity,
+                transform,
+                probe: *probe,
+                environment,
+            })
+        })
+    }
+
+    fn capture(
+        &mut self,
+        world: &World,
+        probe: Option<Probe>,
+        inputs: &CaptureInputs<'_>,
+        rotation: Mat4,
+        intensity: f32,
+    ) {
+        let Some(probe) = probe else {
+            return;
+        };
+        self.captures.prepare(&CaptureFrame {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            records: inputs.records,
+            slots: inputs.slots,
+            eye: probe.transform.translation,
+            clip_space: self.device.clip_space(),
+            rotation,
+            intensity,
+        });
+        let mut submission = Submission::new(&self.device, "belfry capture");
+        let mut skies = Vec::with_capacity(capture::FACES as usize);
+        for face in 0..capture::FACES {
+            skies.push([
+                self.sky.bind_group(
+                    0,
+                    &[Binding::buffer(program::SKY_VIEW, self.captures.sky(face))],
+                ),
+                self.sky_shade.clone(),
+            ]);
+        }
+        let mut batches = Vec::with_capacity(capture::FACES as usize * inputs.opaque as usize);
+        if inputs.opaque > 0 {
+            let tables = inputs
+                .tables
+                .as_ref()
+                .expect("a captured batch binds the material table of its frame");
+            for face in 0..capture::FACES {
+                for (index, batch) in inputs
+                    .batches
+                    .iter()
+                    .take(inputs.opaque as usize)
+                    .enumerate()
+                {
+                    let geometry = self.meshes.geometry(batch.mesh);
+                    let shade = self.draw.bind_group(
+                        0,
+                        &[
+                            Binding::buffer(
+                                program::DRAW_LIGHT,
+                                self.light.binding(0, LIGHT_BYTES),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_CASCADES,
+                                self.cascades
+                                    .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_DRAWN,
+                                self.captures.drawn(face, inputs.bases[index], batch.count),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_MATERIALS,
+                                self.material_records.buffer().binding(
+                                    0,
+                                    self.materials.records().len() as u64 * MATERIAL_BYTES,
+                                ),
+                            ),
+                            Binding::buffer(program::DRAW_VIEW, self.captures.view(face)),
+                            Binding::buffer(
+                                program::DRAW_PALETTE,
+                                self.joints.buffer().binding(0, inputs.joint_bytes),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_SKINS,
+                                self.meshes.skin_binding(geometry),
+                            ),
+                            Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.fragments()),
+                            Binding::buffer(program::DRAW_HEADS, self.transparency.heads()),
+                            Binding::buffer(program::DRAW_COUNTER, self.transparency.counter()),
+                            Binding::buffer(program::DRAW_SETTINGS, self.transparency.settings()),
+                            Binding::buffer(
+                                program::DRAW_PROBES,
+                                self.probes.record(inputs.probe_count),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_VERTICES,
+                                self.meshes.buffer().binding(
+                                    u64::from(geometry.first) * VERTEX_BYTES,
+                                    u64::from(geometry.count) * VERTEX_BYTES,
+                                ),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_LIGHTS,
+                                self.lighting.buffer().binding(0, inputs.lighting_bytes),
+                            ),
+                        ],
+                    );
+                    batches.push([shade, tables.clone(), self.shade.clone()]);
+                }
+            }
+        }
+        let mut draws = Vec::with_capacity(capture::FACES as usize * (1 + inputs.opaque as usize));
+        let mut batch = 0;
+        for face in 0..capture::FACES {
+            let viewport = Viewport::new(
+                (face * capture::PROBE_RESOLUTION) as f32,
+                0.0,
+                capture::PROBE_RESOLUTION as f32,
+                capture::PROBE_RESOLUTION as f32,
+            );
+            draws
+                .push(Draw::new(&self.sky, &skies[face as usize], SKY_VERTICES).viewport(viewport));
+            for held in inputs.batches.iter().take(inputs.opaque as usize) {
+                let geometry = self.meshes.geometry(held.mesh);
+                draws.push(
+                    Draw::new(&self.draw, &batches[batch], geometry.count)
+                        .instances(held.count)
+                        .viewport(viewport),
+                );
+                batch += 1;
+            }
+        }
+        submission.render(&self.captures.atlas, [0.0, 0.0, 0.0, 1.0], &draws);
+        let convert = [
+            self.captures.convert.bind_group(
+                0,
+                &[Binding::buffer(
+                    program::CAPTURE_SETUP,
+                    self.captures.setup(),
+                )],
+            ),
+            self.captures.convert.bind_group(
+                1,
+                &[
+                    Binding::texture(program::CAPTURE_ATLAS, &self.captures.atlas),
+                    Binding::sampler(program::CAPTURE_SAMPLER, &self.captures.sampler),
+                ],
+            ),
+        ];
+        let panorama = self.captures.panorama(&self.device);
+        submission.render(
+            &panorama,
+            [0.0, 0.0, 0.0, 1.0],
+            &[Draw::new(&self.captures.convert, &convert, 3)],
+        );
+        submission.submit(&self.queue);
+        let baked = self.baker.bake(&panorama, &self.radiance_sampler);
+        let mut environment = Environment::new(
+            baked.radiance,
+            panorama,
+            self.radiance_sampler.clone(),
+            baked.levels,
+            baked.irradiance,
+        );
+        environment.intensity = probe.environment.intensity;
+        environment.background = probe.environment.background;
+        environment.local = probe.environment.local;
+        environment.blend = probe.environment.blend;
+        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
+        let mut marker = probe.probe;
+        marker.captured(probe.transform, revision);
+        self.captures.push(Capture {
+            entity: probe.entity,
+            probe: marker,
+            environment,
+        });
     }
 
     pub fn pick(&mut self, point: Vec2) -> Option<Entity> {

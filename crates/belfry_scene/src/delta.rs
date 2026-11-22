@@ -11,6 +11,7 @@ use crate::skin::SkinEntry;
 use crate::sound::SoundEntry;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Delta {
@@ -49,7 +50,7 @@ impl Delta {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Step {
-    Nodes(Splice<Node>),
+    Nodes(Splice<Arc<Node>>),
     Images(Splice<ImageEntry>),
     Sounds(Splice<SoundEntry>),
     Environments(Splice<EnvironmentEntry>),
@@ -112,12 +113,13 @@ impl Step {
 }
 
 fn hold(scene: &mut Scene, key: &str, held: &Option<BTreeSet<PathBuf>>) {
+    let instances = Arc::make_mut(&mut scene.instances);
     match held {
         Some(keys) => {
-            scene.instances.insert(String::from(key), keys.clone());
+            instances.insert(String::from(key), keys.clone());
         }
         None => {
-            scene.instances.remove(key);
+            instances.remove(key);
         }
     }
 }
@@ -148,15 +150,15 @@ impl<T> Splice<T> {
 }
 
 impl<T: Clone> Splice<T> {
-    fn apply(&self, entries: &mut Vec<T>) {
-        entries.splice(
+    fn apply(&self, entries: &mut Arc<Vec<T>>) {
+        Arc::make_mut(entries).splice(
             self.at..self.at + self.removed.len(),
             self.inserted.iter().cloned(),
         );
     }
 
-    fn revert(&self, entries: &mut Vec<T>) {
-        entries.splice(
+    fn revert(&self, entries: &mut Arc<Vec<T>>) {
+        Arc::make_mut(entries).splice(
             self.at..self.at + self.inserted.len(),
             self.removed.iter().cloned(),
         );
@@ -171,166 +173,40 @@ pub(crate) trait Asset: Clone + PartialEq {
     fn step(splice: Splice<Self>) -> Step;
 }
 
-impl Asset for ImageEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
+macro_rules! assets {
+    ($($entry:ty => $field:ident, $step:ident;)+) => {
+        $(
+            impl Asset for $entry {
+                fn id(&self) -> &str {
+                    &self.id
+                }
 
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.images
-    }
+                fn entries(scene: &mut Scene) -> &mut Vec<Self> {
+                    Arc::make_mut(&mut scene.$field)
+                }
 
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.images
-    }
+                fn held(scene: &Scene) -> &[Self] {
+                    &scene.$field
+                }
 
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Images(splice)
-    }
+                fn step(splice: Splice<Self>) -> Step {
+                    Step::$step(splice)
+                }
+            }
+        )+
+    };
 }
 
-impl Asset for SoundEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.sounds
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.sounds
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Sounds(splice)
-    }
-}
-
-impl Asset for EnvironmentEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.environments
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.environments
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Environments(splice)
-    }
-}
-
-impl Asset for MeshEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.meshes
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.meshes
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Meshes(splice)
-    }
-}
-
-impl Asset for MaterialEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.materials
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.materials
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Materials(splice)
-    }
-}
-
-impl Asset for ModelEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.models
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.models
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Models(splice)
-    }
-}
-
-impl Asset for SkinEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.skins
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.skins
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Skins(splice)
-    }
-}
-
-impl Asset for AnimationEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.animations
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.animations
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Animations(splice)
-    }
-}
-
-impl Asset for GraphEntry {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn entries(scene: &mut Scene) -> &mut Vec<Self> {
-        &mut scene.graphs
-    }
-
-    fn held(scene: &Scene) -> &[Self] {
-        &scene.graphs
-    }
-
-    fn step(splice: Splice<Self>) -> Step {
-        Step::Graphs(splice)
-    }
+assets! {
+    ImageEntry => images, Images;
+    SoundEntry => sounds, Sounds;
+    EnvironmentEntry => environments, Environments;
+    MeshEntry => meshes, Meshes;
+    MaterialEntry => materials, Materials;
+    ModelEntry => models, Models;
+    SkinEntry => skins, Skins;
+    AnimationEntry => animations, Animations;
+    GraphEntry => graphs, Graphs;
 }
 
 pub(crate) fn owned(

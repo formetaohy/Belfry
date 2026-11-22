@@ -46,6 +46,11 @@ pub trait Assets {
     fn environment(&self, id: &str) -> belfry_render::Environment {
         panic!("the assets hold no environment {id}")
     }
+
+    fn capture(&self, _id: &str) -> Option<belfry_render::CaptureProbe> {
+        None
+    }
+
     fn material(&self, id: &str) -> belfry_render::Material;
     fn skin(&self, id: &str) -> SkinData;
     fn animation(&self, id: &str) -> Arc<Clip>;

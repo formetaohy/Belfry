@@ -18,10 +18,6 @@ impl Digest {
             digest: Self(OFFSET),
         }
     }
-
-    pub fn hex(self) -> String {
-        format!("{:032x}", self.0)
-    }
 }
 
 #[derive(Clone, Copy)]

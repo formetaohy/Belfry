@@ -132,3 +132,30 @@ fn edit<T>(
 ) -> Result<T, String> {
     scene.edit(change).map(|(value, _)| value)
 }
+
+#[test]
+fn a_shared_scene_snapshot_keeps_the_nodes_it_copied() {
+    let mut scene = Scene::parse(SCENE, ".", "the test scene");
+    let snapshot = scene.clone();
+    edit(&mut scene, |edit| {
+        edit.set_transform(0, Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)))
+    })
+    .expect("the scene moves the node a");
+    let mut world = World::new();
+    let mut sync = SceneSync::new();
+    sync.sync(&snapshot, &mut world, &NoAssets, false);
+    let a = sync.id("a").expect("the sync holds the node a");
+    assert_eq!(
+        world.get::<LocalTransform>(a),
+        Some(&LocalTransform(Transform::IDENTITY)),
+        "an edited scene rewrites the snapshot it already copied",
+    );
+    sync.sync(&scene, &mut world, &NoAssets, false);
+    assert_eq!(
+        world.get::<LocalTransform>(a),
+        Some(&LocalTransform(Transform::from_translation(Vec3::new(
+            2.0, 0.0, 0.0
+        )))),
+        "the edited scene installs the transform its node holds",
+    );
+}

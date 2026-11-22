@@ -130,6 +130,9 @@ impl SceneComponent for EnvironmentRef {
             environment
         };
         world.insert(entity, environment);
+        if let Some(probe) = assets.capture(self.environment.as_str()) {
+            world.insert(entity, probe);
+        }
     }
 
     fn validate(&self, scene: &Scene, node: &str) -> Result<(), String> {
@@ -193,6 +196,7 @@ impl SceneComponent for EnvironmentRef {
 
     fn remove(world: &mut World, entity: Entity) {
         world.remove::<Environment>(entity);
+        world.remove::<belfry_render::CaptureProbe>(entity);
     }
 
     fn references(&self, kind: ReferenceKind, id: &str) -> bool {

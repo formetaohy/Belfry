@@ -1,6 +1,6 @@
 use belfry_gpu_device::{
-    BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission, Texture, TextureFormat,
-    TextureUsages,
+    AddressMode, BufferUsages, Filter, GpuBuffer, GpuContext, GpuRequest, SamplerDesc, Submission,
+    Texture, TextureFormat, TextureUsages,
 };
 use belfry_math::Vec2;
 use belfry_ui::{Color, Corners, Element, Key, Length, Level, TextStyle, Ui, canvas};
@@ -8,6 +8,13 @@ use belfry_ui::{Color, Corners, Element, Key, Length, Level, TextStyle, Ui, canv
 const SIDE: u32 = 160;
 const BACKGROUND: Color = Color::rgb(0.1, 0.1, 0.1);
 const SCENE: [u8; 4] = [0, 200, 0, 255];
+const SAMPLER: SamplerDesc = SamplerDesc {
+    min_filter: Filter::Nearest,
+    mag_filter: Filter::Nearest,
+    mip_filter: Filter::Nearest,
+    address_u: AddressMode::ClampToEdge,
+    address_v: AddressMode::ClampToEdge,
+};
 
 #[test]
 fn a_user_interface_paints_its_surfaces_glyphs_and_scene() {
@@ -109,4 +116,92 @@ fn a_user_interface_paints_its_surfaces_glyphs_and_scene() {
 
 fn to_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[test]
+fn a_user_interface_recycles_the_texture_slots_of_removed_images() {
+    const RESERVED: u32 = 2;
+    let context = GpuContext::open(&GpuRequest::default())
+        .unwrap_or_else(|error| panic!("no device recycles interface textures: {error}"));
+    let device = context.device();
+    let queue = context.queue();
+    let format = TextureFormat::Rgba8Unorm;
+    let mut ui: Ui<()> = Ui::new(device, queue, format);
+    let target = Texture::new(
+        device,
+        "belfry recycled target",
+        SIDE,
+        SIDE,
+        1,
+        format,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    );
+    let slot = belfry_gpu::TEXTURE_TABLE_CAPACITY - RESERVED;
+    let red = Texture::new(
+        device,
+        "belfry recycled red",
+        1,
+        1,
+        1,
+        format,
+        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+    );
+    let green = Texture::new(
+        device,
+        "belfry recycled green",
+        1,
+        1,
+        1,
+        format,
+        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+    );
+    let mut submission = Submission::new(device, "belfry recycled textures");
+    submission.write_texture(&red, 0, &[255, 0, 0, 255]);
+    submission.write_texture(&green, 0, &[0, 255, 0, 255]);
+    submission.submit(queue);
+    let old = (0..slot)
+        .map(|index| format!("image.{index}"))
+        .collect::<Vec<_>>();
+    let fresh = (0..slot)
+        .map(|index| format!("restored.{index}"))
+        .collect::<Vec<_>>();
+    ui.set_textures(old.iter().map(|name| (name.as_str(), &red, SAMPLER)));
+    ui.set_textures(fresh.iter().map(|name| (name.as_str(), &green, SAMPLER)));
+
+    ui.update(Vec2::splat(SIDE as f32), 1.0, 0.0);
+    let element = {
+        Element::column()
+            .key(Key::new("root"))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .children([
+                canvas(Length::Fixed(64.0), 64.0).view_static(|painter, info| {
+                    painter.image(
+                        info.rect,
+                        Corners::ZERO,
+                        fresh.last().expect("a recycled name"),
+                        [0.0, 0.0, 1.0, 1.0],
+                        Color::WHITE,
+                    );
+                }),
+            ])
+    };
+    ui.present(element);
+    let mut submission = Submission::new(device, "belfry recycled paint");
+    ui.render(&mut submission, &target, None);
+    let readback = GpuBuffer::new(
+        device,
+        "belfry recycled readback",
+        target.readback_bytes(),
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    );
+    submission.copy_texture(&target, &readback, 0);
+    let index = submission.submit(queue);
+    let bytes = readback.read(queue, index, target.readback_bytes());
+    let at = (32 * target.row_stride() + 32 * 4) as usize;
+    let pixel = [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]];
+    assert!(
+        pixel[1] > 200 && pixel[0] < 32,
+        "the interface paints {pixel:?} where the recycled slot holds green",
+    );
 }

@@ -1,6 +1,7 @@
 use crate::reference::ModelId;
 use crate::shape::Shape;
 use belfry_render::Vertex;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshAsset {
@@ -10,7 +11,7 @@ pub struct MeshAsset {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Geometry {
     Shape(Shape),
-    Vertices(Vec<Vertex>),
+    Vertices(Arc<[Vertex]>),
     Model {
         model: ModelId,
         mesh: u32,
@@ -27,7 +28,7 @@ impl MeshAsset {
 
     pub fn vertices(vertices: Vec<Vertex>) -> Self {
         Self {
-            geometry: Geometry::Vertices(vertices),
+            geometry: Geometry::Vertices(Arc::from(vertices)),
         }
     }
 
@@ -80,7 +81,7 @@ impl MeshAsset {
     pub fn vertices_of(&self) -> Vec<Vertex> {
         match &self.geometry {
             Geometry::Shape(shape) => shape.vertices(),
-            Geometry::Vertices(vertices) => vertices.clone(),
+            Geometry::Vertices(vertices) => vertices.to_vec(),
             Geometry::Model { .. } => {
                 panic!("an imported mesh reads its vertices from its model")
             }

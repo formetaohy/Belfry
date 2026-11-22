@@ -10,7 +10,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-bytemuck = { workspace = true }
 belfry_animation = { workspace = true }
 belfry_audio = { workspace = true }
 belfry_ecs = { workspace = true }
@@ -20,7 +19,6 @@ belfry_gltf = { workspace = true }
 belfry_physics = { workspace = true }
 belfry_image = { workspace = true }
 belfry_render = { workspace = true }
-half = { workspace = true }
 belfry_toml = { workspace = true }
 belfry_scene_macro = { workspace = true }
 

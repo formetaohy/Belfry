@@ -1,5 +1,6 @@
 use belfry_gpu::record;
 use belfry_gpu::{Fvec4, Uvec4};
+use std::mem::size_of;
 
 pub const WORKGROUP: u32 = 64;
 pub const ARGUMENT_WORDS: u32 = 4;
@@ -17,10 +18,21 @@ pub const NO_HIGHLIGHT: u32 = u32::MAX;
 pub const ALPHA_OPAQUE: u32 = 0;
 pub const ALPHA_MASK: u32 = 1;
 pub const ALPHA_BLEND: u32 = 2;
+pub const IRRADIANCE_PARTIALS: u32 = 1024;
+pub const IRRADIANCE_WORDS: u32 = 36;
+pub const IRRADIANCE_TOTAL_BYTES: u64 = 108;
 
 const _: () = assert!(
     SHADOW_CASCADES == SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_COLUMNS,
     "a square atlas holds every cascade",
+);
+const _: () = assert!(
+    IRRADIANCE_WORDS as usize * 4 == size_of::<IrradianceRecord>(),
+    "the irradiance reduction strides the record its shader reads",
+);
+const _: () = assert!(
+    IRRADIANCE_TOTAL_BYTES == 27 * 4,
+    "an irradiance total holds nine coefficient triples",
 );
 
 #[repr(C)]
@@ -301,6 +313,39 @@ record!(SkyRecord, SKY, "Sky" {
     pad0: u32 => U32,
     pad1: u32 => U32,
     pad2: u32 => U32,
+});
+
+record!(BakeLevelRecord, BAKE_LEVEL, "BakeLevel" {
+    roughness: f32 => F32,
+    vertical: f32 => F32,
+    pad0: u32 => U32,
+    pad1: u32 => U32,
+});
+
+record!(IrradianceSetupRecord, IRRADIANCE_SETUP, "IrradianceSetup" {
+    width: u32 => U32,
+    height: u32 => U32,
+    texels: u32 => U32,
+    partials: u32 => U32,
+});
+
+record!(IrradianceRecord, IRRADIANCE, "Irradiance" {
+    coefficient0: Fvec4 => F32x4,
+    coefficient1: Fvec4 => F32x4,
+    coefficient2: Fvec4 => F32x4,
+    coefficient3: Fvec4 => F32x4,
+    coefficient4: Fvec4 => F32x4,
+    coefficient5: Fvec4 => F32x4,
+    coefficient6: Fvec4 => F32x4,
+    coefficient7: Fvec4 => F32x4,
+    coefficient8: Fvec4 => F32x4,
+});
+
+record!(AtlasRecord, ATLAS, "Atlas" {
+    face: f32 => F32,
+    vertical: f32 => F32,
+    texel: f32 => F32,
+    pad0: f32 => F32,
 });
 
 record!(BloomRecord, BLOOM, "Bloom" {

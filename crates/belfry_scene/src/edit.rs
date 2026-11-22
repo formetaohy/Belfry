@@ -17,6 +17,7 @@ use belfry_render::environment::Atmosphere;
 use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub struct Edit<'a> {
     pub(crate) scene: &'a mut Scene,
@@ -51,8 +52,9 @@ impl<'a> Edit<'a> {
 
     pub(crate) fn insert_nodes(&mut self, at: usize, nodes: Vec<Node>) {
         assert!(!nodes.is_empty(), "an edit inserts at least one node");
-        self.scene.nodes.splice(at, 0, nodes.clone());
-        self.delta.push(Step::Nodes(Splice::insert(at, nodes)));
+        let inserted = nodes.into_iter().map(Arc::new).collect::<Vec<_>>();
+        self.scene.nodes.splice(at, 0, inserted.clone());
+        self.delta.push(Step::Nodes(Splice::insert(at, inserted)));
     }
 
     pub(crate) fn append_nodes(&mut self, nodes: Vec<Node>) {
@@ -78,14 +80,15 @@ impl<'a> Edit<'a> {
     }
 
     pub(crate) fn place_node(&mut self, at: usize, node: Node) {
-        if self.scene.nodes[at] == node {
+        let inserted = Arc::new(node);
+        if self.scene.nodes[at] == *inserted {
             return;
         }
-        let removed = self.scene.nodes.replace(at, node.clone());
+        let removed = self.scene.nodes.replace(at, inserted.clone());
         self.delta.push(Step::Nodes(Splice {
             at,
             removed: vec![removed],
-            inserted: vec![node],
+            inserted: vec![inserted],
         }));
     }
 
@@ -137,17 +140,19 @@ impl<'a> Edit<'a> {
     }
 
     pub(crate) fn add_owner(&mut self, owner: Owned) {
-        let at = self.scene.owners.len();
-        self.scene.owners.push(owner.clone());
+        let owners = Arc::make_mut(&mut self.scene.owners);
+        let at = owners.len();
+        owners.push(owner.clone());
         self.delta
             .push(Step::Owners(Splice::insert(at, vec![owner])));
     }
 
     pub(crate) fn set_owners(&mut self, owners: Vec<Owned>) {
-        if self.scene.owners == owners {
+        let held = Arc::make_mut(&mut self.scene.owners);
+        if *held == owners {
             return;
         }
-        let before = std::mem::replace(&mut self.scene.owners, owners.clone());
+        let before = std::mem::replace(held, owners.clone());
         self.delta.push(Step::Owners(Splice {
             at: 0,
             removed: before,
@@ -167,12 +172,13 @@ impl<'a> Edit<'a> {
             .iter()
             .position(|held| held.kind == kind && held.id == id)
             .expect("the scene owns the asset it changes");
-        let mut owner = self.scene.owners[at].clone();
+        let owners = Arc::make_mut(&mut self.scene.owners);
+        let mut owner = owners[at].clone();
         change(&mut owner);
-        if self.scene.owners[at] == owner {
+        if owners[at] == owner {
             return;
         }
-        let removed = std::mem::replace(&mut self.scene.owners[at], owner.clone());
+        let removed = std::mem::replace(&mut owners[at], owner.clone());
         self.delta.push(Step::Owners(Splice {
             at,
             removed: vec![removed],
@@ -185,12 +191,13 @@ impl<'a> Edit<'a> {
         if before == keys {
             return;
         }
+        let instances = Arc::make_mut(&mut self.scene.instances);
         match &keys {
             Some(held) => {
-                self.scene.instances.insert(String::from(key), held.clone());
+                instances.insert(String::from(key), held.clone());
             }
             None => {
-                self.scene.instances.remove(key);
+                instances.remove(key);
             }
         }
         self.delta.push(Step::Instances {
@@ -290,6 +297,15 @@ impl<'a> Edit<'a> {
         self.adopt(crate::environment::EnvironmentEntry::with_atmosphere(
             id, atmosphere,
         ));
+        Ok(Target::Environment(String::from(id)))
+    }
+
+    pub fn add_capture_environment(&mut self, id: &str) -> Result<Target, String> {
+        assert_id(id, "environment")?;
+        if self.environment_index(id).is_some() {
+            return Err(format!("the scene holds the environment {id}"));
+        }
+        self.adopt(crate::environment::EnvironmentEntry::captured(id));
         Ok(Target::Environment(String::from(id)))
     }
 

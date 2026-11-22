@@ -72,17 +72,17 @@ pub(crate) fn document(text: &str, root: PathBuf, what: &str, registry: Arc<Regi
         root,
         registry,
         prefab,
-        owners: Vec::new(),
-        instances: BTreeMap::new(),
-        models,
-        images,
-        sounds,
-        environments,
-        meshes,
-        materials,
-        skins,
-        animations,
-        graphs,
+        owners: Arc::new(Vec::new()),
+        instances: Arc::new(BTreeMap::new()),
+        models: Arc::new(models),
+        images: Arc::new(images),
+        sounds: Arc::new(sounds),
+        environments: Arc::new(environments),
+        meshes: Arc::new(meshes),
+        materials: Arc::new(materials),
+        skins: Arc::new(skins),
+        animations: Arc::new(animations),
+        graphs: Arc::new(graphs),
         nodes: Nodes::from(nodes),
     }
 }
@@ -144,18 +144,24 @@ fn environment(value: Toml, what: &str) -> EnvironmentEntry {
     let id = fields.need("id").string_value(&format!("the id of {what}"));
     let path = fields.take("path");
     let atmosphere = fields.take("atmosphere");
+    let capture = fields
+        .take("capture")
+        .is_some_and(|value| value.boolean_value(&format!("the capture of {what}")));
     fields.done();
-    match (path, atmosphere) {
-        (Some(path), None) => {
+    match (path, atmosphere, capture) {
+        (Some(path), None, false) => {
             let path = path.string_value(&format!("the path of {what}"));
             EnvironmentEntry::new(id, PathBuf::from(path))
         }
-        (None, Some(value)) => {
+        (None, Some(value), false) => {
             let what = format!("the atmosphere of {what}");
             EnvironmentEntry::with_atmosphere(id, atmosphere_asset(value, &what))
         }
-        (Some(_), Some(_)) => panic!("{what} holds a panorama and an atmosphere"),
-        (None, None) => panic!("{what} holds neither a panorama nor an atmosphere"),
+        (None, None, true) => EnvironmentEntry::captured(id),
+        (Some(_), Some(_), _) => panic!("{what} holds a panorama and an atmosphere"),
+        (Some(_), None, true) => panic!("{what} holds a panorama and a capture"),
+        (None, Some(_), true) => panic!("{what} holds an atmosphere and a capture"),
+        (None, None, false) => panic!("{what} holds no panorama, atmosphere or capture"),
     }
 }
 

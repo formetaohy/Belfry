@@ -1,6 +1,9 @@
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{Camera, DirectionalLight, PointLight};
-use belfry_scene::{AudioBusRef, AudioListenerRef, MeshRef, Node, Registry, Scene, Shape};
+use belfry_scene::{
+    AudioBusRef, AudioListenerRef, EnvironmentId, EnvironmentRef, MeshRef, Node, Registry, Scene,
+    Shape,
+};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,4 +73,14 @@ pub(crate) fn lamp() -> Node {
     Node::new("")
         .with(Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)))
         .with(PointLight::new(Vec3::ONE, 20.0, 10.0))
+}
+
+pub(crate) fn probe(environment: &str) -> Node {
+    Node::new("")
+        .with(Transform::from_scale_rotation_translation(
+            Vec3::splat(2.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 1.0, 0.0),
+        ))
+        .with(EnvironmentRef::new(EnvironmentId::new(environment)).probe(0.5))
 }

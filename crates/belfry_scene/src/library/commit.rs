@@ -12,6 +12,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 const ITEM_LIMIT: usize = 64;
+const EMPTY_TEXEL: &[u8] = &[0, 0, 0, 0, 0, 0, 0x00, 0x3C];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -390,37 +391,7 @@ impl Library {
         );
     }
 
-    fn commit_environment(&mut self, renderer: &Renderer, item: &PreparedEnvironment) {
-        let levels = &item.image.levels;
-        let first = &levels[0];
-        let texture = renderer.texture(
-            &item.entry.id,
-            first.width,
-            first.height,
-            levels.len() as u32,
-            TextureFormat::Rgba16Float,
-            TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-        );
-        let held = levels
-            .iter()
-            .map(|level| halves(&level.texels))
-            .collect::<Vec<_>>();
-        let bytes = held
-            .iter()
-            .map(|level| bytemuck::cast_slice(level.as_slice()))
-            .collect::<Vec<&[u8]>>();
-        renderer.write_texture(&texture, &bytes);
-        let sky = &item.image.sky;
-        let panorama = renderer.texture(
-            &item.entry.id,
-            sky.width,
-            sky.height,
-            1,
-            TextureFormat::Rgba16Float,
-            TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-        );
-        let panorama_bytes = halves(&sky.texels);
-        renderer.write_texture(&panorama, &[bytemuck::cast_slice(&panorama_bytes)]);
+    fn commit_environment(&mut self, renderer: &mut Renderer, item: &PreparedEnvironment) {
         let sampler = self.sampler(
             renderer,
             SamplerDesc {
@@ -431,21 +402,50 @@ impl Library {
                 address_v: belfry_render::AddressMode::ClampToEdge,
             },
         );
-        let environment = Environment::new(
-            texture,
-            panorama,
-            sampler,
-            levels.len() as u32,
-            item.image.irradiance,
-        );
-        let environment = match item.entry.atmosphere() {
-            Some(atmosphere) => environment.lit(atmosphere.sun_intensity, true),
-            None => environment,
+        let environment = if item.entry.capture() {
+            let radiance = renderer.texture(
+                &item.entry.id,
+                1,
+                1,
+                1,
+                TextureFormat::Rgba16Float,
+                TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+            );
+            renderer.write_texture(&radiance, &[EMPTY_TEXEL]);
+            let panorama = renderer.texture(
+                &format!("{}.panorama", item.entry.id),
+                1,
+                1,
+                1,
+                TextureFormat::Rgba16Float,
+                TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+            );
+            renderer.write_texture(&panorama, &[EMPTY_TEXEL]);
+            Environment::new(radiance, panorama, sampler, 1, [belfry_math::Vec3::ZERO; 9])
+        } else {
+            let panorama = item.panorama.texture(renderer, &item.entry.id);
+            let background = match &item.sky {
+                Some(sky) => sky.texture(renderer, &format!("{}.sky", item.entry.id)),
+                None => panorama.clone(),
+            };
+            let baked = renderer.bake(&panorama, &sampler);
+            let environment = Environment::new(
+                baked.radiance,
+                background,
+                sampler,
+                baked.levels,
+                baked.irradiance,
+            );
+            match item.entry.atmosphere() {
+                Some(atmosphere) => environment.lit(atmosphere.sun_intensity, true),
+                None => environment,
+            }
         };
         self.environments.insert(
             item.entry.id.clone(),
             super::EnvironmentRecord {
                 fingerprint: item.fingerprint,
+                capture: item.entry.capture(),
                 environment,
             },
         );
@@ -453,21 +453,11 @@ impl Library {
 }
 
 fn environment_bytes(item: &PreparedEnvironment) -> u64 {
-    let levels = item
-        .image
-        .levels
-        .iter()
-        .map(|level| level.texels.len() as u64 * 8)
-        .sum::<u64>();
-    levels + item.image.sky.texels.len() as u64 * 8
-}
-
-fn halves(texels: &[[f32; 4]]) -> Vec<u16> {
-    texels
-        .iter()
-        .flat_map(|texel| texel.iter())
-        .map(|value| half::f16::from_f32(*value).to_bits())
-        .collect()
+    let panorama = u64::from(item.panorama.width()) * u64::from(item.panorama.height()) * 8;
+    let sky = item.sky.as_ref().map_or(0, |sky| {
+        u64::from(sky.width()) * u64::from(sky.height()) * 8
+    });
+    panorama + sky
 }
 
 fn mesh_bytes(item: &PreparedMesh) -> u64 {

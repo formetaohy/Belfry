@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub enum EnvironmentSource {
     Panorama(PathBuf),
     Atmosphere(Atmosphere),
+    Capture,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,18 +30,29 @@ impl EnvironmentEntry {
         }
     }
 
+    pub fn captured(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            source: EnvironmentSource::Capture,
+        }
+    }
+
     pub fn panorama(&self) -> Option<&Path> {
         match &self.source {
             EnvironmentSource::Panorama(path) => Some(path),
-            EnvironmentSource::Atmosphere(_) => None,
+            EnvironmentSource::Atmosphere(_) | EnvironmentSource::Capture => None,
         }
     }
 
     pub fn atmosphere(&self) -> Option<&Atmosphere> {
         match &self.source {
-            EnvironmentSource::Panorama(_) => None,
+            EnvironmentSource::Panorama(_) | EnvironmentSource::Capture => None,
             EnvironmentSource::Atmosphere(atmosphere) => Some(atmosphere),
         }
+    }
+
+    pub fn capture(&self) -> bool {
+        matches!(self.source, EnvironmentSource::Capture)
     }
 }
 

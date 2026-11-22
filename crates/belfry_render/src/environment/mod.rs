@@ -1,27 +1,22 @@
 mod atmosphere;
+mod bake;
 mod brdf;
-mod cache;
-mod filter;
-mod irradiance;
 mod panorama;
 mod sample;
-mod sky;
-mod specular;
 
 use belfry_gpu_device::{Sampler, Texture, TextureFormat};
 use belfry_math::Vec3;
 
 pub use atmosphere::{Atmosphere, MODEL_VERSION};
+pub use bake::Baked;
 pub use brdf::brdf;
-pub use cache::{CACHE_VERSION, decode, encode};
-pub use filter::{Prefiltered, filter, filter_with_sky};
-pub use irradiance::irradiance;
 pub use panorama::Panorama;
-pub use sky::{SKY_WIDTH, Sky, sky};
-pub use specular::{LEVELS, Level, Specular, specular};
+
+pub(crate) use bake::Baker;
 
 pub const BRDF_SIZE: u32 = 64;
 pub const BRDF_SAMPLES: u32 = 128;
+pub const LEVELS: u32 = 8;
 pub const SPECULAR_WIDTH: u32 = 256;
 pub const SPECULAR_SAMPLES: u32 = 128;
 

@@ -569,6 +569,11 @@ fn set_environment(
                 }
             }
         }
+        crate::environment::EnvironmentSource::Capture => {
+            return Err(format!(
+                "the captured environment {id} holds no authored property {field}",
+            ));
+        }
     }
     Ok(Effect::Structure)
 }
@@ -731,6 +736,7 @@ fn environment_property(
             "altitude" => Some(Value::Number(atmosphere.altitude)),
             _ => None,
         },
+        crate::environment::EnvironmentSource::Capture => None,
     }
 }
 

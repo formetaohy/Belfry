@@ -53,6 +53,7 @@ pub(crate) enum Command {
     },
     Render {
         target: Texture,
+        level: u32,
         clear: [f32; 4],
         draws: Vec<RecordedDraw>,
     },
@@ -189,6 +190,16 @@ impl Submission {
     }
 
     pub fn render(&mut self, target: &Texture, clear: [f32; 4], draws: &[Draw<'_>]) {
+        self.render_level(target, 0, clear, draws);
+    }
+
+    pub fn render_level(
+        &mut self,
+        target: &Texture,
+        level: u32,
+        clear: [f32; 4],
+        draws: &[Draw<'_>],
+    ) {
         assert!(
             target.device().same(&self.device),
             "a render pass crosses devices"
@@ -197,6 +208,12 @@ impl Submission {
             target.usages().contains(TextureUsages::RENDER_ATTACHMENT),
             "a render pass draws into a render attachment"
         );
+        assert!(
+            level < target.mip_count(),
+            "a render pass draws into the level {level} of a {} level texture",
+            target.mip_count(),
+        );
+        let (width, height) = target.level_extent(level);
         let draws = draws
             .iter()
             .map(|draw| {
@@ -276,12 +293,10 @@ impl Submission {
                 };
                 let viewport = draw
                     .viewport
-                    .unwrap_or_else(|| Viewport::full(target.width(), target.height()));
-                viewport.assert_within(target.width(), target.height());
-                let scissor = draw
-                    .scissor
-                    .unwrap_or_else(|| Scissor::full(target.width(), target.height()));
-                scissor.assert_within(target.width(), target.height());
+                    .unwrap_or_else(|| Viewport::full(width, height));
+                viewport.assert_within(width, height);
+                let scissor = draw.scissor.unwrap_or_else(|| Scissor::full(width, height));
+                scissor.assert_within(width, height);
                 RecordedDraw {
                     pipeline: pipeline.clone(),
                     groups: draw.groups.to_vec(),
@@ -293,6 +308,7 @@ impl Submission {
             .collect();
         self.commands.push(Command::Render {
             target: target.clone(),
+            level,
             clear,
             draws,
         });

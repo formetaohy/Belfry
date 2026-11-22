@@ -11,9 +11,9 @@ use crate::sound::SoundEntry;
 use crate::source::Sources;
 use belfry_animation::Clip;
 use belfry_audio::Source;
-use belfry_gpu_device::ArtifactCache;
 use belfry_image::ColorSpace;
 use belfry_render::TextureFormat;
+use belfry_render::environment::Panorama;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -27,7 +27,6 @@ pub(super) struct Job {
     pub(super) fingerprints: Fingerprints,
     pub(super) textures: HashSet<TextureKey>,
     pub(super) sources: Sources,
-    pub(super) environment_cache: ArtifactCache,
 }
 
 #[derive(Clone, Default)]
@@ -102,7 +101,8 @@ pub(super) struct PreparedSound {
 pub(super) struct PreparedEnvironment {
     pub(super) entry: EnvironmentEntry,
     pub(super) fingerprint: Digest,
-    pub(super) image: belfry_render::environment::Prefiltered,
+    pub(super) panorama: Panorama,
+    pub(super) sky: Option<Panorama>,
 }
 
 #[derive(Default)]

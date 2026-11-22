@@ -169,6 +169,7 @@ pub(crate) struct Texture {
 }
 
 struct Target {
+    view: Retained<ProtocolObject<dyn MTLTexture>>,
     depth: Retained<ProtocolObject<dyn MTLTexture>>,
 }
 
@@ -188,7 +189,7 @@ pub(crate) struct Present {
 
 struct TextureResource {
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
-    target: Option<Target>,
+    targets: Vec<Target>,
     width: u32,
     height: u32,
     format: TextureFormat,
@@ -724,15 +725,44 @@ impl Device {
             .raw
             .newTextureWithDescriptor(&descriptor)
             .unwrap_or_else(|| panic!("allocating a Metal texture of {width} by {height} failed"));
-        let target = usages
-            .contains(TextureUsages::RENDER_ATTACHMENT)
-            .then(|| Target {
-                depth: self.depth_texture(width, height),
-            });
+        let targets = if usages.contains(TextureUsages::RENDER_ATTACHMENT) {
+            (0..mip_levels)
+                .map(|level| {
+                    let extent = ((width >> level).max(1), (height >> level).max(1));
+                    let view = if level == 0 {
+                        raw.clone()
+                    } else {
+                        unsafe {
+                            raw.newTextureViewWithPixelFormat_textureType_levels_slices(
+                                declared,
+                                MTLTextureType::Type2D,
+                                NSRange {
+                                    location: level as usize,
+                                    length: 1,
+                                },
+                                NSRange {
+                                    location: 0,
+                                    length: 1,
+                                },
+                            )
+                            .unwrap_or_else(|| {
+                                panic!("a Metal texture views its own level {level}")
+                            })
+                        }
+                    };
+                    Target {
+                        view,
+                        depth: self.depth_texture(extent.0, extent.1),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Texture {
             resource: Arc::new(TextureResource {
                 raw,
-                target,
+                targets,
                 width,
                 height,
                 format,
@@ -1077,13 +1107,18 @@ impl Device {
                 }
                 Command::Render {
                     target,
+                    level,
                     clear,
                     draws,
                 } => {
                     let texture = native_texture(target.native());
+                    let target = texture
+                        .targets
+                        .get(*level as usize)
+                        .expect("a render level names a level its target holds");
                     let pass = MTLRenderPassDescriptor::renderPassDescriptor();
                     let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
-                    attachment.setTexture(Some(&texture.raw));
+                    attachment.setTexture(Some(&target.view));
                     attachment.setLoadAction(MTLLoadAction::Clear);
                     attachment.setStoreAction(MTLStoreAction::Store);
                     attachment.setClearColor(MTLClearColor {
@@ -1092,10 +1127,6 @@ impl Device {
                         blue: f64::from(clear[2]),
                         alpha: f64::from(clear[3]),
                     });
-                    let target = texture
-                        .target
-                        .as_ref()
-                        .expect("a render target holds its depth attachment");
                     let depth = pass.depthAttachment();
                     depth.setTexture(Some(&target.depth));
                     depth.setLoadAction(MTLLoadAction::Clear);
@@ -1337,7 +1368,7 @@ impl Device {
                 Command::Present { texture, native } => {
                     let texture = native_texture(texture.native());
                     assert!(
-                        texture.target.is_some(),
+                        !texture.targets.is_empty(),
                         "a presented Metal texture holds its render target"
                     );
                     presenting = Some(native.metal());
@@ -1660,8 +1691,11 @@ impl Surface {
             let depth = self.device.depth_texture(width, height);
             let native = Texture {
                 resource: Arc::new(TextureResource {
-                    raw: texture,
-                    target: Some(Target { depth }),
+                    raw: texture.clone(),
+                    targets: vec![Target {
+                        view: texture,
+                        depth,
+                    }],
                     width,
                     height,
                     format: TextureFormat::Bgra8Unorm,

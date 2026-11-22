@@ -63,6 +63,7 @@ pub use material::{MaterialAsset, MaterialEntry};
 pub use mesh::{MeshAsset, MeshEntry};
 pub use model::ModelEntry;
 pub use node::{AnimationRef, InstanceOverride, MeshRef, Node, SceneNode, SkinRef};
+pub use nodes::Nodes;
 pub use reference::{
     AnimationId, AudioBusId, EnvironmentId, GraphId, ImageId, MaterialId, MeshId, ModelId, NodeId,
     SkinId,

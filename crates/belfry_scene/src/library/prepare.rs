@@ -294,7 +294,7 @@ pub(super) fn mesh_data(
 ) -> Result<MeshData, String> {
     let (vertices, skin) = match &entry.asset.geometry {
         Geometry::Shape(shape) => (shape.vertices(), None),
-        Geometry::Vertices(vertices) => (vertices.clone(), None),
+        Geometry::Vertices(vertices) => (vertices.to_vec(), None),
         Geometry::Model {
             model,
             mesh,
@@ -423,7 +423,7 @@ pub(super) fn environment_data(
     scene: &Scene,
     entry: &EnvironmentEntry,
     sources: &mut Sources,
-) -> Result<belfry_render::environment::Prefiltered, String> {
+) -> Result<(Panorama, Option<Panorama>), String> {
     match &entry.source {
         EnvironmentSource::Panorama(path) => {
             let file = scene.root().join(path);
@@ -432,24 +432,18 @@ pub(super) fn environment_data(
                 Radiance::decode(&bytes, &format!("the environment {}", file.display()))
             }))
             .map_err(|payload| panic_message(payload.as_ref()))?;
-            let panorama = Panorama::new(radiance.width(), radiance.height(), radiance.rgb());
-            catch_unwind(AssertUnwindSafe(|| {
-                belfry_render::environment::filter(&panorama)
-            }))
-            .map_err(|payload| panic_message(payload.as_ref()))
+            Ok((
+                Panorama::new(radiance.width(), radiance.height(), radiance.rgb()),
+                None,
+            ))
         }
-        EnvironmentSource::Atmosphere(atmosphere) => atmosphere_data(atmosphere),
+        EnvironmentSource::Atmosphere(atmosphere) => catch_unwind(AssertUnwindSafe(|| {
+            let (radiance, sky) = atmosphere.panoramas(ATMOSPHERE_WIDTH);
+            (radiance, Some(sky))
+        }))
+        .map_err(|payload| panic_message(payload.as_ref())),
+        EnvironmentSource::Capture => Ok((Panorama::new(1, 1, &[0.0, 0.0, 0.0]), None)),
     }
-}
-
-fn atmosphere_data(
-    atmosphere: &Atmosphere,
-) -> Result<belfry_render::environment::Prefiltered, String> {
-    catch_unwind(AssertUnwindSafe(|| {
-        let (radiance, sky) = atmosphere.panoramas(ATMOSPHERE_WIDTH);
-        belfry_render::environment::filter_with_sky(&radiance, &sky)
-    }))
-    .map_err(|payload| panic_message(payload.as_ref()))
 }
 
 pub(super) fn atmosphere_fingerprint(atmosphere: &Atmosphere) -> Digest {
@@ -574,7 +568,7 @@ pub(super) fn mesh_fingerprint(entry: &MeshEntry, model: Option<Digest>, wanted:
         }
         Geometry::Vertices(vertices) => {
             digest.text("vertices").number(vertices.len() as u64);
-            for vertex in vertices {
+            for vertex in vertices.iter() {
                 vertex_digest(&mut digest, vertex);
             }
         }

@@ -4,7 +4,7 @@ use belfry_gpu_device::{
     TextureTable, TextureUsages,
 };
 use belfry_text::Text;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 
@@ -37,6 +37,7 @@ pub(crate) struct Textures {
     queue: Queue,
     table: TextureTable,
     samplers: SamplerTable,
+    white: Texture,
     atlas: Option<Texture>,
     atlas_revision: Option<u64>,
     atlas_index: u32,
@@ -48,7 +49,7 @@ pub(crate) struct Textures {
 
 impl Textures {
     pub(crate) fn new(device: &Device, queue: &Queue) -> Self {
-        let white_texture = Texture::new(
+        let white = Texture::new(
             device,
             "belfry ui white",
             1,
@@ -57,10 +58,10 @@ impl Textures {
             TextureFormat::Rgba8Unorm,
             TextureUsages::SAMPLED | TextureUsages::COPY_DST,
         );
-        white_texture.write(queue, &WHITE);
-        let mut table = TextureTable::new(device, TEXTURE_TABLE_CAPACITY, &white_texture);
-        let scene_index = table.add(&white_texture);
-        let atlas_index = table.add(&white_texture);
+        white.write(queue, &WHITE);
+        let mut table = TextureTable::new(device, TEXTURE_TABLE_CAPACITY, &white);
+        let scene_index = table.add(&white);
+        let atlas_index = table.add(&white);
         let mut samplers = SamplerTable::new(
             device,
             SAMPLER_TABLE_CAPACITY,
@@ -73,11 +74,12 @@ impl Textures {
             queue: queue.clone(),
             table,
             samplers,
+            white: white.clone(),
             atlas: None,
             atlas_revision: None,
             atlas_index,
             scene_index,
-            scene_identity: white_texture.identity(),
+            scene_identity: white.identity(),
             named: HashMap::new(),
             generation: 0,
         }
@@ -112,20 +114,46 @@ impl Textures {
         self.atlas_revision = Some(revision);
     }
 
-    pub(crate) fn register(&mut self, name: &str, texture: &Texture, sampler: SamplerDesc) {
-        let sampler = self
-            .samplers
-            .add_shared(&Sampler::new(&self.device, sampler));
-        let identity = texture.identity();
-        if let Some(named) = self.named.get_mut(name) {
-            if named.identity != identity {
-                self.table.set(named.index, texture);
-                named.identity = identity;
+    pub(crate) fn sync<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'a str, &'a Texture, SamplerDesc)>,
+    ) -> bool {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        let wanted = entries
+            .iter()
+            .map(|(name, ..)| *name)
+            .collect::<HashSet<_>>();
+        let mut changed = false;
+        let stale = self
+            .named
+            .iter()
+            .filter(|(name, _)| !wanted.contains(name.as_str()))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in stale {
+            let named = self
+                .named
+                .remove(&name)
+                .expect("a released interface texture names its entry");
+            self.table.release(named.index, &self.white);
+            changed = true;
+        }
+        for (name, texture, sampler) in entries {
+            let sampler = self.samplers.add_described(sampler);
+            let identity = texture.identity();
+            if let Some(named) = self.named.get_mut(name) {
+                if named.identity != identity {
+                    self.table.set(named.index, texture);
+                    named.identity = identity;
+                    changed = true;
+                }
+                if named.sampler != sampler {
+                    named.sampler = sampler;
+                    changed = true;
+                }
+                continue;
             }
-            named.sampler = sampler;
-        } else {
-            self.generation = self.generation.wrapping_add(1);
-            let index = self.table.add_shared(texture);
+            let index = self.table.add(texture);
             self.named.insert(
                 String::from(name),
                 Named {
@@ -134,7 +162,12 @@ impl Textures {
                     identity,
                 },
             );
+            changed = true;
         }
+        if changed {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        changed
     }
 
     pub(crate) fn index(&self, name: &str) -> u32 {

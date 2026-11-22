@@ -827,11 +827,15 @@ struct GroupResource {
 }
 
 struct Target {
+    view: vk::ImageView,
+    owned_view: bool,
     depth: vk::Image,
     depth_memory: vk::DeviceMemory,
     depth_view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
+    width: u32,
+    height: u32,
 }
 
 struct TextureResource {
@@ -839,7 +843,7 @@ struct TextureResource {
     image: vk::Image,
     memory: Option<vk::DeviceMemory>,
     view: vk::ImageView,
-    target: Option<Target>,
+    targets: Vec<Target>,
     width: u32,
     height: u32,
     mip_levels: u32,
@@ -1884,43 +1888,79 @@ impl Device {
             flags,
             vk::ImageAspectFlags::COLOR,
         );
-        let target = usages.contains(TextureUsages::RENDER_ATTACHMENT).then(|| {
-            let (depth, depth_memory, depth_view) = self.attachment(
-                width,
-                height,
-                1,
-                DEPTH_FORMAT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                vk::ImageAspectFlags::DEPTH,
-            );
-            let pass = self.render_pass(format);
-            let framebuffer = unsafe {
-                self.raw.create_framebuffer(
-                    &vk::FramebufferCreateInfo::default()
-                        .render_pass(pass)
-                        .attachments(&[view, depth_view])
-                        .width(width)
-                        .height(height)
-                        .layers(1),
-                    None,
-                )
-            }
-            .unwrap_or_else(|error| panic!("creating a Vulkan framebuffer: {error:?}"));
-            Target {
-                depth,
-                depth_memory,
-                depth_view,
-                render_pass: pass,
-                framebuffer,
-            }
-        });
+        let targets = if usages.contains(TextureUsages::RENDER_ATTACHMENT) {
+            (0..mip_levels)
+                .map(|level| {
+                    let extent = ((width >> level).max(1), (height >> level).max(1));
+                    let shared = level == 0 && mip_levels == 1;
+                    let level_view = if shared {
+                        view
+                    } else {
+                        unsafe {
+                            self.raw
+                                .create_image_view(
+                                    &vk::ImageViewCreateInfo::default()
+                                        .image(image)
+                                        .view_type(vk::ImageViewType::TYPE_2D)
+                                        .format(declared)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: level,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        }),
+                                    None,
+                                )
+                                .unwrap_or_else(|error| {
+                                    panic!("creating the Vulkan view of level {level}: {error:?}")
+                                })
+                        }
+                    };
+                    let (depth, depth_memory, depth_view) = self.attachment(
+                        extent.0,
+                        extent.1,
+                        1,
+                        DEPTH_FORMAT,
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                        vk::ImageAspectFlags::DEPTH,
+                    );
+                    let pass = self.render_pass(format);
+                    let framebuffer = unsafe {
+                        self.raw.create_framebuffer(
+                            &vk::FramebufferCreateInfo::default()
+                                .render_pass(pass)
+                                .attachments(&[level_view, depth_view])
+                                .width(extent.0)
+                                .height(extent.1)
+                                .layers(1),
+                            None,
+                        )
+                    }
+                    .unwrap_or_else(|error| panic!("creating a Vulkan framebuffer: {error:?}"));
+                    Target {
+                        view: level_view,
+                        owned_view: !shared,
+                        depth,
+                        depth_memory,
+                        depth_view,
+                        render_pass: pass,
+                        framebuffer,
+                        width: extent.0,
+                        height: extent.1,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Texture {
             resource: Arc::new(TextureResource {
                 raw: self.raw.clone(),
                 image,
                 memory: Some(memory),
                 view,
-                target,
+                targets,
                 width,
                 height,
                 mip_levels,
@@ -2123,13 +2163,17 @@ impl Device {
                 image,
                 memory: None,
                 view,
-                target: Some(Target {
+                targets: vec![Target {
+                    view,
+                    owned_view: false,
                     depth,
                     depth_memory,
                     depth_view,
                     render_pass: pass,
                     framebuffer,
-                }),
+                    width,
+                    height,
+                }],
                 width,
                 height,
                 mip_levels: 1,
@@ -2539,17 +2583,18 @@ impl Device {
                 }
                 Command::Render {
                     target,
+                    level,
                     clear,
                     draws,
                 } => {
                     let texture = native_texture(target.native());
                     let target_frame = texture
-                        .target
-                        .as_ref()
-                        .expect("a render target holds its framebuffer");
+                        .targets
+                        .get(*level as usize)
+                        .expect("a render level names a level its target holds");
                     let extent = vk::Extent2D {
-                        width: texture.width,
-                        height: texture.height,
+                        width: target_frame.width,
+                        height: target_frame.height,
                     };
                     let clears = [
                         vk::ClearValue {
@@ -3289,11 +3334,14 @@ impl Drop for GraphicsPipelineResource {
 impl Drop for TextureResource {
     fn drop(&mut self) {
         unsafe {
-            if let Some(target) = &self.target {
+            for target in &self.targets {
                 self.raw.destroy_framebuffer(target.framebuffer, None);
                 self.raw.destroy_image_view(target.depth_view, None);
                 self.raw.destroy_image(target.depth, None);
                 self.raw.free_memory(target.depth_memory, None);
+                if target.owned_view {
+                    self.raw.destroy_image_view(target.view, None);
+                }
             }
             self.raw.destroy_image_view(self.view, None);
             if let Some(memory) = self.memory {

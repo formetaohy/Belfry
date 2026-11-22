@@ -254,8 +254,6 @@ dependencies = [
  "belfry_render",
  "belfry_scene_macro",
  "belfry_toml",
- "bytemuck",
- "half",
  "serde_json",
 ]
 

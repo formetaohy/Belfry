@@ -11,7 +11,6 @@ use crate::skin::SkinData;
 use crate::source::Sources;
 use belfry_animation::Clip;
 use belfry_audio::Source;
-use belfry_gpu_device::ArtifactCache;
 use belfry_image::ColorSpace;
 use belfry_physics::TriangleMesh;
 use belfry_render::{
@@ -26,8 +25,6 @@ use work::ImageMips;
 use work::Job;
 use work::Outcome;
 use work::Worker;
-
-const ENVIRONMENT_CACHE_BYTES: u64 = 256 << 20;
 
 pub struct Library {
     meshes: HashMap<String, MeshRecord>,
@@ -46,7 +43,6 @@ pub struct Library {
     retired_meshes: Vec<Mesh>,
     retired_materials: Vec<Material>,
     synchronous: bool,
-    environment_cache: ArtifactCache,
 }
 
 #[derive(Clone)]
@@ -119,6 +115,7 @@ struct SoundRecord {
 
 struct EnvironmentRecord {
     fingerprint: Digest,
+    capture: bool,
     environment: Environment,
 }
 
@@ -140,13 +137,6 @@ impl Default for Library {
 
 impl Library {
     pub fn new() -> Self {
-        Self::with_cache(ArtifactCache::default_location_named(
-            "environment",
-            ENVIRONMENT_CACHE_BYTES,
-        ))
-    }
-
-    pub fn with_cache(environment_cache: ArtifactCache) -> Self {
         Self {
             meshes: HashMap::new(),
             materials: HashMap::new(),
@@ -164,7 +154,6 @@ impl Library {
             retired_meshes: Vec::new(),
             retired_materials: Vec::new(),
             synchronous: false,
-            environment_cache,
         }
     }
 
@@ -177,7 +166,6 @@ impl Library {
             fingerprints: self.fingerprints(),
             textures: self.textures.keys().cloned().collect(),
             sources: self.sources.clone(),
-            environment_cache: self.environment_cache.clone(),
         });
         self.loading = true;
         true
@@ -496,6 +484,13 @@ impl Assets for Library {
             })
             .environment
             .clone()
+    }
+
+    fn capture(&self, id: &str) -> Option<belfry_render::CaptureProbe> {
+        self.environments
+            .get(id)
+            .filter(|held| held.capture)
+            .map(|_| belfry_render::CaptureProbe::default())
     }
 
     fn sound(&self, id: &str) -> Source {

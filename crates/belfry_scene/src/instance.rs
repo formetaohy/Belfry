@@ -274,7 +274,7 @@ impl Edit<'_> {
         let root = self.root.clone();
         crate::prefab::import(self, &template, &key, &from, &root, &marker.id)?;
         self.set_instance(&marker.id, Some(keys.clone()));
-        for (nested, held) in &template.instances {
+        for (nested, held) in template.instances.iter() {
             self.set_instance(&format!("{}_{nested}", marker.id), Some(held.clone()));
         }
         if let Some(outer) = outer {
@@ -301,7 +301,7 @@ impl Edit<'_> {
         let overrides = self.nodes[index].overrides.clone();
         let keys = self.instances.get(marker).cloned();
         if let Some(keys) = &keys {
-            for (other, held) in &self.instances {
+            for (other, held) in self.instances.iter() {
                 if other == marker {
                     continue;
                 }

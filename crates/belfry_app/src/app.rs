@@ -551,6 +551,7 @@ impl App {
             {
                 screenshot = Some(png);
             }
+            belfry_render::install_captures(&mut self.world, session.renderer.take_captures());
             if last {
                 break;
             }
@@ -739,6 +740,7 @@ impl App {
             .0;
         self.sync_debug();
         session.draw_window(&self.world, clear, width, height);
+        belfry_render::install_captures(&mut self.world, session.renderer.take_captures());
         if exit { Flow::Exit } else { Flow::Continue }
     }
 }

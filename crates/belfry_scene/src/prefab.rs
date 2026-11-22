@@ -93,7 +93,7 @@ impl Loader {
             ids,
             nodes: Vec::with_capacity(scene.nodes.len()),
         };
-        for node in scene.nodes().to_vec() {
+        for node in scene.nodes().iter().cloned().collect::<Vec<_>>() {
             let prefab = node.prefab.clone();
             materialization.nodes.push(node.clone());
             let Some(path) = prefab else {
@@ -107,7 +107,7 @@ impl Loader {
                 .edit(|edit| {
                     import(edit, &template, &key, &from, root, &node.id)?;
                     edit.set_instance(&node.id, Some(owners(&template, &key)));
-                    for (nested, held) in &template.instances {
+                    for (nested, held) in template.instances.iter() {
                         edit.set_instance(&format!("{}_{nested}", node.id), Some(held.clone()));
                     }
                     Ok(())
@@ -176,7 +176,7 @@ impl Materialization<'_> {
             .edit(|edit| {
                 import(edit, &template, &key, &from, root, &held.id)?;
                 edit.set_instance(&held.id, Some(keys.clone()));
-                for (nested, held_keys) in &template.instances {
+                for (nested, held_keys) in template.instances.iter() {
                     edit.set_instance(&format!("{}_{nested}", held.id), Some(held_keys.clone()));
                 }
                 if let Some(outer) = edit.instances.get(&marker_id).cloned() {

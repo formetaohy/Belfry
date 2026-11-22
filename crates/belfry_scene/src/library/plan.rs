@@ -20,7 +20,6 @@ pub(super) fn plan(job: Job) -> Prepared {
         fingerprints,
         textures: cached_textures,
         sources,
-        environment_cache,
     } = job;
     let mut errors = Vec::new();
     let mut files = BTreeSet::new();
@@ -311,47 +310,24 @@ pub(super) fn plan(job: Job) -> Prepared {
                 prepare.sources.digest(&file)
             }
             EnvironmentSource::Atmosphere(atmosphere) => Ok(atmosphere_fingerprint(atmosphere)),
+            EnvironmentSource::Capture => Ok(crate::digest::Digest::of(entry.id.as_bytes())),
         };
         let fingerprint = environment_fingerprint(entry, digest.as_ref().ok().copied());
         let previous = fingerprints.environments.get(&entry.id).copied();
         if previous == Some(fingerprint) {
             continue;
         }
-        let key = digest.as_ref().ok().map(|digest| match &entry.source {
-            EnvironmentSource::Panorama(_) => format!(
-                "v{}/{}.env",
-                belfry_render::environment::CACHE_VERSION,
-                digest.hex(),
-            ),
-            EnvironmentSource::Atmosphere(_) => format!(
-                "v{}/atmosphere-{}.env",
-                belfry_render::environment::CACHE_VERSION,
-                digest.hex(),
-            ),
-        });
-        let cached = key
+        let prepared = digest
             .as_ref()
-            .and_then(|key| environment_cache.load(key))
-            .and_then(|bytes| belfry_render::environment::decode(&bytes));
-        let prepared = match cached {
-            Some(image) => Ok((image, false)),
-            None => digest
-                .as_ref()
-                .map_err(|message| message.clone())
-                .and_then(|_| environment_data(&scene, entry, &mut prepare.sources))
-                .map(|image| (image, true)),
-        };
+            .map_err(|message| message.clone())
+            .and_then(|_| environment_data(&scene, entry, &mut prepare.sources));
         match prepared {
-            Ok((image, computed)) => {
-                if computed && let Some(key) = &key {
-                    environment_cache.store(key, &belfry_render::environment::encode(&image));
-                }
-                environments.push(PreparedEnvironment {
-                    entry: entry.clone(),
-                    fingerprint,
-                    image,
-                });
-            }
+            Ok((panorama, sky)) => environments.push(PreparedEnvironment {
+                entry: entry.clone(),
+                fingerprint,
+                panorama,
+                sky,
+            }),
             Err(message) => fail(
                 &mut errors,
                 "environment",

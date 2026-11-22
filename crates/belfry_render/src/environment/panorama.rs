@@ -1,4 +1,6 @@
+use belfry_gpu_device::{Texture, TextureFormat, TextureUsages};
 use belfry_math::Vec3;
+use half::f16;
 use std::f32::consts::{PI, TAU};
 
 pub struct Panorama {
@@ -44,30 +46,35 @@ impl Panorama {
         self.texels[(y * self.width + x) as usize]
     }
 
-    pub fn sample(&self, direction: Vec3) -> Vec3 {
-        let unit = unit(direction);
-        let u = unit.x.atan2(-unit.z) * (0.5 / PI) + 0.5;
-        let v = unit.y.clamp(-1.0, 1.0).acos() / PI;
-        self.filtered(u, v)
+    pub fn texture(&self, renderer: &crate::Renderer, label: &str) -> Texture {
+        let texture = renderer.texture(
+            label,
+            self.width,
+            self.height,
+            1,
+            TextureFormat::Rgba16Float,
+            TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+        );
+        let one = f16::from_f32(1.0).to_bits();
+        let mut halves = Vec::with_capacity(self.texels.len() * 4);
+        for texel in &self.texels {
+            halves.push(half(texel.x));
+            halves.push(half(texel.y));
+            halves.push(half(texel.z));
+            halves.push(one);
+        }
+        renderer.write_texture(&texture, &[bytemuck::cast_slice(&halves)]);
+        texture
     }
+}
 
-    pub(crate) fn filtered(&self, u: f32, v: f32) -> Vec3 {
-        let x = u * self.width as f32 - 0.5;
-        let y = (v * self.height as f32 - 0.5).clamp(0.0, (self.height - 1) as f32);
-        let first_x = x.floor();
-        let first_y = y.floor();
-        let amount_x = x - first_x;
-        let amount_y = y - first_y;
-        let left = wrap(first_x, self.width);
-        let right = wrap(first_x + 1.0, self.width);
-        let low = first_y as u32;
-        let high = (low + 1).min(self.height - 1);
-        let low = self.texel(left, low).lerp(self.texel(right, low), amount_x);
-        let high = self
-            .texel(left, high)
-            .lerp(self.texel(right, high), amount_x);
-        low.lerp(high, amount_y)
-    }
+fn half(value: f32) -> u16 {
+    assert!(
+        value.is_finite(),
+        "a panorama holds the texel channel {value}"
+    );
+    let maximum = f16::MAX.to_f32();
+    f16::from_f32(value.clamp(-maximum, maximum)).to_bits()
 }
 
 pub(crate) fn direction(u: f32, v: f32) -> Vec3 {
@@ -75,17 +82,4 @@ pub(crate) fn direction(u: f32, v: f32) -> Vec3 {
     let theta = v * PI;
     let sine = theta.sin();
     Vec3::new(sine * phi.sin(), theta.cos(), -sine * phi.cos())
-}
-
-pub(crate) fn unit(value: Vec3) -> Vec3 {
-    let length = value.length();
-    if length == 0.0 {
-        return Vec3::Z;
-    }
-    value / length
-}
-
-fn wrap(value: f32, width: u32) -> u32 {
-    let width = width as i64;
-    (((value as i64) % width) + width) as u32 % width as u32
 }

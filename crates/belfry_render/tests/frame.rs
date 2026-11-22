@@ -4,7 +4,7 @@ use belfry_gpu_device::{
     SamplerDesc, Submission, Texture, TextureFormat, TextureUsages,
 };
 use belfry_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
-use belfry_render::environment::{Panorama, irradiance, specular};
+use belfry_render::environment::Panorama;
 use belfry_render::{
     AlphaMode, Camera, DirectionalLight, Environment, Lines, MaterialDesc, MaterialImage,
     MeshInstance, PointLight, Renderer, SamplerDesc as RenderSamplerDesc, Skin, SkinVertexRecord,
@@ -1380,34 +1380,7 @@ fn ambient(backend: Backend) {
         }
     }
     let panorama = Panorama::new(8, 4, &rgb);
-    let prefiltered = specular(&panorama);
     let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
-    let levels = prefiltered
-        .levels
-        .iter()
-        .map(|level| {
-            level
-                .texels
-                .iter()
-                .flat_map(|texel| texel.iter())
-                .map(|value| half::f16::from_f32(*value).to_bits())
-                .collect::<Vec<u16>>()
-        })
-        .collect::<Vec<_>>();
-    let first = &prefiltered.levels[0];
-    let radiance = renderer.texture(
-        "ambient sky",
-        first.width,
-        first.height,
-        levels.len() as u32,
-        TextureFormat::Rgba16Float,
-        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-    );
-    let bytes = levels
-        .iter()
-        .map(|level| bytemuck::cast_slice(level.as_slice()))
-        .collect::<Vec<&[u8]>>();
-    renderer.write_texture(&radiance, &bytes);
     let sampler = renderer.sampler(RenderSamplerDesc {
         min_filter: Filter::Linear,
         mag_filter: Filter::Linear,
@@ -1415,28 +1388,14 @@ fn ambient(backend: Backend) {
         address_u: AddressMode::Repeat,
         address_v: AddressMode::ClampToEdge,
     });
-    let panorama_texture = renderer.texture(
-        "ambient panorama",
-        panorama.width(),
-        panorama.height(),
-        1,
-        TextureFormat::Rgba16Float,
-        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-    );
-    let sky = belfry_render::environment::sky(&panorama);
-    let sky_bytes = sky
-        .texels
-        .iter()
-        .flat_map(|texel| texel.iter())
-        .map(|value| half::f16::from_f32(*value).to_bits())
-        .collect::<Vec<u16>>();
-    renderer.write_texture(&panorama_texture, &[bytemuck::cast_slice(&sky_bytes)]);
+    let panorama_texture = panorama.texture(&renderer, "ambient panorama");
+    let baked = renderer.bake(&panorama_texture, &sampler);
     let environment = Environment::new(
-        radiance,
+        baked.radiance,
         panorama_texture,
         sampler,
-        levels.len() as u32,
-        irradiance(&panorama),
+        baked.levels,
+        baked.irradiance,
     );
     let mut world = World::new();
     let eye = world.spawn();
@@ -1663,33 +1622,6 @@ fn local(backend: Backend) {
 
 fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
     let panorama = Panorama::new(2, 1, &radiance.to_array().repeat(2));
-    let prefiltered = specular(&panorama);
-    let levels = prefiltered
-        .levels
-        .iter()
-        .map(|level| {
-            level
-                .texels
-                .iter()
-                .flat_map(|texel| texel.iter())
-                .map(|value| half::f16::from_f32(*value).to_bits())
-                .collect::<Vec<u16>>()
-        })
-        .collect::<Vec<_>>();
-    let first = &prefiltered.levels[0];
-    let radiance = renderer.texture(
-        "local radiance",
-        first.width,
-        first.height,
-        levels.len() as u32,
-        TextureFormat::Rgba16Float,
-        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-    );
-    let bytes = levels
-        .iter()
-        .map(|level| bytemuck::cast_slice(level.as_slice()))
-        .collect::<Vec<&[u8]>>();
-    renderer.write_texture(&radiance, &bytes);
     let sampler = renderer.sampler(RenderSamplerDesc {
         min_filter: Filter::Linear,
         mag_filter: Filter::Linear,
@@ -1697,28 +1629,14 @@ fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
         address_u: AddressMode::Repeat,
         address_v: AddressMode::ClampToEdge,
     });
-    let panorama_texture = renderer.texture(
-        "local panorama",
-        panorama.width(),
-        panorama.height(),
-        1,
-        TextureFormat::Rgba16Float,
-        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-    );
-    let sky = belfry_render::environment::sky(&panorama);
-    let sky_bytes = sky
-        .texels
-        .iter()
-        .flat_map(|texel| texel.iter())
-        .map(|value| half::f16::from_f32(*value).to_bits())
-        .collect::<Vec<u16>>();
-    renderer.write_texture(&panorama_texture, &[bytemuck::cast_slice(&sky_bytes)]);
+    let texture = panorama.texture(renderer, "local panorama");
+    let baked = renderer.bake(&texture, &sampler);
     Environment::new(
-        radiance,
-        panorama_texture,
+        baked.radiance,
+        texture,
         sampler,
-        levels.len() as u32,
-        irradiance(&panorama),
+        baked.levels,
+        baked.irradiance,
     )
 }
 

@@ -31,6 +31,7 @@ fn header<'a>(view: &View<'a>) -> Element<'a, Message> {
         (Icon::Cube, "mesh", "Mesh"),
         (Icon::Camera, "camera", "Camera"),
         (Icon::Sparkles, "sun", "Sun"),
+        (Icon::Globe, "probe", "Environment probe"),
         (Icon::Plus, "empty", "Empty node"),
     ];
     let mut buttons = Vec::new();

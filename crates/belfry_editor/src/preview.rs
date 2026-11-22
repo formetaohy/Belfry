@@ -205,21 +205,26 @@ impl Preview {
                 environments.insert(environment.id.as_str());
             }
         }
+        let mut textures = Vec::with_capacity(images.len() + environments.len());
         for id in images {
-            match library.image_preview(id) {
-                Some(image) => ui.register_texture(id, image.texture(), image.sampler()),
-                None => ui.register_texture(id, &self.preview_texture, PREVIEW_SAMPLER),
-            }
+            let (texture, sampler) = match library.image_preview(id) {
+                Some(image) => (image.texture().clone(), image.sampler()),
+                None => (self.preview_texture.clone(), PREVIEW_SAMPLER),
+            };
+            textures.push((String::from(id), texture, sampler));
         }
         for id in environments {
-            let name = format!("environment.{id}");
-            match library.environment_preview(id) {
-                Some(environment) => {
-                    ui.register_texture(&name, &environment.panorama, PREVIEW_SAMPLER);
-                }
-                None => ui.register_texture(&name, &self.preview_texture, PREVIEW_SAMPLER),
-            }
+            let (texture, sampler) = match library.environment_preview(id) {
+                Some(environment) => (environment.panorama.clone(), PREVIEW_SAMPLER),
+                None => (self.preview_texture.clone(), PREVIEW_SAMPLER),
+            };
+            textures.push((format!("environment.{id}"), texture, sampler));
         }
+        ui.set_textures(
+            textures
+                .iter()
+                .map(|(name, texture, sampler)| (name.as_str(), texture, *sampler)),
+        );
     }
 
     fn scenes(&self) -> impl Iterator<Item = &Scene> + '_ {
@@ -260,5 +265,6 @@ impl Preview {
         self.world.insert_resource(lines);
         self.renderer
             .render(&self.world, Target::Texture(target), clear, highlight);
+        belfry_render::install_captures(&mut self.world, self.renderer.take_captures());
     }
 }

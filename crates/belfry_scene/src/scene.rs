@@ -30,17 +30,17 @@ pub struct Scene {
     pub(crate) root: PathBuf,
     pub(crate) registry: Arc<Registry>,
     pub(crate) prefab: bool,
-    pub(crate) owners: Vec<Owned>,
-    pub(crate) instances: BTreeMap<String, BTreeSet<PathBuf>>,
-    pub(crate) images: Vec<ImageEntry>,
-    pub(crate) sounds: Vec<SoundEntry>,
-    pub(crate) environments: Vec<EnvironmentEntry>,
-    pub(crate) meshes: Vec<MeshEntry>,
-    pub(crate) materials: Vec<MaterialEntry>,
-    pub(crate) models: Vec<ModelEntry>,
-    pub(crate) skins: Vec<SkinEntry>,
-    pub(crate) animations: Vec<AnimationEntry>,
-    pub(crate) graphs: Vec<GraphEntry>,
+    pub(crate) owners: Arc<Vec<Owned>>,
+    pub(crate) instances: Arc<BTreeMap<String, BTreeSet<PathBuf>>>,
+    pub(crate) images: Arc<Vec<ImageEntry>>,
+    pub(crate) sounds: Arc<Vec<SoundEntry>>,
+    pub(crate) environments: Arc<Vec<EnvironmentEntry>>,
+    pub(crate) meshes: Arc<Vec<MeshEntry>>,
+    pub(crate) materials: Arc<Vec<MaterialEntry>>,
+    pub(crate) models: Arc<Vec<ModelEntry>>,
+    pub(crate) skins: Arc<Vec<SkinEntry>>,
+    pub(crate) animations: Arc<Vec<AnimationEntry>>,
+    pub(crate) graphs: Arc<Vec<GraphEntry>>,
     pub(crate) nodes: Nodes,
 }
 
@@ -77,16 +77,16 @@ impl fmt::Debug for Scene {
 impl PartialEq for Scene {
     fn eq(&self, other: &Self) -> bool {
         self.prefab == other.prefab
-            && self.owners == other.owners
-            && self.instances == other.instances
-            && self.images == other.images
-            && self.meshes == other.meshes
-            && self.environments == other.environments
-            && self.materials == other.materials
-            && self.models == other.models
-            && self.skins == other.skins
-            && self.animations == other.animations
-            && self.graphs == other.graphs
+            && shared(&self.owners, &other.owners)
+            && shared(&self.instances, &other.instances)
+            && shared(&self.images, &other.images)
+            && shared(&self.meshes, &other.meshes)
+            && shared(&self.environments, &other.environments)
+            && shared(&self.materials, &other.materials)
+            && shared(&self.models, &other.models)
+            && shared(&self.skins, &other.skins)
+            && shared(&self.animations, &other.animations)
+            && shared(&self.graphs, &other.graphs)
             && self.nodes == other.nodes
     }
 }
@@ -101,17 +101,17 @@ impl Scene {
             root: root.into(),
             registry,
             prefab: false,
-            owners: Vec::new(),
-            instances: BTreeMap::new(),
-            images: Vec::new(),
-            sounds: Vec::new(),
-            environments: Vec::new(),
-            meshes: Vec::new(),
-            materials: Vec::new(),
-            models: Vec::new(),
-            skins: Vec::new(),
-            animations: Vec::new(),
-            graphs: Vec::new(),
+            owners: Arc::new(Vec::new()),
+            instances: Arc::new(BTreeMap::new()),
+            images: Arc::new(Vec::new()),
+            sounds: Arc::new(Vec::new()),
+            environments: Arc::new(Vec::new()),
+            meshes: Arc::new(Vec::new()),
+            materials: Arc::new(Vec::new()),
+            models: Arc::new(Vec::new()),
+            skins: Arc::new(Vec::new()),
+            animations: Arc::new(Vec::new()),
+            graphs: Arc::new(Vec::new()),
             nodes: Nodes::new(),
         }
     }
@@ -284,7 +284,7 @@ impl Scene {
         &self.graphs
     }
 
-    pub fn nodes(&self) -> &[Node] {
+    pub fn nodes(&self) -> &Nodes {
         &self.nodes
     }
 
@@ -296,8 +296,12 @@ impl Scene {
         &self.environments
     }
 
-    pub(crate) fn remember_node(&mut self, at: usize, node: Node) {
+    pub(crate) fn remember_node(&mut self, at: usize, node: Arc<Node>) {
         self.nodes.replace(at, node);
+    }
+
+    pub(crate) fn node_handle(&self, index: usize) -> Option<&Arc<Node>> {
+        self.nodes.handles().get(index)
     }
 
     pub fn node_index(&self, id: &str) -> Option<usize> {
@@ -560,20 +564,20 @@ impl Scene {
     }
 
     pub(crate) fn validate(&self, what: &str) {
-        unique(&self.images, what, "image");
-        unique(&self.sounds, what, "sound");
-        unique(&self.meshes, what, "mesh");
-        unique(&self.materials, what, "material");
-        unique(&self.models, what, "model");
-        unique(&self.skins, what, "skin");
-        unique(&self.animations, what, "animation");
-        unique(&self.graphs, what, "graph");
-        for graph in &self.graphs {
+        unique(self.images.iter(), what, "image");
+        unique(self.sounds.iter(), what, "sound");
+        unique(self.meshes.iter(), what, "mesh");
+        unique(self.materials.iter(), what, "material");
+        unique(self.models.iter(), what, "model");
+        unique(self.skins.iter(), what, "skin");
+        unique(self.animations.iter(), what, "animation");
+        unique(self.graphs.iter(), what, "graph");
+        for graph in self.graphs.iter() {
             graph
                 .asset
                 .validate(|clip| self.animation_index(clip).is_some());
         }
-        unique(&self.nodes, what, "node");
+        unique(self.nodes.iter(), what, "node");
         for node in &self.nodes {
             if node.prefab.is_some() {
                 assert!(
@@ -725,7 +729,7 @@ impl Scene {
                 );
             }
         }
-        for model in &self.models {
+        for model in self.models.iter() {
             assert!(
                 !model.path.as_os_str().is_empty() && model.path.is_relative(),
                 "{what} holds the model {} of path {}",
@@ -733,7 +737,7 @@ impl Scene {
                 model.path.display(),
             );
         }
-        for image in &self.images {
+        for image in self.images.iter() {
             match &image.source {
                 crate::image::ImageSource::Path(path) => assert!(
                     !path.as_os_str().is_empty() && path.is_relative(),
@@ -748,7 +752,7 @@ impl Scene {
                 ),
             }
         }
-        for sound in &self.sounds {
+        for sound in self.sounds.iter() {
             assert!(
                 !sound.path.as_os_str().is_empty() && sound.path.is_relative(),
                 "{what} holds the sound {} of path {}",
@@ -756,7 +760,7 @@ impl Scene {
                 sound.path.display(),
             );
         }
-        for skin in &self.skins {
+        for skin in self.skins.iter() {
             assert!(
                 self.model_index(skin.asset.model_of().as_str()).is_some(),
                 "{what} holds the skin {} from the model {}, which it does not hold",
@@ -777,7 +781,7 @@ impl Scene {
                 );
             }
         }
-        for animation in &self.animations {
+        for animation in self.animations.iter() {
             assert!(
                 self.model_index(animation.asset.model_of().as_str())
                     .is_some(),
@@ -793,7 +797,7 @@ impl Scene {
                 );
             }
         }
-        for mesh in &self.meshes {
+        for mesh in self.meshes.iter() {
             assert!(
                 !mesh.asset.is_empty(),
                 "{what} holds the mesh {} of no vertex",
@@ -807,7 +811,7 @@ impl Scene {
                 );
             }
         }
-        for material in &self.materials {
+        for material in self.materials.iter() {
             assert!(
                 (0.0..=1.0).contains(&material.asset.metallic),
                 "{what} holds the material {} of metallic {}",
@@ -951,9 +955,9 @@ impl Identified for Node {
     }
 }
 
-fn unique<T: Identified>(entries: &[T], what: &str, kind: &str) {
-    let mut ids = HashMap::with_capacity(entries.len());
-    for (at, entry) in entries.iter().enumerate() {
+fn unique<'a, T: Identified + 'a>(entries: impl Iterator<Item = &'a T>, what: &str, kind: &str) {
+    let mut ids = HashMap::new();
+    for (at, entry) in entries.enumerate() {
         assert!(
             valid_id(entry.id()),
             "{what} holds the {kind} id {}, which holds no letter, digit, _ or -",
@@ -965,4 +969,8 @@ fn unique<T: Identified>(entries: &[T], what: &str, kind: &str) {
             entry.id(),
         );
     }
+}
+
+fn shared<T: PartialEq>(left: &Arc<T>, right: &Arc<T>) -> bool {
+    Arc::ptr_eq(left, right) || left == right
 }

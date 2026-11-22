@@ -5,6 +5,7 @@ use crate::node::SceneNode;
 use crate::registry::Assets;
 use crate::scene::Scene;
 use belfry_ecs::{Entity, Parent, World, propagate};
+use belfry_render::SceneRevision;
 use std::collections::{HashMap, HashSet};
 
 pub struct SceneSync {
@@ -79,8 +80,15 @@ impl SceneSync {
         world.insert_resource(graphs);
         for (index, node) in scene.nodes().iter().enumerate() {
             let (entity, reused) = entities[index];
-            let previous = previous
-                .and_then(|applied| applied.node_index(&node.id).map(|at| &applied.nodes()[at]));
+            let previous = previous.and_then(|applied| {
+                let at = applied
+                    .nodes()
+                    .get(index)
+                    .filter(|held| held.id == node.id)
+                    .map_or_else(|| applied.node_index(&node.id), |_| Some(index))?;
+                applied.nodes().get(at)
+            });
+            let shared = previous.is_some_and(|held| std::ptr::eq(held, node));
             world.insert(
                 entity,
                 SceneNode {
@@ -102,18 +110,19 @@ impl SceneSync {
                 }
             }
             for registration in scene.registry().registrations() {
-                let replaced = !reused
-                    || (replace_assets && registration.tied_to_assets)
-                    || previous.is_none_or(|previous| {
-                        match (
-                            previous.component_by_name(registration.spec.name),
-                            node.component_by_name(registration.spec.name),
-                        ) {
-                            (None, None) => false,
-                            (Some(authored), Some(next)) => !authored.equals(next),
-                            _ => true,
-                        }
-                    });
+                let replaced = (replace_assets && registration.tied_to_assets)
+                    || (!shared
+                        && (!reused
+                            || previous.is_none_or(|previous| {
+                                match (
+                                    previous.component_by_name(registration.spec.name),
+                                    node.component_by_name(registration.spec.name),
+                                ) {
+                                    (None, None) => false,
+                                    (Some(authored), Some(next)) => !authored.equals(next),
+                                    _ => true,
+                                }
+                            })));
                 if !replaced {
                     continue;
                 }
@@ -126,6 +135,10 @@ impl SceneSync {
         self.applied = Some(scene.clone());
         self.entities = entities.into_iter().map(|(entity, _)| entity).collect();
         self.ids = ids;
+        let revision = world
+            .resource::<SceneRevision>()
+            .map_or(1, |held| held.0.wrapping_add(1));
+        world.insert_resource(SceneRevision(revision));
         belfry_animation::settle(world);
         propagate(world);
     }
@@ -140,10 +153,12 @@ impl SceneSync {
         if !world.is_alive(entity) {
             return;
         }
-        let previous = self
-            .applied
-            .as_ref()
-            .and_then(|applied| applied.node_index(&node.id).map(|at| &applied.nodes()[at]));
+        let previous = self.applied.as_ref().and_then(|applied| {
+            applied
+                .node_index(&node.id)
+                .and_then(|at| applied.nodes().get(at))
+        });
+        let shared = previous.is_some_and(|held| std::ptr::eq(held, node));
         match node.parent.as_deref() {
             Some(parent) => {
                 let Some(parent) = self.ids.get(parent).copied() else {
@@ -156,16 +171,17 @@ impl SceneSync {
             }
         }
         for registration in scene.registry().registrations() {
-            let replaced = previous.is_none_or(|previous| {
-                match (
-                    previous.component_by_name(registration.spec.name),
-                    node.component_by_name(registration.spec.name),
-                ) {
-                    (None, None) => false,
-                    (Some(authored), Some(next)) => !authored.equals(next),
-                    _ => true,
-                }
-            });
+            let replaced = !shared
+                && previous.is_none_or(|previous| {
+                    match (
+                        previous.component_by_name(registration.spec.name),
+                        node.component_by_name(registration.spec.name),
+                    ) {
+                        (None, None) => false,
+                        (Some(authored), Some(next)) => !authored.equals(next),
+                        _ => true,
+                    }
+                });
             if !replaced {
                 continue;
             }
@@ -175,9 +191,10 @@ impl SceneSync {
             }
         }
         if let Some(applied) = &mut self.applied
+            && let Some(handle) = scene.node_handle(index).cloned()
             && let Some(at) = applied.node_index(&node.id)
         {
-            applied.remember_node(at, node.clone());
+            applied.remember_node(at, handle);
         }
         belfry_animation::settle(world);
         propagate(world);
