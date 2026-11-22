@@ -27,6 +27,7 @@ use crate::program;
 use crate::shadow;
 use crate::skin::Skin;
 use crate::span;
+use crate::temporality::{Frame, Pose, Temporality};
 use crate::transparency::Transparency;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
@@ -38,6 +39,7 @@ use belfry_gpu_device::{
 };
 use belfry_math::{Mat4, Transform, Vec2, Vec3};
 use half::f16;
+use std::collections::HashMap;
 use std::mem::size_of;
 
 const VIEW_BYTES: u64 = size_of::<ViewRecord>() as u64;
@@ -118,6 +120,9 @@ pub struct Renderer {
     picker: Picker,
     pick_frame: Option<PickFrame>,
     transparency: Transparency,
+    temporality: Temporality,
+    motion_tables: Option<BindGroup>,
+    previous: HashMap<Entity, Mat4>,
     probes: Probes,
 }
 
@@ -404,6 +409,9 @@ impl Renderer {
             picker,
             pick_frame: None,
             transparency: Transparency::new(&device),
+            temporality: Temporality::new(&device),
+            motion_tables: None,
+            previous: HashMap::new(),
             probes,
             queue,
             device,
@@ -486,10 +494,13 @@ impl Renderer {
         self.transparent_tables = None;
         self.depth_tables = None;
         self.shadow_tables = None;
+        self.motion_tables = None;
         self.pick_frame = None;
         self.main_batches = 0;
         self.ambient = None;
         self.probes.reset();
+        self.temporality.reset();
+        self.previous.clear();
     }
 
     pub fn mesh(&mut self, vertices: &[crate::abi::Vertex]) -> Mesh {
@@ -588,6 +599,7 @@ impl Renderer {
         self.transparent_tables = None;
         self.depth_tables = None;
         self.shadow_tables = None;
+        self.motion_tables = None;
     }
 
     fn flush_materials(&mut self) {
@@ -631,7 +643,13 @@ impl Renderer {
             self.ambient = None;
         }
         self.refresh_ambient(environment);
-        let aspect = texture.width() as f32 / texture.height() as f32;
+        let width = texture.width();
+        let height = texture.height();
+        let vertical = crate::frame::vertical(&self.device);
+        self.temporality
+            .prepare(&self.device, &self.queue, width, height);
+        let jitter = self.temporality.jitter();
+        let aspect = width as f32 / height as f32;
         let (camera, transform) = camera_of(world);
         let (light, light_transform) = light_of(world);
         let mut point_light_records = Vec::new();
@@ -657,7 +675,20 @@ impl Renderer {
         let point_light_count = point_light_records.len() as u32;
         let eye = transform.translation;
         let forward = transform.rotation.rotate_vec3(-Vec3::Z).normalize();
-        let view = camera.view(transform, aspect, self.device.clip_space());
+        let view = camera.view_jittered(
+            transform,
+            aspect,
+            self.device.clip_space(),
+            jitter,
+            width,
+            height,
+        );
+        let pose = Pose {
+            clip: view.clip,
+            eye,
+            forward,
+        };
+        self.temporality.begin(&self.queue, pose, vertical);
         let mut gathered = Vec::new();
         world.for_each_pair::<Transform, MeshInstance>(|entity, transform, instance| {
             if world.contains::<Hidden>(entity) {
@@ -774,9 +805,15 @@ impl Renderer {
             } else {
                 static_bounds(geometry, *transform)
             };
+            let previous = self
+                .previous
+                .get(entity)
+                .copied()
+                .unwrap_or_else(|| transform.matrix());
             records.push(record_of(
                 *entity,
                 *transform,
+                previous,
                 instance,
                 bounds,
                 Placement {
@@ -787,6 +824,10 @@ impl Renderer {
                 },
             ));
         }
+        self.previous = gathered
+            .iter()
+            .map(|(_, _, entity, transform, ..)| (*entity, transform.matrix()))
+            .collect();
         let spheres = records
             .iter()
             .map(|record| {
@@ -807,7 +848,6 @@ impl Renderer {
         );
         let direction = light_transform.rotation.rotate_vec3(-Vec3::Z).normalize();
         let radiance = light.color * light.intensity;
-        let vertical = crate::frame::vertical(&self.device);
         let (hzb_levels, hzb_width, hzb_height) = if total == 0 {
             (0u32, 0.0, 0.0)
         } else {
@@ -1001,6 +1041,7 @@ impl Renderer {
             if !line_groups.is_empty() {
                 debug_draws.push(Draw::new(&self.line_pipeline, &line_groups, line_vertices));
             }
+            submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &[]);
             self.transparency.clear(&mut submission);
             submission.render(
                 self.post.hdr(),
@@ -1009,12 +1050,25 @@ impl Renderer {
             );
             self.transparency
                 .resolve(&mut submission, self.post.hdr(), self.post.lit());
-            self.post.resolve(&mut submission);
-            self.post.tonemap(&mut submission, &texture);
+            self.temporality.resolve(
+                &self.queue,
+                &mut submission,
+                Frame {
+                    source: self.post.lit(),
+                    pose,
+                    near: camera.near,
+                    far: camera.far,
+                    vertical,
+                },
+            );
+            let resolved = self.temporality.resolved().clone();
+            self.post.resolve(&mut submission, &resolved);
+            self.post.tonemap(&mut submission, &texture, &resolved);
             if let Some(frame) = frame {
                 submission.present(frame);
             }
             submission.submit(&self.queue);
+            self.temporality.finish(pose);
             return;
         }
         self.pick_frame = Some(PickFrame {
@@ -1320,6 +1374,72 @@ impl Renderer {
         submission.render(hzb.depth(), [1.0, 0.0, 0.0, 1.0], &depth);
         hzb.build(&mut submission, &self.hzb_base, &self.hzb_reduce);
         submission.dispatch(&self.cull, &main_cull, [total.div_ceil(WORKGROUP), 1, 1]);
+        let motion_tables = match &self.motion_tables {
+            Some(tables) => tables.clone(),
+            None => {
+                let tables = self.temporality.motion().bind_group(
+                    1,
+                    &[
+                        Binding::texture_table(program::MOTION_TEXTURE, self.materials.textures()),
+                        Binding::sampler_table(program::MOTION_SAMPLER, self.materials.samplers()),
+                    ],
+                );
+                self.motion_tables = Some(tables.clone());
+                tables
+            }
+        };
+        let mut motion_groups = Vec::with_capacity(batches.len());
+        for (index, batch) in batches.iter().enumerate() {
+            let geometry = self.meshes.geometry(batch.mesh);
+            motion_groups.push([
+                self.temporality.motion().bind_group(
+                    0,
+                    &[
+                        Binding::buffer(program::MOTION_VIEW, self.temporality.view()),
+                        Binding::buffer(
+                            program::MOTION_DRAWN,
+                            self.main_drawn.buffer().binding(
+                                u64::from(bases[index]) * DRAW_BYTES,
+                                u64::from(batch.count) * DRAW_BYTES,
+                            ),
+                        ),
+                        Binding::buffer(
+                            program::MOTION_PALETTE,
+                            self.joints.buffer().binding(0, joint_bytes),
+                        ),
+                        Binding::buffer(program::MOTION_SKINS, self.meshes.skin_binding(geometry)),
+                        Binding::buffer(
+                            program::MOTION_MATERIALS,
+                            self.material_records
+                                .buffer()
+                                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
+                        ),
+                        Binding::buffer(
+                            program::MOTION_VERTICES,
+                            self.meshes.buffer().binding(
+                                u64::from(geometry.first) * VERTEX_BYTES,
+                                u64::from(geometry.count) * VERTEX_BYTES,
+                            ),
+                        ),
+                    ],
+                ),
+                motion_tables.clone(),
+            ]);
+        }
+        let motion = motion_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                Draw::indirect(
+                    self.temporality.motion(),
+                    groups,
+                    self.main_arguments
+                        .buffer()
+                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &motion);
         let shaded = main_groups
             .into_iter()
             .enumerate()
@@ -1390,12 +1510,25 @@ impl Renderer {
         submission.render(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0], &main);
         self.transparency
             .resolve(&mut submission, self.post.hdr(), self.post.lit());
-        self.post.resolve(&mut submission);
-        self.post.tonemap(&mut submission, &texture);
+        self.temporality.resolve(
+            &self.queue,
+            &mut submission,
+            Frame {
+                source: self.post.lit(),
+                pose,
+                near: camera.near,
+                far: camera.far,
+                vertical,
+            },
+        );
+        let resolved = self.temporality.resolved().clone();
+        self.post.resolve(&mut submission, &resolved);
+        self.post.tonemap(&mut submission, &texture, &resolved);
         if let Some(frame) = frame {
             submission.present(frame);
         }
         submission.submit(&self.queue);
+        self.temporality.finish(pose);
     }
 
     pub fn pick(&mut self, point: Vec2) -> Option<Entity> {

@@ -380,76 +380,27 @@ impl Pending {
     }
 }
 
-#[derive(Clone, Default)]
-struct Demand {
+struct Arena {
+    raw: ash::Device,
+    pool: vk::DescriptorPool,
     sets: u32,
-    sizes: Vec<(vk::DescriptorType, u32)>,
 }
 
-impl Demand {
-    fn record(&mut self, resources: &[BoundResource]) {
-        self.sets += 1;
-        for resource in resources {
-            let kind = descriptor_type(resource);
-            let count = match resource {
-                BoundResource::TextureTable(table) => table.capacity(),
-                BoundResource::SamplerTable(table) => table.capacity(),
-                _ => 1,
-            };
-            match self.sizes.iter_mut().find(|(held, _)| *held == kind) {
-                Some((_, held)) => *held += count,
-                None => self.sizes.push((kind, count)),
-            }
-        }
-    }
-
-    fn pool_sizes(&self) -> Vec<vk::DescriptorPoolSize> {
-        self.sizes
+impl Arena {
+    fn new(raw: &ash::Device, sizes: &[(vk::DescriptorType, u32)], sets: u32) -> Self {
+        let hold = sizes
             .iter()
             .map(|(kind, count)| {
                 vk::DescriptorPoolSize::default()
                     .ty(*kind)
-                    .descriptor_count(*count)
+                    .descriptor_count(count * sets)
             })
-            .collect()
-    }
-
-    fn scaled(&self) -> Self {
-        Self {
-            sets: self.sets * 2 + 8,
-            sizes: self
-                .sizes
-                .iter()
-                .map(|(kind, count)| (*kind, count * 2 + 32))
-                .collect(),
-        }
-    }
-
-    fn grown(&self) -> Self {
-        Self {
-            sets: (self.sets * 2).max(16),
-            sizes: self
-                .sizes
-                .iter()
-                .map(|(kind, count)| (*kind, (*count * 2).max(32)))
-                .collect(),
-        }
-    }
-}
-
-struct Arena {
-    raw: ash::Device,
-    pool: vk::DescriptorPool,
-}
-
-impl Arena {
-    fn new(raw: &ash::Device, demand: &Demand) -> Self {
-        let sizes = demand.pool_sizes();
+            .collect::<Vec<_>>();
         let pool = unsafe {
             raw.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(demand.sets)
-                    .pool_sizes(&sizes),
+                    .max_sets(sets)
+                    .pool_sizes(&hold),
                 None,
             )
         }
@@ -457,6 +408,7 @@ impl Arena {
         Self {
             raw: raw.clone(),
             pool,
+            sets,
         }
     }
 }
@@ -467,37 +419,44 @@ impl Drop for Arena {
     }
 }
 
-struct Descriptors {
-    arenas: Vec<Arc<Arena>>,
-    active: usize,
-    demand: Demand,
+struct GroupPool {
+    raw: ash::Device,
+    sizes: Vec<(vk::DescriptorType, u32)>,
+    free: Mutex<Vec<vk::DescriptorSet>>,
+    arenas: Mutex<Vec<Arc<Arena>>>,
 }
 
-impl Descriptors {
-    fn new() -> Self {
-        Self {
-            arenas: Vec::new(),
-            active: 0,
-            demand: Demand::default(),
-        }
+impl GroupPool {
+    fn new(raw: &ash::Device, sizes: Vec<(vk::DescriptorType, u32)>) -> Arc<Self> {
+        Arc::new(Self {
+            raw: raw.clone(),
+            sizes,
+            free: Mutex::new(Vec::new()),
+            arenas: Mutex::new(Vec::new()),
+        })
     }
 
-    fn set(
-        &mut self,
-        raw: &ash::Device,
-        layout: vk::DescriptorSetLayout,
-        resources: &[BoundResource],
-    ) -> vk::DescriptorSet {
-        self.demand.record(resources);
-        if self.arenas.is_empty() {
-            let demand = self.demand.scaled();
-            self.arenas.push(Arc::new(Arena::new(raw, &demand)));
+    fn set(&self, layout: vk::DescriptorSetLayout) -> vk::DescriptorSet {
+        if let Some(set) = self
+            .free
+            .lock()
+            .expect("a Vulkan descriptor free list is never poisoned")
+            .pop()
+        {
+            return set;
+        }
+        let mut arenas = self
+            .arenas
+            .lock()
+            .expect("the Vulkan descriptor arenas are never poisoned");
+        if arenas.is_empty() {
+            arenas.push(Arc::new(Arena::new(&self.raw, &self.sizes, 16)));
         }
         loop {
-            let arena = &self.arenas[self.active];
+            let arena = arenas.last().expect("a descriptor pool holds one arena");
             let layouts = [layout];
             match unsafe {
-                raw.allocate_descriptor_sets(
+                self.raw.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(arena.pool)
                         .set_layouts(&layouts),
@@ -506,14 +465,19 @@ impl Descriptors {
                 Ok(sets) => return sets[0],
                 Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
                 | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
-                    self.demand = self.demand.grown();
-                    let arena = Arc::new(Arena::new(raw, &self.demand));
-                    self.arenas.push(arena);
-                    self.active = self.arenas.len() - 1;
+                    let sets = arena.sets * 2;
+                    arenas.push(Arc::new(Arena::new(&self.raw, &self.sizes, sets)));
                 }
                 Err(error) => panic!("allocating Vulkan descriptors: {error:?}"),
             }
         }
+    }
+
+    fn release(&self, set: vk::DescriptorSet) {
+        self.free
+            .lock()
+            .expect("a Vulkan descriptor free list is never poisoned")
+            .push(set);
     }
 }
 struct Frame {
@@ -627,7 +591,6 @@ pub(crate) struct Device {
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
     render_passes: Mutex<Vec<(TextureFormat, vk::RenderPass)>>,
-    descriptors: Mutex<Descriptors>,
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
@@ -778,7 +741,7 @@ struct PipelineResource {
     raw: ash::Device,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
-    free: Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>>,
+    pools: Vec<Arc<GroupPool>>,
     compiled: OnceLock<vk::Pipeline>,
 }
 
@@ -792,7 +755,7 @@ pub(crate) struct Group {
 
 struct GroupResource {
     set: vk::DescriptorSet,
-    free: Arc<Mutex<Vec<vk::DescriptorSet>>>,
+    pool: Arc<GroupPool>,
     buffers: Vec<Arc<BufferResource>>,
     textures: Vec<Arc<TextureResource>>,
     _samplers: Vec<crate::Sampler>,
@@ -863,7 +826,7 @@ struct GraphicsPipelineResource {
     raw: ash::Device,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
-    free: Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>>,
+    pools: Vec<Arc<GroupPool>>,
     render_pass: vk::RenderPass,
     format: TextureFormat,
     state: PipelineState,
@@ -902,13 +865,6 @@ fn native_sampler(native: &crate::NativeSampler) -> &Sampler {
     match native {
         crate::NativeSampler::Vulkan(sampler) => sampler,
     }
-}
-
-fn free_lists(groups: &[vk::DescriptorSetLayout]) -> Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>> {
-    groups
-        .iter()
-        .map(|_| Arc::new(Mutex::new(Vec::new())))
-        .collect()
 }
 
 fn descriptor_type(kind: &BoundResource) -> vk::DescriptorType {
@@ -1077,7 +1033,6 @@ impl Facts {
             pool: parts.pool,
             stamps: parts.stamps,
             render_passes: Mutex::new(Vec::new()),
-            descriptors: Mutex::new(Descriptors::new()),
             ticks: self.ticks,
             bits: self.bits,
             uuid: self.uuid,
@@ -1585,7 +1540,7 @@ impl Device {
     }
 
     pub(crate) fn create_pipeline(self: &Arc<Self>, program: &ComputeProgram) -> Pipeline {
-        let (groups, layout) = self.pipeline_layout(
+        let (groups, pools, layout) = self.pipeline_layout(
             program.bindings(),
             vk::ShaderStageFlags::COMPUTE,
             program.label(),
@@ -1594,8 +1549,8 @@ impl Device {
             resource: Arc::new(PipelineResource {
                 raw: self.raw.clone(),
                 layout,
-                free: free_lists(&groups),
                 groups,
+                pools,
                 compiled: OnceLock::new(),
             }),
         }
@@ -1606,13 +1561,18 @@ impl Device {
         bindings: &[belfry_gpu::shader::BindingSpec],
         stages: vk::ShaderStageFlags,
         label: &str,
-    ) -> (Vec<vk::DescriptorSetLayout>, vk::PipelineLayout) {
+    ) -> (
+        Vec<vk::DescriptorSetLayout>,
+        Vec<Arc<GroupPool>>,
+        vk::PipelineLayout,
+    ) {
         let count = bindings
             .iter()
             .map(|binding| binding.group)
             .max()
             .map_or(0, |group| group + 1);
         let mut groups = Vec::new();
+        let mut pools = Vec::new();
         for group in 0..count {
             let bindings = bindings
                 .iter()
@@ -1645,6 +1605,17 @@ impl Device {
                 panic!("creating group {group} of {label}'s Vulkan layout: {error:?}")
             });
             groups.push(layout);
+            let mut sizes = Vec::new();
+            for binding in &bindings {
+                match sizes
+                    .iter_mut()
+                    .find(|(kind, _)| *kind == binding.descriptor_type)
+                {
+                    Some((_, count)) => *count += binding.descriptor_count,
+                    None => sizes.push((binding.descriptor_type, binding.descriptor_count)),
+                }
+            }
+            pools.push(GroupPool::new(&self.raw, sizes));
         }
         let layout = unsafe {
             self.raw.create_pipeline_layout(
@@ -1653,7 +1624,7 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("creating {label}'s Vulkan pipeline layout: {error:?}"));
-        (groups, layout)
+        (groups, pools, layout)
     }
 
     pub(crate) fn create_group(
@@ -1664,7 +1635,7 @@ impl Device {
     ) -> Group {
         self.assemble_group(
             pipeline.resource.groups[group as usize],
-            Arc::clone(&pipeline.resource.free[group as usize]),
+            Arc::clone(&pipeline.resource.pools[group as usize]),
             resources,
             pipeline.resource.clone(),
         )
@@ -1678,7 +1649,7 @@ impl Device {
     ) -> Group {
         self.assemble_group(
             pipeline.resource.groups[group as usize],
-            Arc::clone(&pipeline.resource.free[group as usize]),
+            Arc::clone(&pipeline.resource.pools[group as usize]),
             resources,
             pipeline.resource.clone(),
         )
@@ -1687,22 +1658,11 @@ impl Device {
     fn assemble_group(
         &self,
         layout: vk::DescriptorSetLayout,
-        free: Arc<Mutex<Vec<vk::DescriptorSet>>>,
+        pool: Arc<GroupPool>,
         resources: &[BoundResource],
         pipeline: Arc<dyn Any + Send + Sync>,
     ) -> Group {
-        let recycled = free
-            .lock()
-            .expect("a Vulkan descriptor free list is never poisoned")
-            .pop();
-        let set = match recycled {
-            Some(set) => set,
-            None => self
-                .descriptors
-                .lock()
-                .expect("the Vulkan descriptor arenas are never poisoned")
-                .set(&self.raw, layout, resources),
-        };
+        let set = pool.set(layout);
         let mut buffers = Vec::new();
         let mut textures = Vec::new();
         let mut samplers = Vec::new();
@@ -1797,7 +1757,7 @@ impl Device {
         Group {
             resource: Arc::new(GroupResource {
                 set,
-                free,
+                pool,
                 buffers,
                 textures,
                 _samplers: samplers,
@@ -2208,7 +2168,7 @@ impl Device {
         format: TextureFormat,
         state: PipelineState,
     ) -> GraphicsPipeline {
-        let (groups, layout) = self.pipeline_layout(
+        let (groups, pools, layout) = self.pipeline_layout(
             program.bindings(),
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             program.label(),
@@ -2217,8 +2177,8 @@ impl Device {
             resource: Arc::new(GraphicsPipelineResource {
                 raw: self.raw.clone(),
                 layout,
-                free: free_lists(&groups),
                 groups,
+                pools,
                 render_pass: self.render_pass(format),
                 format,
                 state,
@@ -3401,10 +3361,7 @@ impl Drop for PipelineResource {
 
 impl Drop for GroupResource {
     fn drop(&mut self) {
-        self.free
-            .lock()
-            .expect("a Vulkan descriptor free list is never poisoned")
-            .push(self.set);
+        self.pool.release(self.set);
     }
 }
 
@@ -3430,11 +3387,6 @@ impl Drop for Device {
             {
                 self.raw.destroy_render_pass(pass, None);
             }
-            self.descriptors
-                .get_mut()
-                .expect("the Vulkan descriptor arenas are never poisoned")
-                .arenas
-                .clear();
             self.raw.destroy_query_pool(self.stamps, None);
             self.raw.destroy_command_pool(self.pool, None);
             if self.instance.is_some() {

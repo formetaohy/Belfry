@@ -18,6 +18,7 @@ mod renderer;
 mod shadow;
 mod skin;
 mod span;
+mod temporality;
 mod transparency;
 mod view;
 

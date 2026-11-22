@@ -10,7 +10,7 @@ use crate::view::View;
 use belfry_ecs::{Entity, World};
 use belfry_gpu::Fvec4;
 use belfry_gpu_device::{ClipSpace, Device};
-use belfry_math::{Transform, Vec3, Vec4};
+use belfry_math::{Mat4, Transform, Vec3, Vec4};
 
 pub(crate) struct Batch {
     pub(crate) mesh: Mesh,
@@ -196,6 +196,7 @@ pub(crate) struct Placement {
 pub(crate) fn record_of(
     entity: Entity,
     transform: Transform,
+    previous: Mat4,
     instance: &MeshInstance,
     bounds: (Vec3, f32),
     placement: Placement,
@@ -214,6 +215,10 @@ pub(crate) fn record_of(
         model1: vector(model.col(1)),
         model2: vector(model.col(2)),
         model3: vector(model.col(3)),
+        previous0: vector(previous.col(0)),
+        previous1: vector(previous.col(1)),
+        previous2: vector(previous.col(2)),
+        previous3: vector(previous.col(3)),
         normal0: direction_record(normal(Vec3::X, scale.x)),
         normal1: direction_record(normal(Vec3::Y, scale.y)),
         normal2: direction_record(normal(Vec3::Z, scale.z)),

@@ -1642,6 +1642,7 @@ fn local(backend: Backend) {
     );
     renderer.render(&world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
+
     assert_blue(
         backend,
         &pixels,
@@ -1719,4 +1720,152 @@ fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
         levels.len() as u32,
         irradiance(&panorama),
     )
+}
+
+#[test]
+fn a_temporal_frame_accumulates_subpixel_edge_coverage() {
+    for backend in belfry_gpu_device::PREFERENCE {
+        accumulation(*backend);
+    }
+}
+
+fn accumulation(backend: Backend) {
+    let context = GpuContext::open(&GpuRequest {
+        backend: Some(backend),
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("no {backend:?} device renders a frame: {error}"));
+    let target = Texture::new(
+        context.device(),
+        "temporal edge",
+        SIDE,
+        SIDE,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    );
+    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    let quad = renderer.mesh(&QUAD);
+    let material = renderer.material(MaterialDesc::new(WHITE).emissive(WHITE));
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(eye, Transform::from_translation(Vec3::new(0.0, 0.0, 4.0)));
+    world.insert(
+        eye,
+        Camera {
+            vertical_fov: std::f32::consts::FRAC_PI_2,
+            near: 0.1,
+            far: 100.0,
+        },
+    );
+    let turned = world.spawn();
+    world.insert(
+        turned,
+        Transform {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_rotation_z(0.25),
+            scale: Vec3::ONE,
+        },
+    );
+    world.insert(
+        turned,
+        MeshInstance {
+            mesh: quad,
+            material,
+            tint: WHITE,
+        },
+    );
+    for _ in 0..8 {
+        renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+    }
+    let pixels = read(&context, &target);
+    let held = pixels[(SIDE * 32 + 32) as usize];
+    assert!(
+        held[0] > 200,
+        "{backend:?} paints the quad {held:?} where its emission belongs",
+    );
+    let covered = pixels
+        .iter()
+        .filter(|pixel| pixel[0] > 40 && pixel[0] < 200)
+        .count();
+    assert!(
+        covered > 4,
+        "{backend:?} leaves {covered} pixels of fractional edge coverage where a temporal frame accumulates its jitter",
+    );
+}
+
+#[test]
+fn a_temporal_frame_rejects_the_history_a_moved_instance_leaves_behind() {
+    for backend in belfry_gpu_device::PREFERENCE {
+        movement(*backend);
+    }
+}
+
+fn movement(backend: Backend) {
+    let context = GpuContext::open(&GpuRequest {
+        backend: Some(backend),
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("no {backend:?} device renders a frame: {error}"));
+    let target = Texture::new(
+        context.device(),
+        "temporal movement",
+        SIDE,
+        SIDE,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    );
+    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    let quad = renderer.mesh(&QUAD);
+    let material = renderer.material(MaterialDesc::new(WHITE).emissive(WHITE));
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(eye, Transform::from_translation(Vec3::new(0.0, 0.0, 4.0)));
+    world.insert(
+        eye,
+        Camera {
+            vertical_fov: std::f32::consts::FRAC_PI_2,
+            near: 0.1,
+            far: 100.0,
+        },
+    );
+    let mover = world.spawn();
+    world.insert(
+        mover,
+        Transform {
+            translation: Vec3::new(-0.6, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(0.3),
+        },
+    );
+    world.insert(
+        mover,
+        MeshInstance {
+            mesh: quad,
+            material,
+            tint: WHITE,
+        },
+    );
+    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+    world.insert(
+        mover,
+        Transform {
+            translation: Vec3::new(0.6, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(0.3),
+        },
+    );
+    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+    let pixels = read(&context, &target);
+    let held = pixels[(SIDE * 32 + 37) as usize];
+    assert!(
+        held[0] > 200,
+        "{backend:?} paints (37, 32) {held:?} where the moved instance stands",
+    );
+    let left = pixels[(SIDE * 32 + 27) as usize];
+    assert!(
+        left[0] < 40,
+        "{backend:?} leaves {left:?} where the instance no longer stands: a temporal frame rejects the history of a disoccluded surface",
+    );
 }

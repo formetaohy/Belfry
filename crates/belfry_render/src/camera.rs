@@ -1,6 +1,6 @@
 use crate::view::View;
 use belfry_gpu_device::ClipSpace;
-use belfry_math::{Mat4, Transform, Vec3};
+use belfry_math::{Mat4, Transform, Vec2, Vec3, Vec4};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
@@ -35,7 +35,23 @@ impl Camera {
     }
 
     pub fn view(self, transform: Transform, aspect: f32, clip_space: ClipSpace) -> View {
+        self.view_jittered(transform, aspect, clip_space, Vec2::ZERO, 1, 1)
+    }
+
+    pub fn view_jittered(
+        self,
+        transform: Transform,
+        aspect: f32,
+        clip_space: ClipSpace,
+        jitter: Vec2,
+        width: u32,
+        height: u32,
+    ) -> View {
         self.check();
+        assert!(
+            width > 0 && height > 0,
+            "a {width} by {height} viewport holds no subpixel offset",
+        );
         let eye = transform.translation;
         let forward = transform.rotation.rotate_vec3(Vec3::new(0.0, 0.0, -1.0));
         let up = transform.rotation.rotate_vec3(Vec3::Y);
@@ -44,6 +60,22 @@ impl Camera {
             ClipSpace::YUp => projection,
             ClipSpace::YDown => projection.flip_clip_y(),
         };
+        let vertical = match clip_space {
+            ClipSpace::YUp => -0.5,
+            ClipSpace::YDown => 0.5,
+        };
+        let offset = Vec4::new(
+            jitter.x * 2.0 / width as f32,
+            jitter.y / height as f32 / vertical,
+            0.0,
+            0.0,
+        );
+        let projection = Mat4::from_cols(
+            projection.col(0),
+            projection.col(1),
+            projection.col(2),
+            projection.col(3) + offset,
+        );
         View::of(projection * Mat4::look_at(eye, eye + forward, up))
     }
 }

@@ -221,7 +221,7 @@ impl Post {
             .lit
     }
 
-    pub(crate) fn resolve(&self, submission: &mut Submission) {
+    pub(crate) fn resolve(&self, submission: &mut Submission, source: &Texture) {
         let screen = self
             .screen
             .as_ref()
@@ -238,7 +238,7 @@ impl Post {
         let source = self.extract.bind_group(
             1,
             &[
-                Binding::texture(program::EXTRACT_SOURCE, &screen.lit),
+                Binding::texture(program::EXTRACT_SOURCE, source),
                 Binding::sampler(program::EXTRACT_FILTER, &self.filter),
             ],
         );
@@ -300,7 +300,7 @@ impl Post {
         }
     }
 
-    pub(crate) fn tonemap(&self, submission: &mut Submission, target: &Texture) {
+    pub(crate) fn tonemap(&self, submission: &mut Submission, target: &Texture, source: &Texture) {
         let screen = self
             .screen
             .as_ref()
@@ -316,7 +316,7 @@ impl Post {
         let source = self.tonemap.bind_group(
             1,
             &[
-                Binding::texture(program::TONEMAP_LIT, &screen.lit),
+                Binding::texture(program::TONEMAP_LIT, source),
                 Binding::texture(program::TONEMAP_BLOOM, &screen.up[0]),
                 Binding::sampler(program::TONEMAP_FILTER, &self.filter),
             ],

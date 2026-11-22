@@ -1,9 +1,9 @@
 use crate::abi::{
     BloomRecord, BloomUpRecord, CascadeRecord, DebugLineRecord, DrawRecord, HzbLevelRecord,
     HzbStepRecord, InstanceRecord, JointRecord, LIGHT_CAPACITY, LIGHT_SLICES, LIGHT_STRIDE,
-    LIGHT_TILE, LightRecord, MaterialRecord, ProbeRecord, SHADOW_CASCADES, SkinVertexRecord,
-    SkyRecord, TonemapRecord, TransparentRecord, TransparentSetupRecord, VERTEX_FLOATS, ViewRecord,
-    WORKGROUP,
+    LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord, SHADOW_CASCADES,
+    SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord, TransparentRecord,
+    TransparentSetupRecord, VERTEX_FLOATS, ViewRecord, WORKGROUP,
 };
 use belfry_gpu::AtomicU32;
 use belfry_gpu::{ComputeProgram, Fvec2, Fvec4, GraphicsProgram, Read, ReadWrite, Uvec3};
@@ -94,6 +94,23 @@ pub(crate) const RESOLVE_FILTER: u32 = 1;
 
 pub(crate) const LINE_VIEW: u32 = 0;
 pub(crate) const LINE_SEGMENTS: u32 = 1;
+
+pub(crate) const MOTION_VIEW: u32 = 0;
+pub(crate) const MOTION_DRAWN: u32 = 1;
+pub(crate) const MOTION_PALETTE: u32 = 2;
+pub(crate) const MOTION_SKINS: u32 = 3;
+pub(crate) const MOTION_MATERIALS: u32 = 4;
+pub(crate) const MOTION_VERTICES: u32 = 5;
+pub(crate) const MOTION_TEXTURE: u32 = 0;
+pub(crate) const MOTION_SAMPLER: u32 = 1;
+
+pub(crate) const TEMPORAL_FRAME: u32 = 0;
+pub(crate) const TEMPORAL_SOURCE: u32 = 0;
+pub(crate) const TEMPORAL_HISTORY: u32 = 1;
+pub(crate) const TEMPORAL_FILTER: u32 = 2;
+pub(crate) const TEMPORAL_MOTION: u32 = 0;
+pub(crate) const TEMPORAL_PREVIOUS: u32 = 1;
+pub(crate) const TEMPORAL_NEAREST: u32 = 2;
 
 const _: () = assert!(
     WORKGROUP == 64,
@@ -248,6 +265,10 @@ mod cull {
                     drawn[at].model1 = instance.model1;
                     drawn[at].model2 = instance.model2;
                     drawn[at].model3 = instance.model3;
+                    drawn[at].previous0 = instance.previous0;
+                    drawn[at].previous1 = instance.previous1;
+                    drawn[at].previous2 = instance.previous2;
+                    drawn[at].previous3 = instance.previous3;
                     drawn[at].normal0 = instance.normal0;
                     drawn[at].normal1 = instance.normal1;
                     drawn[at].normal2 = instance.normal2;
@@ -2043,4 +2064,290 @@ mod lines {
     fn column(a: Fvec4, b: Fvec4, c: Fvec4, d: Fvec4, local: Fvec4) -> Fvec4 {
         a * local.x + b * local.y + c * local.z + d * local.w
     }
+}
+
+#[belfry_gpu::graphics]
+mod motion {
+    #[binding]
+    fn view(view: Read<MotionRecord>) {}
+
+    #[binding]
+    fn drawn(drawn: Read<DrawRecord>) {}
+
+    #[binding]
+    fn palette(palette: Read<JointRecord>) {}
+
+    #[binding]
+    fn skins(skins: Read<SkinVertexRecord>) {}
+
+    #[binding]
+    fn materials(materials: Read<MaterialRecord>) {}
+
+    fn deformed(col0: Fvec4, col1: Fvec4, col2: Fvec4, col3: Fvec4, point: Fvec4) -> Fvec4 {
+        col0 * point.x + col1 * point.y + col2 * point.z + col3 * point.w
+    }
+
+    #[vertex]
+    fn vertex(
+        vertex: u32,
+        instance: u32,
+        vertices: Read<f32>,
+        position: Out<Position>,
+        surface: Out<Fvec4>,
+        travel: Out<Fvec4>,
+    ) {
+        let held = drawn[instance];
+        let camera = view[0u32];
+        let base = vertex * 8u32;
+        let rest = fvec4(
+            vertices[base],
+            vertices[base + 1u32],
+            vertices[base + 2u32],
+            1.0,
+        );
+        let mut local = rest;
+        if held.joints > 0u32 {
+            let skin = skins[vertex];
+            let first = palette[held.palette + skin.joints.x];
+            let second = palette[held.palette + skin.joints.y];
+            let third = palette[held.palette + skin.joints.z];
+            let fourth = palette[held.palette + skin.joints.w];
+            let place = deformed(first.col0, first.col1, first.col2, first.col3, rest)
+                * skin.weights.x
+                + deformed(second.col0, second.col1, second.col2, second.col3, rest)
+                    * skin.weights.y
+                + deformed(third.col0, third.col1, third.col2, third.col3, rest) * skin.weights.z
+                + deformed(fourth.col0, fourth.col1, fourth.col2, fourth.col3, rest)
+                    * skin.weights.w;
+            local = fvec4(place.x, place.y, place.z, 1.0);
+        }
+        let current_world = held.model0 * local.x
+            + held.model1 * local.y
+            + held.model2 * local.z
+            + held.model3 * local.w;
+        let current_clip = held.clip0 * local.x
+            + held.clip1 * local.y
+            + held.clip2 * local.z
+            + held.clip3 * local.w;
+        let previous_world = held.previous0 * local.x
+            + held.previous1 * local.y
+            + held.previous2 * local.z
+            + held.previous3 * local.w;
+        let previous_clip = camera.previous0 * previous_world.x
+            + camera.previous1 * previous_world.y
+            + camera.previous2 * previous_world.z
+            + camera.previous3 * previous_world.w;
+        let current_inverse = 1.0 / max(current_clip.w, 0.0001);
+        let previous_inverse = 1.0 / max(previous_clip.w, 0.0001);
+        let reach = (current_world.x - camera.eye.x) * camera.forward.x
+            + (current_world.y - camera.eye.y) * camera.forward.y
+            + (current_world.z - camera.eye.z) * camera.forward.z;
+        position = current_clip;
+        surface = fvec4(
+            vertices[base + 6u32],
+            vertices[base + 7u32],
+            held.material as f32,
+            reach,
+        );
+        travel = fvec4(
+            current_clip.x * current_inverse * 0.5 + 0.5,
+            current_clip.y * current_inverse * camera.vertical + 0.5,
+            previous_clip.x * previous_inverse * 0.5 + 0.5,
+            previous_clip.y * previous_inverse * camera.vertical + 0.5,
+        );
+    }
+
+    #[fragment]
+    fn fragment(
+        textures: TextureTable,
+        samplers: SamplerTable,
+        shaped: In<Fvec4>,
+        moved: In<Fvec4>,
+        target: Out<Fvec4>,
+    ) {
+        let entry = materials[shaped.z as u32];
+        if entry.alpha_mode == 1u32 {
+            let sampled = sample(
+                textures[entry.base_color_image],
+                samplers[entry.base_color_sampler],
+                fvec2(shaped.x, shaped.y),
+            );
+            if sampled.w * entry.base_color.w < entry.alpha_cutoff {
+                discard();
+            }
+        }
+        target = fvec4(moved.z - moved.x, moved.w - moved.y, shaped.w, 1.0);
+    }
+}
+
+pub(crate) fn motion_vectors() -> GraphicsProgram {
+    motion()
+}
+
+#[belfry_gpu::graphics]
+mod temporal {
+    #[binding]
+    fn frame(frame: Read<TemporalRecord>) {}
+
+    #[binding]
+    fn motion(motion: Texture2D, previous: Texture2D, nearest: Sampler) {}
+
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let held = frame[0u32];
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x * 0.5 + 0.5, y * held.vertical + 0.5);
+    }
+
+    #[fragment]
+    fn fragment(
+        source: Texture2D,
+        history: Texture2D,
+        filter: Sampler,
+        coverage: In<Fvec2>,
+        target: Out<Fvec4>,
+    ) {
+        let setup = frame[0u32];
+        let at = coverage;
+        let recorded = sample(motion, nearest, at);
+        let sky = recorded.w < 0.5;
+        let mut reach = setup.far;
+        if !sky {
+            reach = recorded.z;
+        }
+        let mut history_at = fvec2(at.x + recorded.x, at.y + recorded.y);
+        let ndc_x = at.x * 2.0 - 1.0;
+        let ndc_y = (at.y - 0.5) / setup.vertical;
+        let head = column(
+            setup.inverse0,
+            setup.inverse1,
+            setup.inverse2,
+            setup.inverse3,
+            fvec4(ndc_x, ndc_y, 0.0, 1.0),
+        );
+        let tail = column(
+            setup.inverse0,
+            setup.inverse1,
+            setup.inverse2,
+            setup.inverse3,
+            fvec4(ndc_x, ndc_y, 1.0, 1.0),
+        );
+        let head_point = fvec4(head.x / head.w, head.y / head.w, head.z / head.w, 1.0);
+        let tail_point = fvec4(tail.x / tail.w, tail.y / tail.w, tail.z / tail.w, 1.0);
+        let ray = normalized(tail_point - head_point);
+        let mut travel = setup.far;
+        if !sky {
+            travel = reach / max(dot3(ray, setup.forward), 0.0001);
+        }
+        let world = fvec4(
+            setup.eye.x + ray.x * travel,
+            setup.eye.y + ray.y * travel,
+            setup.eye.z + ray.z * travel,
+            1.0,
+        );
+        let previous_clip = column(
+            setup.previous0,
+            setup.previous1,
+            setup.previous2,
+            setup.previous3,
+            world,
+        );
+        let previous_inverse = 1.0 / max(previous_clip.w, 0.0001);
+        let previous_at = fvec2(
+            previous_clip.x * previous_inverse * 0.5 + 0.5,
+            previous_clip.y * previous_inverse * setup.vertical + 0.5,
+        );
+        if sky {
+            history_at = previous_at;
+        }
+        let previous_reach = (world.x - setup.previous_eye.x) * setup.previous_forward.x
+            + (world.y - setup.previous_eye.y) * setup.previous_forward.y
+            + (world.z - setup.previous_eye.z) * setup.previous_forward.z;
+        let carried = sample(previous, nearest, history_at);
+        let mut valid = history_at.x > 0.0
+            && history_at.x < 1.0
+            && history_at.y > 0.0
+            && history_at.y < 1.0
+            && previous_clip.w > 0.0001;
+        if carried.w > 0.5 {
+            valid = valid
+                && abs(carried.z - previous_reach)
+                    <= setup.tolerance * max(previous_reach, setup.near);
+        } else {
+            valid = valid && sky;
+        }
+        let current = sample(source, filter, at);
+        let held = sample(history, filter, history_at);
+        let step = fvec2(1.0 / setup.width, 1.0 / setup.height);
+        let left = sample(source, filter, fvec2(at.x - step.x, at.y));
+        let right = sample(source, filter, fvec2(at.x + step.x, at.y));
+        let below = sample(source, filter, fvec2(at.x, at.y - step.y));
+        let above = sample(source, filter, fvec2(at.x, at.y + step.y));
+        let shade_low = lowest(lowest(lowest(left, right), lowest(below, above)), current);
+        let shade_high = highest(
+            highest(highest(left, right), highest(below, above)),
+            current,
+        );
+        let bounded = fvec4(
+            clamped(held.x, shade_low.x, shade_high.x),
+            clamped(held.y, shade_low.y, shade_high.y),
+            clamped(held.z, shade_low.z, shade_high.z),
+            1.0,
+        );
+        let weight = select(0.0, setup.blend, valid);
+        target = fvec4(
+            bounded.x * weight + current.x * (1.0 - weight),
+            bounded.y * weight + current.y * (1.0 - weight),
+            bounded.z * weight + current.z * (1.0 - weight),
+            current.w,
+        );
+    }
+
+    fn column(a: Fvec4, b: Fvec4, c: Fvec4, d: Fvec4, local: Fvec4) -> Fvec4 {
+        a * local.x + b * local.y + c * local.z + d * local.w
+    }
+
+    fn lowest(left: Fvec4, right: Fvec4) -> Fvec4 {
+        fvec4(
+            min(left.x, right.x),
+            min(left.y, right.y),
+            min(left.z, right.z),
+            0.0,
+        )
+    }
+
+    fn highest(left: Fvec4, right: Fvec4) -> Fvec4 {
+        fvec4(
+            max(left.x, right.x),
+            max(left.y, right.y),
+            max(left.z, right.z),
+            0.0,
+        )
+    }
+
+    fn clamped(value: f32, low: f32, high: f32) -> f32 {
+        min(max(value, low), high)
+    }
+
+    fn dot3(left: Fvec4, right: Fvec4) -> f32 {
+        left.x * right.x + left.y * right.y + left.z * right.z
+    }
+
+    fn normalized(vector: Fvec4) -> Fvec4 {
+        let inverse =
+            1.0 / sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z + 0.0000001);
+        vector * inverse
+    }
+}
+
+pub(crate) fn temporal_resolve() -> GraphicsProgram {
+    temporal()
 }
