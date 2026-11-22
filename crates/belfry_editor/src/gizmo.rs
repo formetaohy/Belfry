@@ -324,7 +324,7 @@ pub fn begin(
     target: Target,
     handle: &Handle,
     mode: Mode,
-    start: Transform,
+    local: Transform,
     parent: Transform,
     press: Vec2,
 ) -> Drag {
@@ -340,7 +340,7 @@ pub fn begin(
         grip: handle.grip,
         axis,
         origin: handle.origin,
-        start,
+        local,
         parent,
         press,
         screen: handle.screen,
@@ -371,7 +371,7 @@ pub struct Drag {
     grip: Grip,
     axis: Vec3,
     origin: Vec3,
-    start: Transform,
+    local: Transform,
     parent: Transform,
     press: Vec2,
     screen: Vec2,
@@ -390,7 +390,7 @@ impl Drag {
     }
 
     pub fn transform(&self, point: Vec2) -> Transform {
-        let mut held = self.start;
+        let mut held = self.local;
         match self.mode {
             Mode::Translate => {
                 let travel = (point - self.press).dot(self.screen) * self.pixels;
@@ -401,9 +401,10 @@ impl Drag {
             Mode::Rotate => {
                 let delta = self.rotation(point);
                 let turn = Quat::from_axis_angle(self.axis, delta);
-                held.rotation = self.parent.rotation.inverse()
+                held.rotation = (self.parent.rotation.inverse()
                     * turn
-                    * (self.parent.rotation * self.start.rotation);
+                    * (self.parent.rotation * self.local.rotation))
+                    .normalize();
             }
             Mode::Scale => {
                 let factor = match self.grip {
@@ -415,11 +416,11 @@ impl Drag {
                     }
                 };
                 match self.grip {
-                    Grip::Uniform => held.scale = self.start.scale * factor,
+                    Grip::Uniform => held.scale = self.local.scale * factor,
                     Grip::Axis(axis) => match axis {
-                        Axis::X => held.scale.x = self.start.scale.x * factor,
-                        Axis::Y => held.scale.y = self.start.scale.y * factor,
-                        Axis::Z => held.scale.z = self.start.scale.z * factor,
+                        Axis::X => held.scale.x = self.local.scale.x * factor,
+                        Axis::Y => held.scale.y = self.local.scale.y * factor,
+                        Axis::Z => held.scale.z = self.local.scale.z * factor,
                     },
                 }
             }

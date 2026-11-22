@@ -244,16 +244,15 @@ impl Preview {
         propagate(&mut self.world);
     }
 
-    pub(crate) fn pick(&mut self, point: belfry_math::Vec2) -> Option<usize> {
+    pub(crate) fn pick(&mut self, point: belfry_math::Vec2) -> Option<String> {
         let entity = self.renderer.pick(point)?;
-        self.binding
-            .entities()
-            .iter()
-            .position(|held| *held == entity)
+        self.world
+            .get::<belfry_scene::SceneNode>(entity)
+            .map(|node| node.id.clone())
     }
 
-    pub(crate) fn entity(&self, index: usize) -> Option<Entity> {
-        self.binding.entity(index)
+    pub(crate) fn entity(&self, id: &str) -> Option<Entity> {
+        self.binding.id(id)
     }
 
     pub(crate) fn set_debug(&mut self, debug: bool) {

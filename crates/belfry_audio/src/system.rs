@@ -25,6 +25,19 @@ struct Playing {
     looping: bool,
     start: u64,
     priority: u8,
+    source: usize,
+    pitch: f32,
+}
+
+impl Playing {
+    fn plays(&self, source: &AudioSource) -> bool {
+        self.generation == source.generation()
+            && self.bus == source.bus()
+            && self.looping == source.looping()
+            && self.priority == source.priority()
+            && self.pitch == source.pitch()
+            && self.source == source.source().identity()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -231,6 +244,8 @@ impl Audio {
                 looping: source.looping(),
                 start,
                 priority: source.priority(),
+                source: source.source().identity(),
+                pitch: source.pitch(),
             },
         );
         self.owners.insert(voice, entity);
@@ -251,18 +266,12 @@ impl Audio {
     }
 
     fn ensure(&mut self, entity: Entity, source: &AudioSource, params: Params) {
-        let held = self.voices.get(&entity).map(|playing| {
-            (
-                playing.voice,
-                playing.generation,
-                playing.last,
-                playing.bus.clone(),
-            )
-        });
+        let held = self
+            .voices
+            .get(&entity)
+            .map(|playing| (playing.voice, playing.last, playing.plays(source)));
         match held {
-            Some((voice, generation, last, bus))
-                if generation == source.generation() && bus == source.bus() =>
-            {
+            Some((voice, last, true)) => {
                 if last != params {
                     self.send(Command::Update {
                         voice: VoiceId(voice),

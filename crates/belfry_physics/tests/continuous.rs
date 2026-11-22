@@ -101,6 +101,41 @@ fn a_fast_cuboid_lands_on_a_thin_floor() {
 }
 
 #[test]
+fn a_fast_cuboid_bounces_off_a_thin_floor_without_spinning() {
+    let mut world = world(Vec3::ZERO);
+    thin_floor(&mut world, 1.0);
+    let cube = spawn(
+        &mut world,
+        Vec3::new(0.0, 1.0, 0.0),
+        Shape::cuboid(Vec3::splat(0.25)),
+        BodyKind::Dynamic,
+        Vec3::new(0.0, -150.0, 0.0),
+        1.0,
+    );
+    let mut left = false;
+    for _ in 0..60 {
+        step(&mut world, DELTA);
+        let velocity = world
+            .get::<RigidBody>(cube)
+            .expect("the cube holds its body")
+            .linear_velocity();
+        if velocity.y > 10.0 {
+            left = true;
+            break;
+        }
+    }
+    assert!(left, "a cuboid of restitution one leaves the floor it hits");
+    let body = world
+        .get::<RigidBody>(cube)
+        .expect("the cube holds its body");
+    let spin = body.angular_velocity().length();
+    assert!(
+        spin < 1.0,
+        "a cuboid bounces on every contact point it lands, spinning at {spin}",
+    );
+}
+
+#[test]
 fn a_fast_sphere_bounces_off_a_thin_floor() {
     let mut world = world(Vec3::ZERO);
     thin_floor(&mut world, 1.0);

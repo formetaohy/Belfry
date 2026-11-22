@@ -139,7 +139,7 @@ fn node<'a>(
     };
     let mut column = vec![
         Element::row()
-            .key(Key::new(&id))
+            .key(Key::new(format!("node.{id}")))
             .width(Length::Fill)
             .height(Length::Fixed(28.0))
             .padding(Edges {

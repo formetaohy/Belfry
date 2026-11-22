@@ -141,7 +141,7 @@ impl Mixer {
             let Some(assigned) = slot else {
                 continue;
             };
-            let index = assigned.index.min(self.used - 1);
+            let index = assigned.index;
             if assigned
                 .voice
                 .mix(&mut self.buses[index].buffer[..samples], self.rate)
@@ -274,13 +274,14 @@ impl Mixer {
                 for bus in &mut self.buses[..self.used] {
                     bus.reset();
                 }
-                for assigned in self.voices.iter_mut().flatten() {
-                    assigned.index = assigned
-                        .bus
-                        .as_deref()
-                        .and_then(|id| layout.index(id))
-                        .unwrap_or_else(|| layout.root())
-                        .min(self.used - 1);
+                let used = self.used;
+                for assigned in self
+                    .voices
+                    .iter_mut()
+                    .flatten()
+                    .chain(self.retiring.iter_mut().flatten())
+                {
+                    assigned.index = bus_index(assigned.bus.as_deref(), &layout, used);
                 }
                 self.layout = layout;
             }
@@ -377,6 +378,12 @@ impl Mixer {
             .find(|held| held.voice.id() == voice)
             .map(|held| &mut held.voice)
     }
+}
+
+fn bus_index(bus: Option<&str>, layout: &Layout, used: usize) -> usize {
+    bus.and_then(|id| layout.index(id))
+        .unwrap_or_else(|| layout.root())
+        .min(used - 1)
 }
 
 fn mix_into(target: &mut [f32], source: &[f32]) {

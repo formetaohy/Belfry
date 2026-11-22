@@ -704,7 +704,10 @@ impl Editor {
             .viewport_texture
             .as_ref()
             .expect("a drawn editor holds its viewport texture");
-        let highlight = index.and_then(|index| session.preview.entity(index));
+        let highlight = self.selected.as_ref().and_then(|target| match target {
+            Target::Node(id) => session.preview.entity(id),
+            _ => None,
+        });
         session.preview.set_camera(camera);
         session.preview.render(scene, SCENE_CLEAR, highlight);
         if session.surface.width() != width || session.surface.height() != height {
@@ -793,7 +796,7 @@ impl Editor {
                             .iter()
                             .find(|handle| handle.grip == grip)
                             .expect("a hit gizmo holds its handle");
-                        let transform = self.scene.world_transform(index);
+                        let local = self.scene.transform(index);
                         let parent = self
                             .scene
                             .parent_index(index)
@@ -801,7 +804,7 @@ impl Editor {
                                 self.scene.world_transform(parent)
                             });
                         self.drag = Some(DragState {
-                            drag: gizmo::begin(target, handle, self.mode, transform, parent, point),
+                            drag: gizmo::begin(target, handle, self.mode, local, parent, point),
                             node: index,
                             delta: None,
                         });
@@ -822,11 +825,7 @@ impl Editor {
         };
         let point = (self.pointer - self.viewport.min) * scale;
         match session.preview.pick(point) {
-            Some(index) => {
-                if let Some(node) = self.scene.nodes().get(index) {
-                    self.selected = Some(Target::Node(node.id.clone()));
-                }
-            }
+            Some(id) => self.selected = Some(Target::Node(id)),
             None => self.selected = None,
         }
     }

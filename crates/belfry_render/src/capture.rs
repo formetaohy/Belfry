@@ -1,26 +1,31 @@
 use crate::abi::{
-    AtlasRecord, CASCADE, CascadeRecord, DrawRecord, InstanceRecord, SHADOW_CASCADES, SHADOW_SIDE,
-    SkyRecord, ViewRecord,
+    ARGUMENT_WORDS, AtlasRecord, CASCADE, CascadeRecord, DrawRecord, LIGHT_SLICES, LIGHT_STRIDE,
+    LIGHT_TILE, NO_HIGHLIGHT, PointLightRecord, SHADOW_CASCADES, SHADOW_SIDE, SkyRecord,
+    ViewRecord,
 };
+use crate::camera::Camera;
 use crate::environment::{BakeRequest, Baked, Environment};
-use crate::frame::{direction_record, record_of_cascade, record_of_view, vector};
+use crate::frame::{
+    Batch, Screen, direction_record, record_of_cascade, record_of_main_view, record_of_view, vector,
+};
 use crate::growing::Growing;
 use crate::program;
 use crate::shadow::Cascade;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
-use belfry_gpu::Fvec4;
 use belfry_gpu_device::ClipSpace;
 use belfry_gpu_device::{
     AddressMode, BufferBinding, BufferUsages, Device, Filter, GpuBuffer, GpuContext,
     GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Texture, TextureFormat,
     TextureUsages,
 };
-use belfry_math::{Mat4, Transform, Vec3, Vec4};
+use belfry_math::{Mat4, Transform, Vec3};
 use std::mem::size_of;
 
 pub const PROBE_RESOLUTION: u32 = 128;
 pub(crate) const FACES: u32 = 6;
+const VIEWS: u32 = FACES + 1;
+const SHADOW_VIEW: u32 = FACES;
 const PROBE_WIDTH: u32 = PROBE_RESOLUTION * FACES;
 pub(crate) const PANORAMA_WIDTH: u32 = PROBE_RESOLUTION * 4;
 pub(crate) const PANORAMA_HEIGHT: u32 = PROBE_RESOLUTION * 2;
@@ -29,6 +34,14 @@ const SKY_BYTES: u64 = size_of::<SkyRecord>() as u64;
 const DRAW_BYTES: u64 = size_of::<DrawRecord>() as u64;
 const CASCADE_BYTES: u64 = size_of::<CascadeRecord>() as u64;
 const SETUP_BYTES: u64 = size_of::<AtlasRecord>() as u64;
+const POINT_LIGHT_BYTES: u64 = size_of::<PointLightRecord>() as u64;
+const ARGUMENT_BYTES: u64 = (ARGUMENT_WORDS * 4) as u64;
+const WORD_BYTES: u64 = 4;
+const CLUSTER_BYTES: u64 = LIGHT_STRIDE as u64 * WORD_BYTES;
+const CLUSTER_COLUMNS: u32 = PROBE_RESOLUTION.div_ceil(LIGHT_TILE);
+const CLUSTER_ROWS: u32 = CLUSTER_COLUMNS;
+const FACE_CLUSTERS: u32 = CLUSTER_COLUMNS * CLUSTER_ROWS * LIGHT_SLICES;
+const FACE_CLUSTER_BYTES: u64 = FACE_CLUSTERS as u64 * CLUSTER_BYTES;
 const NEAR: f32 = 0.05;
 const FAR: f32 = 1_000.0;
 const WIDE: f32 = std::f32::consts::FRAC_PI_2;
@@ -87,13 +100,16 @@ pub(crate) struct Probe {
 pub(crate) struct CaptureFrame<'a> {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) records: &'a [InstanceRecord],
-    pub(crate) slots: u32,
     pub(crate) eye: Vec3,
     pub(crate) clip_space: ClipSpace,
     pub(crate) rotation: Mat4,
     pub(crate) intensity: f32,
     pub(crate) shadow: Cascade,
+    pub(crate) batches: &'a [Batch],
+    pub(crate) arguments: &'a [u32],
+    pub(crate) slots: u32,
+    pub(crate) opaque_instances: u32,
+    pub(crate) points: &'a [PointLightRecord],
 }
 
 pub(crate) struct Pending {
@@ -115,10 +131,14 @@ pub(crate) struct Captures {
     pub(crate) cascades: GpuBuffer,
     pub(crate) setup: GpuBuffer,
     pub(crate) drawn: Growing,
-    pub(crate) casters: Growing,
+    pub(crate) arguments: Growing,
+    pub(crate) lighting: Growing,
     pub(crate) convert: GraphicsPipeline,
     pub(crate) sampler: Sampler,
     slots: u32,
+    batches: u32,
+    point_bytes: u64,
+    cluster_base: u32,
     pending: Option<Pending>,
     results: Vec<Capture>,
 }
@@ -171,7 +191,7 @@ impl Captures {
             views: GpuBuffer::new(
                 device,
                 "belfry capture views",
-                u64::from(FACES) * VIEW_BYTES,
+                u64::from(VIEWS) * VIEW_BYTES,
                 storage,
             ),
             skies: GpuBuffer::new(
@@ -188,7 +208,12 @@ impl Captures {
             ),
             setup,
             drawn: Growing::new(device, "belfry capture drawn", storage),
-            casters: Growing::new(device, "belfry capture casters", storage),
+            arguments: Growing::new(
+                device,
+                "belfry capture arguments",
+                storage | BufferUsages::INDIRECT,
+            ),
+            lighting: Growing::new(device, "belfry capture lighting", storage),
             convert: GraphicsPipeline::new(
                 device,
                 program::capture_conversion(),
@@ -196,6 +221,9 @@ impl Captures {
                 PipelineState::SCREEN,
             ),
             slots: 0,
+            batches: 0,
+            point_bytes: 0,
+            cluster_base: 0,
             sampler: Sampler::new(
                 device,
                 SamplerDesc {
@@ -266,8 +294,8 @@ impl Captures {
         self.setup.binding(0, SETUP_BYTES)
     }
 
-    pub(crate) fn view(&self, face: u32) -> BufferBinding<'_> {
-        self.views.binding(u64::from(face) * VIEW_BYTES, VIEW_BYTES)
+    pub(crate) fn view(&self, view: u32) -> BufferBinding<'_> {
+        self.views.binding(u64::from(view) * VIEW_BYTES, VIEW_BYTES)
     }
 
     pub(crate) fn sky(&self, face: u32) -> BufferBinding<'_> {
@@ -279,34 +307,116 @@ impl Captures {
             .binding(0, u64::from(SHADOW_CASCADES) * CASCADE_BYTES)
     }
 
-    pub(crate) fn drawn(&self, face: u32, offset: u32, count: u32) -> BufferBinding<'_> {
-        let base = u64::from(face) * u64::from(self.slots) + u64::from(offset);
+    pub(crate) fn drawn(&self, view: u32, offset: u32, count: u32) -> BufferBinding<'_> {
+        let base = u64::from(view) * u64::from(self.slots) + u64::from(offset);
         self.drawn
             .buffer()
             .binding(base * DRAW_BYTES, u64::from(count) * DRAW_BYTES)
     }
 
-    pub(crate) fn casters(&self, offset: u32, count: u32) -> BufferBinding<'_> {
-        self.casters.buffer().binding(
-            u64::from(offset) * DRAW_BYTES,
-            u64::from(count) * DRAW_BYTES,
+    pub(crate) fn drawn_view(&self, view: u32) -> BufferBinding<'_> {
+        let offset = u64::from(view) * u64::from(self.slots) * DRAW_BYTES;
+        self.drawn
+            .buffer()
+            .binding(offset, u64::from(self.slots) * DRAW_BYTES)
+    }
+
+    pub(crate) fn argument_view(&self, view: u32) -> BufferBinding<'_> {
+        let offset = u64::from(view) * u64::from(self.batches) * ARGUMENT_BYTES;
+        self.arguments
+            .buffer()
+            .binding(offset, u64::from(self.batches) * ARGUMENT_BYTES)
+    }
+
+    pub(crate) fn arguments(&self, view: u32, batch: u32) -> BufferBinding<'_> {
+        let base = u64::from(view) * u64::from(self.batches) + u64::from(batch);
+        self.arguments
+            .buffer()
+            .binding(base * ARGUMENT_BYTES, ARGUMENT_BYTES)
+    }
+
+    pub(crate) fn point_lights(&self) -> BufferBinding<'_> {
+        self.lighting
+            .buffer()
+            .binding(0, self.point_bytes.max(POINT_LIGHT_BYTES))
+    }
+
+    pub(crate) fn clusters(&self, face: u32) -> BufferBinding<'_> {
+        self.lighting.buffer().binding(
+            u64::from(self.cluster_base) * WORD_BYTES + u64::from(face) * FACE_CLUSTER_BYTES,
+            FACE_CLUSTER_BYTES,
         )
     }
 
+    pub(crate) fn cluster_region(&self) -> (u64, u64) {
+        (
+            u64::from(self.cluster_base) * WORD_BYTES,
+            u64::from(FACES) * FACE_CLUSTER_BYTES,
+        )
+    }
+
+    pub(crate) fn lighting(&self) -> BufferBinding<'_> {
+        let bytes =
+            u64::from(self.cluster_base) * WORD_BYTES + u64::from(FACES) * FACE_CLUSTER_BYTES;
+        self.lighting.buffer().binding(0, bytes)
+    }
+
+    pub(crate) fn cluster_columns(&self) -> u32 {
+        CLUSTER_COLUMNS
+    }
+
+    pub(crate) fn cluster_rows(&self) -> u32 {
+        CLUSTER_ROWS
+    }
+
     pub(crate) fn prepare(&mut self, frame: &CaptureFrame<'_>) {
-        self.slots = frame.slots.max(1);
+        let alignment = frame
+            .device
+            .limits()
+            .min_storage_buffer_offset_alignment
+            .max(WORD_BYTES);
+        self.point_bytes = frame.points.len() as u64 * POINT_LIGHT_BYTES;
+        let cluster_bytes = self.point_bytes.next_multiple_of(alignment);
+        self.cluster_base = (cluster_bytes / WORD_BYTES) as u32;
+        let lighting_bytes = cluster_bytes + u64::from(FACES) * FACE_CLUSTER_BYTES;
+        self.lighting
+            .fit(&frame.device, lighting_bytes.max(POINT_LIGHT_BYTES));
+        if !frame.points.is_empty() {
+            self.lighting
+                .buffer()
+                .write(&frame.queue, bytemuck::cast_slice(frame.points));
+        }
+        let camera = Camera::new(WIDE, NEAR, FAR);
+        let instances = frame.opaque_instances;
         let views = FACES_OF.map(|(forward, up)| face_view(frame, forward, up));
-        self.views.write(
-            &frame.queue,
-            bytemuck::cast_slice(
-                &views
-                    .iter()
-                    .map(|view| {
-                        record_of_view(view, frame.records.len() as u32, frame.eye, Vec3::Z)
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        let mut records = Vec::with_capacity(VIEWS as usize);
+        for (face, view) in views.iter().enumerate() {
+            let screen = Screen {
+                width: PROBE_RESOLUTION,
+                height: PROBE_RESOLUTION,
+                vertical: crate::frame::vertical(&frame.device),
+                hzb_levels: 0,
+                hzb_width: 0.0,
+                hzb_height: 0.0,
+                cluster_x: CLUSTER_COLUMNS,
+                cluster_y: CLUSTER_ROWS,
+                point_lights: frame.points.len() as u32,
+                cluster_offset: self.cluster_base + face as u32 * FACE_CLUSTERS * LIGHT_STRIDE,
+                highlight: NO_HIGHLIGHT,
+            };
+            records.push(record_of_main_view(
+                view,
+                instances,
+                frame.eye,
+                Vec3::Z,
+                camera,
+                screen,
+            ));
+        }
+        let shadow = View::of(frame.shadow.clip);
+        records.push(record_of_view(&shadow, instances, Vec3::ZERO, Vec3::Z));
+        self.views
+            .write(&frame.queue, bytemuck::cast_slice(records.as_slice()));
         self.skies.write(
             &frame.queue,
             bytemuck::cast_slice(
@@ -320,34 +430,37 @@ impl Captures {
             &frame.queue,
             bytemuck::cast_slice(&[record_of_cascade(&frame.shadow); SHADOW_CASCADES as usize]),
         );
-        let mut drawn = Vec::with_capacity(frame.records.len() * FACES as usize);
-        for view in &views {
-            for record in frame.records {
-                drawn.push(drawn_of(record, view));
+        let batches = frame.batches.len() as u64;
+        self.batches = batches as u32;
+        let argument_bytes = u64::from(VIEWS) * batches * ARGUMENT_BYTES;
+        self.arguments
+            .fit(&frame.device, argument_bytes.max(ARGUMENT_BYTES));
+        if batches > 0 {
+            let mut arguments = Vec::with_capacity(VIEWS as usize * frame.arguments.len());
+            for _ in 0..VIEWS {
+                arguments.extend_from_slice(frame.arguments);
             }
+            self.arguments
+                .buffer()
+                .write(&frame.queue, bytemuck::cast_slice(&arguments));
         }
+        self.slots = frame.slots.max(1);
         self.drawn.fit(
             &frame.device,
-            u64::from(self.slots) * DRAW_BYTES * u64::from(FACES),
+            u64::from(VIEWS) * u64::from(self.slots) * DRAW_BYTES,
         );
-        if !drawn.is_empty() {
-            self.drawn
-                .buffer()
-                .write(&frame.queue, bytemuck::cast_slice(&drawn));
-        }
-        let shadow = View::of(frame.shadow.clip);
-        let casters = frame
-            .records
-            .iter()
-            .map(|record| drawn_of(record, &shadow))
-            .collect::<Vec<_>>();
-        self.casters
-            .fit(&frame.device, casters.len() as u64 * DRAW_BYTES);
-        if !casters.is_empty() {
-            self.casters
-                .buffer()
-                .write(&frame.queue, bytemuck::cast_slice(&casters));
-        }
+    }
+
+    pub(crate) fn shadow_drawn(&self, offset: u32, count: u32) -> BufferBinding<'_> {
+        self.drawn(SHADOW_VIEW, offset, count)
+    }
+
+    pub(crate) fn shadow_arguments(&self, batch: u32) -> BufferBinding<'_> {
+        self.arguments(SHADOW_VIEW, batch)
+    }
+
+    pub(crate) fn view_count(&self) -> u32 {
+        VIEWS
     }
 }
 
@@ -376,46 +489,6 @@ fn sky_record(view: &View, frame: &CaptureFrame<'_>) -> SkyRecord {
         pad1: 0,
         pad2: 0,
     }
-}
-
-fn drawn_of(record: &InstanceRecord, view: &View) -> DrawRecord {
-    let model = Mat4::from_cols(
-        vec4(record.model0),
-        vec4(record.model1),
-        vec4(record.model2),
-        vec4(record.model3),
-    );
-    let clip = view.clip * model;
-    DrawRecord {
-        clip0: vector(clip.col(0)),
-        clip1: vector(clip.col(1)),
-        clip2: vector(clip.col(2)),
-        clip3: vector(clip.col(3)),
-        model0: record.model0,
-        model1: record.model1,
-        model2: record.model2,
-        model3: record.model3,
-        previous0: record.previous0,
-        previous1: record.previous1,
-        previous2: record.previous2,
-        previous3: record.previous3,
-        normal0: record.normal0,
-        normal1: record.normal1,
-        normal2: record.normal2,
-        tint: record.tint,
-        material: record.material,
-        pick: 0,
-        palette: record.palette,
-        joints: record.joints,
-        previous_palette: record.previous_palette,
-        pad0: 0,
-        pad1: 0,
-        pad2: 0,
-    }
-}
-
-fn vec4(value: Fvec4) -> Vec4 {
-    Vec4::new(value.x, value.y, value.z, value.w)
 }
 
 const _: () = assert!(

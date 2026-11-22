@@ -54,6 +54,13 @@ impl Source {
         Ok(Self::Stream(Arc::new(Stream::open(path)?)))
     }
 
+    pub fn identity(&self) -> usize {
+        match self {
+            Self::Decoded(sound) => Arc::as_ptr(sound) as usize,
+            Self::Stream(stream) => Arc::as_ptr(stream) as usize,
+        }
+    }
+
     pub fn sample_rate(&self) -> u32 {
         match self {
             Self::Decoded(sound) => sound.sample_rate(),

@@ -1503,19 +1503,20 @@ fn ambient(backend: Backend) {
         }
     }
     world.despawn(sphere);
+    world.despawn(sphere);
     world.insert(sky_entity, Transform::IDENTITY);
-    let far = world.spawn();
+    let held = world.spawn();
+    let diffuse = renderer.material(MaterialDesc::new(WHITE).roughness(0.95));
     world.insert(
-        far,
+        held,
         Transform::from_scale_rotation_translation(
             Vec3::splat(20.0),
             Quat::IDENTITY,
             Vec3::new(0.0, 0.0, -8.0),
         ),
     );
-    let diffuse = renderer.material(MaterialDesc::new(WHITE).roughness(0.95));
     world.insert(
-        far,
+        held,
         MeshInstance {
             mesh: quad,
             material: diffuse,
@@ -1524,25 +1525,44 @@ fn ambient(backend: Backend) {
     );
     renderer.render(&world, Target::Texture(&target), CLEAR, None);
     let plain = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
-    let mut dense = world
+    let mut hazy = world
         .get::<Environment>(sky_entity)
         .expect("a lit world holds the environment it lights with")
         .clone();
-    dense.atmosphere = Some(belfry_render::environment::Atmosphere {
-        rayleigh: 7_000.0,
-        mie: 7_000.0,
+    hazy.atmosphere = Some(belfry_render::environment::Atmosphere {
+        rayleigh: 1_300.0,
+        mie: 1_300.0,
         ..belfry_render::environment::Atmosphere::default()
     });
-    world.insert(sky_entity, dense);
+    world.insert(sky_entity, hazy);
+    world.insert(
+        held,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(60.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, -30.0),
+        ),
+    );
     renderer.render(&world, Target::Texture(&target), CLEAR, None);
-    let fogged = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    let near = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    world.insert(
+        held,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(400.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 0.0, -90.0),
+        ),
+    );
+    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    let far = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    println!("{backend:?} plain {plain:?} near {near:?} far {far:?}");
     assert!(
-        i32::from(fogged[2]) > i32::from(plain[2]) + 20,
-        "{backend:?} fades the far surface into the sky it stands under: {plain:?} became {fogged:?}",
+        i32::from(near[2]) > i32::from(plain[2]) + 10,
+        "{backend:?} fades a surface into the sky it stands under: {plain:?} became {near:?}",
     );
     assert!(
-        i32::from(fogged[0]) * 2 < i32::from(plain[0]),
-        "{backend:?} scatters the red of the far surface away: {plain:?} became {fogged:?}",
+        i32::from(far[2]) > i32::from(near[2]) + 15 && i32::from(far[0]) < i32::from(near[0]),
+        "{backend:?} fades a distant surface further than a near one: {near:?} against {far:?}",
     );
 }
 

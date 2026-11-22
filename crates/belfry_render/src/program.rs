@@ -979,8 +979,9 @@ mod instanced {
 
     fn optical(climb: f32, low: f32, span: f32, scale: f32) -> f32 {
         let flat = span * exp(0.0 - low / scale);
-        let slanted = (scale / climb) * (exp(0.0 - low / scale) - exp(0.0 - (low + climb) / scale));
-        select(flat, slanted, abs(climb) < 0.001)
+        let slanted =
+            (span * scale / climb) * (exp(0.0 - low / scale) - exp(0.0 - (low + climb) / scale));
+        select(slanted, flat, abs(climb) < 0.001)
     }
 
     fn length3(value: Fvec4) -> f32 {

@@ -8,7 +8,7 @@ pub(crate) struct Propagation {
     applied: u64,
     entities: Vec<Entity>,
     locals: Vec<Transform>,
-    parents: Vec<u32>,
+    parents: Vec<Option<Entity>>,
     slots: Vec<u32>,
     touched: Vec<u32>,
     offsets: Vec<u32>,
@@ -44,11 +44,8 @@ impl Propagation {
         for (entity, local) in world.iter::<LocalTransform>() {
             self.entities.push(entity);
             self.locals.push(local.0);
-            self.parents.push(
-                world
-                    .get::<Parent>(entity)
-                    .map_or(VACANT, |parent| parent.0.index()),
-            );
+            self.parents
+                .push(world.get::<Parent>(entity).map(|parent| parent.0));
         }
     }
 
@@ -106,9 +103,9 @@ impl Propagation {
         while let Some(at) = self.stack.pop() {
             let at = at as usize;
             let held = self.locals[at];
-            let world_at = match self.parents[at] {
-                VACANT => held,
-                parent => self.worlds[self.slots[parent as usize] as usize].compose(held),
+            let world_at = match self.parent(self.parents[at], at) {
+                None => held,
+                Some(parent) => self.worlds[parent as usize].compose(held),
             };
             self.worlds[at] = world_at;
             self.adopted[at] = true;
@@ -129,15 +126,18 @@ impl Propagation {
         }
     }
 
-    fn parent(&self, parent: u32, at: usize) -> Option<u32> {
-        if parent == VACANT {
-            return None;
-        }
-        let slot = self.slots[parent as usize];
+    fn parent(&self, parent: Option<Entity>, at: usize) -> Option<u32> {
+        let parent = parent?;
+        let slot = self
+            .slots
+            .get(parent.index() as usize)
+            .copied()
+            .unwrap_or(VACANT);
         assert!(
-            slot != VACANT,
-            "the hierarchy parents entity {} to entity {parent}, which holds no local transform",
+            slot != VACANT && self.entities[slot as usize] == parent,
+            "the hierarchy parents entity {} to entity {}, which holds no local transform",
             self.entities[at].index(),
+            parent.index(),
         );
         assert!(
             slot as usize != at,

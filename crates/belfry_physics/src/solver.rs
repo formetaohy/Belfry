@@ -114,6 +114,8 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
         let first = &bodies[contact.first];
         let second = &bodies[contact.second];
         let normal = contact.normal;
+        let carried = contact.rebound;
+        contact.rebound = 0.0;
         for point in &mut contact.points {
             let offset_first = first.rotation.rotate_vec3(point.local_first);
             let offset_second = second.rotation.rotate_vec3(point.local_second);
@@ -146,8 +148,7 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
                 }
             } else {
                 point.active = true;
-                point.target = contact.rebound.max(rebound);
-                contact.rebound = 0.0;
+                point.target = carried.max(rebound);
             }
         }
     }

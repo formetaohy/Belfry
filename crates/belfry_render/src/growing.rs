@@ -24,14 +24,15 @@ impl Growing {
         &self.buffer
     }
 
-    pub(crate) fn fit(&mut self, device: &Device, bytes: u64) {
+    pub(crate) fn fit(&mut self, device: &Device, bytes: u64) -> bool {
         if bytes <= self.bytes {
-            return;
+            return false;
         }
         let grown = bytes
             .next_multiple_of(BLOCK_BYTES)
             .max(self.bytes.saturating_mul(2));
         self.buffer = GpuBuffer::new(device, self.label, grown, self.usage);
         self.bytes = grown;
+        true
     }
 }

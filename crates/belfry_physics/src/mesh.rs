@@ -164,6 +164,9 @@ impl TriangleMesh {
                 let Some(distance) = cross(triangle, origin, direction, reach) else {
                     continue;
                 };
+                if best.is_some_and(|(held, _)| held <= distance) {
+                    continue;
+                }
                 let normal = face(triangle.vertices);
                 let normal = if normal.dot(direction) > 0.0 {
                     -normal

@@ -65,14 +65,16 @@ const SKY_VERTICES: u32 = 3;
 const CASCADE_COUNT: u32 = SHADOW_CASCADES;
 
 struct CaptureInputs<'a> {
-    records: &'a [InstanceRecord],
     batches: &'a [Batch],
     bases: &'a [u32],
+    arguments: &'a [u32],
     spheres: &'a [(Vec3, f32)],
+    points: &'a [PointLightRecord],
+    instances: u32,
     slots: u32,
     opaque: u32,
+    opaque_instances: u32,
     joint_bytes: u64,
-    lighting_bytes: u64,
     probe_count: u32,
     tables: Option<BindGroup>,
 }
@@ -727,13 +729,14 @@ impl Renderer {
         let palette = self.palettes.matrices();
         let joint_bytes = u64::from(palette.len().max(1) as u32) * JOINT_BYTES;
         self.joints.fit(&self.device, joint_bytes);
-        self.previous_joints.fit(&self.device, joint_bytes);
+        let reallocated = self.previous_joints.fit(&self.device, joint_bytes);
         if !palette.is_empty() {
             let records = palette.iter().map(joint_record).collect::<Vec<_>>();
             self.joints
                 .buffer()
                 .write(&self.queue, bytemuck::cast_slice(&records));
         }
+        let total_joints = palette.len() as u32;
         let mut records = Vec::with_capacity(gathered.len());
         for (index, (_, _, entity, transform, instance, _)) in gathered.iter().enumerate() {
             let geometry = self.meshes.geometry(instance.mesh);
@@ -750,6 +753,12 @@ impl Renderer {
                 .get(entity)
                 .copied()
                 .unwrap_or_else(|| transform.matrix());
+            let carried = previous_palettes[index];
+            let previous_palette = if !reallocated && carried + skinning.joints <= total_joints {
+                carried
+            } else {
+                skinning.palette
+            };
             records.push(record_of(
                 *entity,
                 *transform,
@@ -760,7 +769,7 @@ impl Renderer {
                     batch: batch_of[index],
                     base: bases[batch_of[index] as usize],
                     skinning,
-                    previous_palette: previous_palettes[index],
+                    previous_palette,
                     hzb: index < depth_count as usize,
                 },
             ));
@@ -1023,14 +1032,16 @@ impl Renderer {
                 world,
                 probe,
                 &CaptureInputs {
-                    records: &[],
                     batches: &[],
                     bases: &[],
+                    arguments: &[],
                     spheres: &[],
+                    points: &point_light_records,
+                    instances: 0,
                     slots: 0,
                     opaque: 0,
+                    opaque_instances: 0,
                     joint_bytes: 0,
-                    lighting_bytes: 0,
                     probe_count,
                     tables: None,
                 },
@@ -1373,14 +1384,16 @@ impl Renderer {
             world,
             probe,
             &CaptureInputs {
-                records: &records,
                 batches: &batches,
                 bases: &bases,
+                arguments: &arguments,
                 spheres: &spheres,
+                points: &point_light_records,
+                instances: total,
                 slots,
                 opaque: depth_batches,
+                opaque_instances: depth_count,
                 joint_bytes,
-                lighting_bytes,
                 probe_count,
                 tables: Some(tables.clone()),
             },
@@ -1433,15 +1446,63 @@ impl Renderer {
         self.captures.prepare(&CaptureFrame {
             device: self.device.clone(),
             queue: self.queue.clone(),
-            records: inputs.records,
-            slots: inputs.slots,
             eye: probe.transform.translation,
             clip_space: self.device.clip_space(),
             rotation,
             intensity,
             shadow,
+            batches: inputs.batches,
+            arguments: inputs.arguments,
+            slots: inputs.slots,
+            opaque_instances: inputs.opaque_instances,
+            points: inputs.points,
         });
         let mut submission = Submission::new(&self.device, "belfry capture");
+        if inputs.opaque > 0 {
+            let hzb = self
+                .hzb
+                .as_ref()
+                .expect("a captured scene culls against the depth pyramid of its frame");
+            let culled = inputs.opaque_instances.div_ceil(WORKGROUP);
+            let instances = self
+                .instances
+                .buffer()
+                .binding(0, u64::from(inputs.instances) * INSTANCE_BYTES);
+            for view in 0..self.captures.view_count() {
+                let group = hzb.cull(
+                    &self.cull,
+                    self.captures.view(view),
+                    instances,
+                    self.captures.drawn_view(view),
+                    self.captures.argument_view(view),
+                );
+                submission.dispatch(&self.cull, &group, [culled, 1, 1]);
+            }
+        }
+        if inputs.opaque > 0 && !inputs.points.is_empty() {
+            let (offset, bytes) = self.captures.cluster_region();
+            submission.clear(self.captures.lighting.buffer(), offset, bytes);
+            let points = self.captures.point_lights();
+            for face in 0..capture::FACES {
+                let group = self.light_clusters.bind_group(
+                    0,
+                    &[
+                        Binding::buffer(program::CLUSTER_VIEW, self.captures.view(face)),
+                        Binding::buffer(program::CLUSTER_POINTS, points),
+                        Binding::buffer(program::CLUSTER_GRID, self.captures.clusters(face)),
+                    ],
+                );
+                submission.dispatch(
+                    &self.light_clusters,
+                    &group,
+                    [
+                        self.captures.cluster_columns() * self.captures.cluster_rows(),
+                        LIGHT_SLICES,
+                        1,
+                    ],
+                );
+            }
+        }
         let capture_shade = self.shading.group(
             &self.draw,
             (&self.captures.shadow, &self.captures.shadow_sampler),
@@ -1457,22 +1518,28 @@ impl Renderer {
         let textures = self.materials.textures();
         let samplers = self.materials.samplers();
         let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        let materials = self
+            .material_records
+            .buffer()
+            .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES);
+        let palette = self.joints.buffer().binding(0, inputs.joint_bytes);
         if inputs.opaque > 0 {
             let mut cast_groups = Vec::with_capacity(inputs.opaque as usize);
-            let mut first = 0u32;
-            for batch in inputs.batches.iter().take(inputs.opaque as usize) {
+            for (index, batch) in inputs
+                .batches
+                .iter()
+                .take(inputs.opaque as usize)
+                .enumerate()
+            {
                 let geometry = self.meshes.geometry(batch.mesh);
                 let group = self.shadow.bind_group(
                     0,
                     &[
-                        Binding::buffer(
-                            program::SHADOW_PALETTE,
-                            self.joints.buffer().binding(0, inputs.joint_bytes),
-                        ),
+                        Binding::buffer(program::SHADOW_PALETTE, palette),
                         Binding::buffer(program::SHADOW_SKINS, self.meshes.skin_binding(geometry)),
                         Binding::buffer(
                             program::SHADOW_DRAWN,
-                            self.captures.casters(first, batch.count),
+                            self.captures.shadow_drawn(inputs.bases[index], batch.count),
                         ),
                         Binding::buffer(
                             program::SHADOW_VERTICES,
@@ -1481,23 +1548,18 @@ impl Renderer {
                                 u64::from(geometry.count) * VERTEX_BYTES,
                             ),
                         ),
-                        Binding::buffer(
-                            program::SHADOW_MATERIALS,
-                            self.material_records
-                                .buffer()
-                                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
-                        ),
+                        Binding::buffer(program::SHADOW_MATERIALS, materials),
                     ],
                 );
                 cast_groups.push([group, shadow_tables.clone()]);
-                first += batch.count;
             }
-            let casters = cast_groups
-                .iter()
-                .zip(inputs.batches.iter())
-                .map(|(groups, batch)| {
-                    let geometry = self.meshes.geometry(batch.mesh);
-                    Draw::new(&self.shadow, groups, geometry.count).instances(batch.count)
+            let casters = (0..inputs.opaque)
+                .map(|index| {
+                    Draw::indirect(
+                        &self.shadow,
+                        &cast_groups[index as usize],
+                        self.captures.shadow_arguments(index),
+                    )
                 })
                 .collect::<Vec<_>>();
             submission.render(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0], &casters);
@@ -1518,6 +1580,7 @@ impl Renderer {
                 .tables
                 .as_ref()
                 .expect("a captured batch binds the material table of its frame");
+            let lights = self.captures.lighting();
             for face in 0..capture::FACES {
                 for (index, batch) in inputs
                     .batches
@@ -1538,18 +1601,9 @@ impl Renderer {
                                 program::DRAW_DRAWN,
                                 self.captures.drawn(face, inputs.bases[index], batch.count),
                             ),
-                            Binding::buffer(
-                                program::DRAW_MATERIALS,
-                                self.material_records.buffer().binding(
-                                    0,
-                                    self.materials.records().len() as u64 * MATERIAL_BYTES,
-                                ),
-                            ),
+                            Binding::buffer(program::DRAW_MATERIALS, materials),
                             Binding::buffer(program::DRAW_VIEW, self.captures.view(face)),
-                            Binding::buffer(
-                                program::DRAW_PALETTE,
-                                self.joints.buffer().binding(0, inputs.joint_bytes),
-                            ),
+                            Binding::buffer(program::DRAW_PALETTE, palette),
                             Binding::buffer(
                                 program::DRAW_SKINS,
                                 self.meshes.skin_binding(geometry),
@@ -1569,10 +1623,7 @@ impl Renderer {
                                     u64::from(geometry.count) * VERTEX_BYTES,
                                 ),
                             ),
-                            Binding::buffer(
-                                program::DRAW_LIGHTS,
-                                self.lighting.buffer().binding(0, inputs.lighting_bytes),
-                            ),
+                            Binding::buffer(program::DRAW_LIGHTS, lights),
                         ],
                     );
                     batches.push([shade, tables.clone(), capture_shade.clone()]);
@@ -1590,12 +1641,14 @@ impl Renderer {
             );
             draws
                 .push(Draw::new(&self.sky, &skies[face as usize], SKY_VERTICES).viewport(viewport));
-            for held in inputs.batches.iter().take(inputs.opaque as usize) {
-                let geometry = self.meshes.geometry(held.mesh);
+            for index in 0..inputs.opaque {
                 draws.push(
-                    Draw::new(&self.draw, &batches[batch], geometry.count)
-                        .instances(held.count)
-                        .viewport(viewport),
+                    Draw::indirect(
+                        &self.draw,
+                        &batches[batch],
+                        self.captures.arguments(face, index),
+                    )
+                    .viewport(viewport),
                 );
                 batch += 1;
             }
