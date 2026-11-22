@@ -68,11 +68,25 @@ impl Nodes {
         self.reindex();
     }
 
-    pub(crate) fn remove(&mut self, at: usize) -> Node {
-        let node = self.entries.remove(at);
-        self.index.remove(&node.id);
+    pub(crate) fn remove_many(&mut self, at: &[usize]) {
+        if at.is_empty() {
+            return;
+        }
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]) && at[at.len() - 1] < self.entries.len(),
+            "a batch removal names its nodes once, in order, inside the scene",
+        );
+        let mut taken = at.iter().peekable();
+        let mut kept = Vec::with_capacity(self.entries.len() - at.len());
+        for (index, node) in std::mem::take(&mut self.entries).into_iter().enumerate() {
+            if taken.peek() == Some(&&index) {
+                taken.next();
+            } else {
+                kept.push(node);
+            }
+        }
+        self.entries = kept;
         self.reindex();
-        node
     }
 
     pub(crate) fn take(&mut self) -> Vec<Node> {

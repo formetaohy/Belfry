@@ -17,7 +17,7 @@ mod table;
 mod texture;
 
 pub use backend::{Backend, PREFERENCE};
-pub use buffer::{BufferBinding, GpuBuffer};
+pub use buffer::{BufferBinding, BufferRange, GpuBuffer};
 pub use cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 pub use capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, ClipSpace, CooperativeMatrix,

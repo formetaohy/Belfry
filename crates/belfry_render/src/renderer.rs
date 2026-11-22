@@ -5,12 +5,12 @@ use crate::abi::{
     SHADOW_ATLAS_COLUMNS, SHADOW_CASCADES, SHADOW_SIDE, SkinVertexRecord, SkyRecord, VERTEX_FLOATS,
     ViewRecord, WORKGROUP,
 };
+use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
 use crate::environment::BRDF_SIZE;
 use crate::environment::Environment;
 use crate::frame::{
-    Batch, Placement, Screen, Skinning, ambient_of, arguments_of, bases_of, camera_of,
-    direction_record, light_of, record_of, record_of_cascade, record_of_main_view, record_of_view,
-    vector,
+    Batch, Placement, Screen, ambient_of, arguments_of, bases_of, camera_of, direction_record,
+    light_of, record_of, record_of_cascade, record_of_main_view, record_of_view, vector,
 };
 use crate::growing::Growing;
 use crate::hidden::Hidden;
@@ -20,6 +20,7 @@ use crate::light::PointLight;
 use crate::line::Lines;
 use crate::material::{AlphaMode, Material, MaterialDesc, MaterialLibrary};
 use crate::mesh::{Mesh, MeshLibrary};
+use crate::palette::{self, Palettes};
 use crate::pick::{PickBatch, PickFrame, PickResources, Picker};
 use crate::post::Post;
 use crate::probe::Probes;
@@ -88,10 +89,8 @@ pub struct Renderer {
     materials: MaterialLibrary,
     material_records: Growing,
     materials_dirty: bool,
-    tables: Option<BindGroup>,
-    transparent_tables: Option<BindGroup>,
-    depth_tables: Option<BindGroup>,
-    shadow_tables: Option<BindGroup>,
+    tables: Tables,
+    groups: Groups,
     shade: BindGroup,
     transparent_shade: BindGroup,
     shadow_map: Texture,
@@ -116,12 +115,13 @@ pub struct Renderer {
     shadow_span: u64,
     lighting: Growing,
     joints: Growing,
+    previous_joints: Growing,
+    palettes: Palettes,
     line_records: Growing,
     picker: Picker,
     pick_frame: Option<PickFrame>,
     transparency: Transparency,
     temporality: Temporality,
-    motion_tables: Option<BindGroup>,
     previous: HashMap<Entity, Mat4>,
     probes: Probes,
 }
@@ -377,10 +377,8 @@ impl Renderer {
             materials,
             material_records: Growing::new(&device, "belfry material records", storage),
             materials_dirty: true,
-            tables: None,
-            transparent_tables: None,
-            depth_tables: None,
-            shadow_tables: None,
+            tables: Tables::new(),
+            groups: Groups::new(),
             shade,
             transparent_shade,
             shadow_map,
@@ -404,13 +402,14 @@ impl Renderer {
             shadow_arguments,
             shadow_span: 0,
             lighting,
-            joints: Growing::new(&device, "belfry joints", storage),
+            joints: Growing::new(&device, "belfry joints", storage | BufferUsages::COPY_SRC),
+            previous_joints: Growing::new(&device, "belfry previous joints", storage),
+            palettes: Palettes::new(),
             line_records: Growing::new(&device, "belfry debug lines", storage),
             picker,
             pick_frame: None,
             transparency: Transparency::new(&device),
             temporality: Temporality::new(&device),
-            motion_tables: None,
             previous: HashMap::new(),
             probes,
             queue,
@@ -490,17 +489,15 @@ impl Renderer {
         self.meshes.reset();
         self.materials.reset();
         self.materials_dirty = true;
-        self.tables = None;
-        self.transparent_tables = None;
-        self.depth_tables = None;
-        self.shadow_tables = None;
-        self.motion_tables = None;
+        self.tables.invalidate();
+        self.groups.invalidate();
         self.pick_frame = None;
         self.main_batches = 0;
         self.ambient = None;
         self.probes.reset();
         self.temporality.reset();
         self.previous.clear();
+        self.palettes.reset();
     }
 
     pub fn mesh(&mut self, vertices: &[crate::abi::Vertex]) -> Mesh {
@@ -595,11 +592,8 @@ impl Renderer {
 
     fn materials_changed(&mut self) {
         self.materials_dirty = true;
-        self.tables = None;
-        self.transparent_tables = None;
-        self.depth_tables = None;
-        self.shadow_tables = None;
-        self.motion_tables = None;
+        self.tables.invalidate();
+        self.groups.invalidate();
     }
 
     fn flush_materials(&mut self) {
@@ -751,43 +745,44 @@ impl Renderer {
             .min_storage_buffer_offset_alignment
             .max(WORD_BYTES);
         let (bases, slots) = bases_of(&counts, span::blocks(alignment, DRAW_BYTES));
-        let mut palette = Vec::new();
-        let mut skin_bases = Vec::with_capacity(gathered.len());
+        self.palettes.begin();
+        let mut poses = Vec::with_capacity(gathered.len());
+        let mut previous_palettes = Vec::with_capacity(gathered.len());
+        let mut scratch = Vec::new();
         for (_, _, entity, transform, instance, _) in &gathered {
             let geometry = self.meshes.geometry(instance.mesh);
-            match world.get::<Skin>(*entity) {
-                Some(skin) => {
-                    assert!(
-                        geometry.skin_count > 0,
-                        "a skinned instance renders a mesh without skin weights",
-                    );
-                    assert_eq!(
-                        skin.joints().len(),
-                        skin.inverse_binds().len(),
-                        "a skin holds {} joints for {} inverse bind matrices",
-                        skin.joints().len(),
-                        skin.inverse_binds().len(),
-                    );
-                    let first = palette.len() as u32;
-                    let model = transform.matrix();
-                    let inverse = model.inverse();
-                    for (joint, bind) in skin.joints().iter().zip(skin.inverse_binds()) {
-                        let joint = joint_world(world, *joint);
-                        palette.push(inverse * joint * *bind);
-                    }
-                    skin_bases.push(Skinning {
-                        palette: first,
-                        joints: skin.joints().len() as u32,
-                    });
-                }
-                None => skin_bases.push(Skinning {
-                    palette: 0,
-                    joints: 0,
-                }),
+            let Some(skin) = world.get::<Skin>(*entity) else {
+                poses.push(palette::NONE);
+                previous_palettes.push(0);
+                continue;
+            };
+            assert!(
+                geometry.skin_count > 0,
+                "a skinned instance renders a mesh without skin weights",
+            );
+            assert_eq!(
+                skin.joints().len(),
+                skin.inverse_binds().len(),
+                "a skin holds {} joints for {} inverse bind matrices",
+                skin.joints().len(),
+                skin.inverse_binds().len(),
+            );
+            let model = transform.matrix();
+            let inverse = model.inverse();
+            scratch.clear();
+            for (joint, bind) in skin.joints().iter().zip(skin.inverse_binds()) {
+                let joint = joint_world(world, *joint);
+                scratch.push(inverse * joint * *bind);
             }
+            let (skinning, previous) = self.palettes.push(*entity, &scratch);
+            poses.push(skinning);
+            previous_palettes.push(previous);
         }
+        self.palettes.commit();
+        let palette = self.palettes.matrices();
         let joint_bytes = u64::from(palette.len().max(1) as u32) * JOINT_BYTES;
         self.joints.fit(&self.device, joint_bytes);
+        self.previous_joints.fit(&self.device, joint_bytes);
         if !palette.is_empty() {
             let records = palette.iter().map(joint_record).collect::<Vec<_>>();
             self.joints
@@ -797,7 +792,7 @@ impl Renderer {
         let mut records = Vec::with_capacity(gathered.len());
         for (index, (_, _, entity, transform, instance, _)) in gathered.iter().enumerate() {
             let geometry = self.meshes.geometry(instance.mesh);
-            let skinning = skin_bases[index];
+            let skinning = poses[index];
             let bounds = if skinning.joints > 0 {
                 let at = skinning.palette as usize;
                 let held = &palette[at..at + skinning.joints as usize];
@@ -820,6 +815,7 @@ impl Renderer {
                     batch: batch_of[index],
                     base: bases[batch_of[index] as usize],
                     skinning,
+                    previous_palette: previous_palettes[index],
                     hzb: index < depth_count as usize,
                 },
             ));
@@ -1177,187 +1173,118 @@ impl Renderer {
         for group in &shadow_cull {
             submission.dispatch(&self.cull, group, [total.div_ceil(WORKGROUP), 1, 1]);
         }
-        let depth_tables = match &self.depth_tables {
-            Some(tables) => tables.clone(),
-            None => {
-                let tables = self.depth.bind_group(
-                    1,
-                    &[
-                        Binding::texture_table(program::SHADE_TEXTURE, self.materials.textures()),
-                        Binding::sampler_table(program::SHADE_SAMPLER, self.materials.samplers()),
-                    ],
-                );
-                self.depth_tables = Some(tables.clone());
-                tables
-            }
+        let pipelines = Pipelines {
+            depth: &self.depth,
+            opaque: &self.draw,
+            blended: &self.transparent_draw,
+            motion: self.temporality.motion(),
+            shadow: &self.shadow,
         };
-        let shadow_tables = match &self.shadow_tables {
-            Some(tables) => tables.clone(),
-            None => {
-                let tables = self.shadow.bind_group(
-                    1,
-                    &[
-                        Binding::texture_table(program::SHADE_TEXTURE, self.materials.textures()),
-                        Binding::sampler_table(program::SHADE_SAMPLER, self.materials.samplers()),
-                    ],
-                );
-                self.shadow_tables = Some(tables.clone());
-                tables
-            }
-        };
-        let tables = match &self.tables {
-            Some(tables) => tables.clone(),
-            None => {
-                let tables = self.draw.bind_group(
-                    1,
-                    &[
-                        Binding::texture_table(program::SHADE_TEXTURE, self.materials.textures()),
-                        Binding::sampler_table(program::SHADE_SAMPLER, self.materials.samplers()),
-                    ],
-                );
-                self.tables = Some(tables.clone());
-                tables
-            }
-        };
-        let transparent_tables = match &self.transparent_tables {
-            Some(tables) => tables.clone(),
-            None => {
-                let tables = self.transparent_draw.bind_group(
-                    1,
-                    &[
-                        Binding::texture_table(program::SHADE_TEXTURE, self.materials.textures()),
-                        Binding::sampler_table(program::SHADE_SAMPLER, self.materials.samplers()),
-                    ],
-                );
-                self.transparent_tables = Some(tables.clone());
-                tables
-            }
-        };
-        let mut depth_groups = Vec::with_capacity(depth_batches as usize);
-        let mut main_groups = Vec::with_capacity(batches.len());
-        let mut cast_groups = Vec::with_capacity(CASCADE_COUNT as usize * batches.len());
+        let mut slots_in = Vec::with_capacity(batches.len());
         for (index, batch) in batches.iter().enumerate() {
             let geometry = self.meshes.geometry(batch.mesh);
-            let vertices = self.meshes.buffer().binding(
-                u64::from(geometry.first) * VERTEX_BYTES,
-                u64::from(geometry.count) * VERTEX_BYTES,
-            );
-            let depth_drawn = self.depth_drawn.buffer().binding(
-                u64::from(bases[index]) * DRAW_BYTES,
-                u64::from(batch.count) * DRAW_BYTES,
-            );
-            let skins = self.meshes.skin_binding(geometry);
-            if index < depth_batches as usize {
-                depth_groups.push(
-                    self.depth.bind_group(
-                        0,
-                        &[
-                            Binding::buffer(program::DEPTH_VIEW, self.views.binding(0, VIEW_BYTES)),
-                            Binding::buffer(
-                                program::DEPTH_PALETTE,
-                                self.joints.buffer().binding(0, joint_bytes),
-                            ),
-                            Binding::buffer(program::DEPTH_SKINS, skins),
-                            Binding::buffer(program::DEPTH_DRAWN, depth_drawn),
-                            Binding::buffer(program::DEPTH_VERTICES, vertices),
-                            Binding::buffer(
-                                program::DEPTH_MATERIALS,
-                                self.material_records.buffer().binding(
-                                    0,
-                                    self.materials.records().len() as u64 * MATERIAL_BYTES,
-                                ),
-                            ),
-                        ],
-                    ),
-                );
-            }
-            let drawn = self.main_drawn.buffer().binding(
-                u64::from(bases[index]) * DRAW_BYTES,
-                u64::from(batch.count) * DRAW_BYTES,
-            );
-            let pipeline = if index < depth_batches as usize {
-                &self.draw
-            } else {
-                &self.transparent_draw
-            };
-            main_groups.push(
-                pipeline.bind_group(
-                    0,
-                    &[
-                        Binding::buffer(program::DRAW_LIGHT, self.light.binding(0, LIGHT_BYTES)),
-                        Binding::buffer(
-                            program::DRAW_CASCADES,
-                            self.cascades
-                                .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
-                        ),
-                        Binding::buffer(program::DRAW_DRAWN, drawn),
-                        Binding::buffer(
-                            program::DRAW_MATERIALS,
-                            self.material_records
-                                .buffer()
-                                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
-                        ),
-                        Binding::buffer(program::DRAW_VIEW, self.views.binding(0, VIEW_BYTES)),
-                        Binding::buffer(
-                            program::DRAW_PALETTE,
-                            self.joints.buffer().binding(0, joint_bytes),
-                        ),
-                        Binding::buffer(program::DRAW_SKINS, skins),
-                        Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.fragments()),
-                        Binding::buffer(program::DRAW_HEADS, self.transparency.heads()),
-                        Binding::buffer(program::DRAW_COUNTER, self.transparency.counter()),
-                        Binding::buffer(program::DRAW_SETTINGS, self.transparency.settings()),
-                        Binding::buffer(program::DRAW_PROBES, self.probes.record(probe_count)),
-                        Binding::buffer(program::DRAW_VERTICES, vertices),
-                        Binding::buffer(
-                            program::DRAW_LIGHTS,
-                            self.lighting.buffer().binding(0, lighting_bytes),
-                        ),
-                    ],
-                ),
-            );
-        }
-        for cascade in 0..CASCADE_COUNT {
-            for (index, batch) in batches.iter().enumerate().take(depth_batches as usize) {
-                let geometry = self.meshes.geometry(batch.mesh);
-                let vertices = self.meshes.buffer().binding(
+            slots_in.push(Slot {
+                vertices: self.meshes.buffer().binding(
                     u64::from(geometry.first) * VERTEX_BYTES,
                     u64::from(geometry.count) * VERTEX_BYTES,
-                );
-                let skins = self.meshes.skin_binding(geometry);
-                let drawn = self.shadow_drawn.buffer().binding(
-                    u64::from(cascade) * u64::from(slots) * DRAW_BYTES
-                        + u64::from(bases[index]) * DRAW_BYTES,
+                ),
+                skins: self.meshes.skin_binding(geometry),
+                depth_drawn: self.depth_drawn.buffer().binding(
+                    u64::from(bases[index]) * DRAW_BYTES,
                     u64::from(batch.count) * DRAW_BYTES,
-                );
+                ),
+                main_drawn: self.main_drawn.buffer().binding(
+                    u64::from(bases[index]) * DRAW_BYTES,
+                    u64::from(batch.count) * DRAW_BYTES,
+                ),
+                shadow_drawn: std::array::from_fn(|cascade| {
+                    self.shadow_drawn.buffer().binding(
+                        cascade as u64 * u64::from(slots) * DRAW_BYTES
+                            + u64::from(bases[index]) * DRAW_BYTES,
+                        u64::from(batch.count) * DRAW_BYTES,
+                    )
+                }),
+            });
+        }
+        self.groups.prepare(
+            &pipelines,
+            &Inputs {
+                shared: Shared {
+                    view: self.views.binding(0, VIEW_BYTES),
+                    motion_view: self.temporality.view(),
+                    palette: self.joints.buffer().binding(0, joint_bytes),
+                    previous_palette: self.previous_joints.buffer().binding(0, joint_bytes),
+                    materials: self
+                        .material_records
+                        .buffer()
+                        .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
+                    light: self.light.binding(0, LIGHT_BYTES),
+                    cascades: self
+                        .cascades
+                        .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
+                    lighting: self.lighting.buffer().binding(0, lighting_bytes),
+                    probes: self.probes.record(probe_count),
+                    fragments: self.transparency.fragments(),
+                    heads: self.transparency.heads(),
+                    counter: self.transparency.counter(),
+                    settings: self.transparency.settings(),
+                },
+                slots: &slots_in,
+                opaque: depth_batches,
+            },
+        );
+        let textures = self.materials.textures();
+        let samplers = self.materials.samplers();
+        for held in self.palettes.fresh() {
+            submission.copy(
+                self.joints.buffer(),
+                u64::from(held.palette) * JOINT_BYTES,
+                self.previous_joints.buffer(),
+                u64::from(held.palette) * JOINT_BYTES,
+                u64::from(held.joints) * JOINT_BYTES,
+            );
+        }
+        let depth_tables = self.tables.depth(&pipelines, textures, samplers);
+        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        let tables = self.tables.opaque(&pipelines, textures, samplers);
+        let transparent_tables = self.tables.blended(&pipelines, textures, samplers);
+        let motion_tables = self.tables.motion(&pipelines, textures, samplers);
+        let depth_groups = (0..depth_batches as usize)
+            .map(|index| {
+                [
+                    self.groups
+                        .at(index)
+                        .depth()
+                        .expect("an opaque batch binds the depth pass")
+                        .clone(),
+                    depth_tables.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut main_groups = Vec::with_capacity(batches.len());
+        let mut motion_groups = Vec::with_capacity(batches.len());
+        for index in 0..batches.len() {
+            let slot = self.groups.at(index);
+            if index < depth_batches as usize {
+                main_groups.push([slot.shade().clone(), tables.clone(), self.shade.clone()]);
+            } else {
+                main_groups.push([
+                    slot.shade().clone(),
+                    transparent_tables.clone(),
+                    self.transparent_shade.clone(),
+                ]);
+            }
+            motion_groups.push([slot.motion().clone(), motion_tables.clone()]);
+        }
+        let mut cast_groups = Vec::with_capacity(CASCADE_COUNT as usize * depth_batches as usize);
+        for cascade in 0..CASCADE_COUNT as usize {
+            for batch in 0..depth_batches as usize {
                 cast_groups.push([
-                    self.shadow.bind_group(
-                        0,
-                        &[
-                            Binding::buffer(
-                                program::SHADOW_PALETTE,
-                                self.joints.buffer().binding(0, joint_bytes),
-                            ),
-                            Binding::buffer(program::SHADOW_SKINS, skins),
-                            Binding::buffer(program::SHADOW_DRAWN, drawn),
-                            Binding::buffer(program::SHADOW_VERTICES, vertices),
-                            Binding::buffer(
-                                program::SHADOW_MATERIALS,
-                                self.material_records.buffer().binding(
-                                    0,
-                                    self.materials.records().len() as u64 * MATERIAL_BYTES,
-                                ),
-                            ),
-                        ],
-                    ),
+                    self.groups.at(batch).shadow(cascade).clone(),
                     shadow_tables.clone(),
                 ]);
             }
         }
-        let depth_groups = depth_groups
-            .iter()
-            .map(|group| [group.clone(), depth_tables.clone()])
-            .collect::<Vec<_>>();
         let depth = depth_groups
             .iter()
             .enumerate()
@@ -1374,58 +1301,6 @@ impl Renderer {
         submission.render(hzb.depth(), [1.0, 0.0, 0.0, 1.0], &depth);
         hzb.build(&mut submission, &self.hzb_base, &self.hzb_reduce);
         submission.dispatch(&self.cull, &main_cull, [total.div_ceil(WORKGROUP), 1, 1]);
-        let motion_tables = match &self.motion_tables {
-            Some(tables) => tables.clone(),
-            None => {
-                let tables = self.temporality.motion().bind_group(
-                    1,
-                    &[
-                        Binding::texture_table(program::MOTION_TEXTURE, self.materials.textures()),
-                        Binding::sampler_table(program::MOTION_SAMPLER, self.materials.samplers()),
-                    ],
-                );
-                self.motion_tables = Some(tables.clone());
-                tables
-            }
-        };
-        let mut motion_groups = Vec::with_capacity(batches.len());
-        for (index, batch) in batches.iter().enumerate() {
-            let geometry = self.meshes.geometry(batch.mesh);
-            motion_groups.push([
-                self.temporality.motion().bind_group(
-                    0,
-                    &[
-                        Binding::buffer(program::MOTION_VIEW, self.temporality.view()),
-                        Binding::buffer(
-                            program::MOTION_DRAWN,
-                            self.main_drawn.buffer().binding(
-                                u64::from(bases[index]) * DRAW_BYTES,
-                                u64::from(batch.count) * DRAW_BYTES,
-                            ),
-                        ),
-                        Binding::buffer(
-                            program::MOTION_PALETTE,
-                            self.joints.buffer().binding(0, joint_bytes),
-                        ),
-                        Binding::buffer(program::MOTION_SKINS, self.meshes.skin_binding(geometry)),
-                        Binding::buffer(
-                            program::MOTION_MATERIALS,
-                            self.material_records
-                                .buffer()
-                                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
-                        ),
-                        Binding::buffer(
-                            program::MOTION_VERTICES,
-                            self.meshes.buffer().binding(
-                                u64::from(geometry.first) * VERTEX_BYTES,
-                                u64::from(geometry.count) * VERTEX_BYTES,
-                            ),
-                        ),
-                    ],
-                ),
-                motion_tables.clone(),
-            ]);
-        }
         let motion = motion_groups
             .iter()
             .enumerate()
@@ -1440,22 +1315,7 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &motion);
-        let shaded = main_groups
-            .into_iter()
-            .enumerate()
-            .map(|(index, frame)| {
-                if index < depth_batches as usize {
-                    [frame, tables.clone(), self.shade.clone()]
-                } else {
-                    [
-                        frame,
-                        transparent_tables.clone(),
-                        self.transparent_shade.clone(),
-                    ]
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut main = shaded
+        let mut main = main_groups
             .iter()
             .enumerate()
             .map(|(index, groups)| {
@@ -1524,6 +1384,13 @@ impl Renderer {
         let resolved = self.temporality.resolved().clone();
         self.post.resolve(&mut submission, &resolved);
         self.post.tonemap(&mut submission, &texture, &resolved);
+        submission.copy(
+            self.joints.buffer(),
+            0,
+            self.previous_joints.buffer(),
+            0,
+            joint_bytes,
+        );
         if let Some(frame) = frame {
             submission.present(frame);
         }

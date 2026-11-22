@@ -1,7 +1,6 @@
 use crate::node::{InstanceOverride, Node};
 use crate::prefab::{Loader, describe};
 use crate::scene::Scene;
-use crate::schema::ReferenceKind;
 use crate::target::{Target, valid_id};
 use crate::value::{Effect, Value};
 use std::collections::{BTreeSet, HashSet};
@@ -240,130 +239,6 @@ impl Scene {
         }
         let generated = crate::prefab::instantiate(&marker, &template, &mut ids, &from, &root)?;
         Ok((marker, generated))
-    }
-
-    pub(crate) fn remove_instance_node(&mut self, index: usize) -> Result<(), String> {
-        let id = self.nodes[index].id.clone();
-        let owner = self.nodes[index]
-            .owner
-            .clone()
-            .expect("an instance node names its owner");
-        let top = self
-            .instance_marker(&id)
-            .expect("an instance node belongs to a prefab instance")
-            .to_string();
-        if owner != top {
-            return Err(format!(
-                "the prefab instance {top} keeps the structure of its nested prefab {owner}",
-            ));
-        }
-        let subtree = self.subtree(index);
-        let removed = subtree
-            .iter()
-            .map(|at| self.nodes[*at].id.clone())
-            .collect::<HashSet<_>>();
-        for held in &removed {
-            if self.referenced(&Target::Node(held.clone()), &subtree) {
-                return Err(format!("the scene references the node {held}"));
-            }
-        }
-        if self.skins.iter().any(|skin| {
-            !self.scoped_away(ReferenceKind::Skin, &skin.id, &removed)
-                && skin
-                    .asset
-                    .joints()
-                    .iter()
-                    .any(|joint| removed.contains(joint.as_str()))
-        }) {
-            return Err(format!("the scene deforms a skin through the node {id}"));
-        }
-        if self.animations.iter().any(|animation| {
-            !self.scoped_away(ReferenceKind::Animation, &animation.id, &removed)
-                && animation
-                    .asset
-                    .targets()
-                    .iter()
-                    .any(|target| removed.contains(target.as_str()))
-        }) {
-            return Err(format!("the scene animates the node {id}"));
-        }
-        let scopes = removed
-            .iter()
-            .filter(|held| self.instances.contains_key(held.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let prefix = format!("{top}_");
-        let relative = id
-            .strip_prefix(&prefix)
-            .unwrap_or_else(|| panic!("the node {id} belongs to the prefab instance {top}"))
-            .to_string();
-        let marker = self
-            .node_index(&top)
-            .expect("a prefab instance names its marker");
-        let addition = self.nodes[marker]
-            .additions
-            .iter()
-            .any(|held| held.id == relative);
-        let redundant = if addition {
-            HashSet::new()
-        } else {
-            self.instance_removal_nodes(&top, &relative)?
-        };
-        let mut scene = self.clone();
-        for at in subtree.into_iter().rev() {
-            scene.nodes.remove(at);
-        }
-        for held in &removed {
-            scene.instances.remove(held);
-        }
-        for scope in &scopes {
-            scene.drop_scoped(scope)?;
-        }
-        let marker = scene
-            .node_index(&top)
-            .expect("a prefab instance names its marker");
-        let node = scene.nodes.at_mut(marker);
-        node.additions
-            .retain(|held| !removed.contains(&format!("{prefix}{}", held.id)));
-        node.overrides
-            .retain(|entry| !removed.contains(&format!("{prefix}{}", entry.node)));
-        if !addition {
-            node.removals
-                .retain(|removal| removal != &relative && !redundant.contains(removal));
-            node.removals.push(relative);
-        }
-        scene.validate("a removed instance node");
-        *self = scene;
-        Ok(())
-    }
-
-    fn instance_removal_nodes(&self, marker: &str, node: &str) -> Result<HashSet<String>, String> {
-        let prefab = self
-            .instance_prefab(marker)
-            .expect("a prefab instance names its prefab");
-        let loaded = catch_unwind(AssertUnwindSafe(|| {
-            Loader::new(self.root.clone(), Arc::clone(&self.registry)).load(
-                &self.root,
-                prefab,
-                "the instance",
-            )
-        }))
-        .map_err(|payload| {
-            format!(
-                "the prefab {} loads: {}",
-                prefab.display(),
-                describe(payload.as_ref()),
-            )
-        })?;
-        let (template, _) = loaded?;
-        let index = template
-            .node_index(node)
-            .ok_or_else(|| format!("the prefab {} holds no node {node}", prefab.display(),))?;
-        Ok(template
-            .subtree(index)
-            .into_iter()
-            .map(|at| template.nodes()[at].id.clone())
-            .collect())
     }
 
     pub fn instance_marker(&self, id: &str) -> Option<&str> {

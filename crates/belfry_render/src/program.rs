@@ -100,7 +100,8 @@ pub(crate) const MOTION_DRAWN: u32 = 1;
 pub(crate) const MOTION_PALETTE: u32 = 2;
 pub(crate) const MOTION_SKINS: u32 = 3;
 pub(crate) const MOTION_MATERIALS: u32 = 4;
-pub(crate) const MOTION_VERTICES: u32 = 5;
+pub(crate) const MOTION_PREVIOUS_PALETTE: u32 = 5;
+pub(crate) const MOTION_VERTICES: u32 = 6;
 pub(crate) const MOTION_TEXTURE: u32 = 0;
 pub(crate) const MOTION_SAMPLER: u32 = 1;
 
@@ -277,6 +278,7 @@ mod cull {
                     drawn[at].pick = index;
                     drawn[at].palette = instance.palette;
                     drawn[at].joints = instance.joints;
+                    drawn[at].previous_palette = instance.previous_palette;
                 }
             }
         }
@@ -2083,6 +2085,9 @@ mod motion {
     #[binding]
     fn materials(materials: Read<MaterialRecord>) {}
 
+    #[binding]
+    fn previous(previous: Read<JointRecord>) {}
+
     fn deformed(col0: Fvec4, col1: Fvec4, col2: Fvec4, col3: Fvec4, point: Fvec4) -> Fvec4 {
         col0 * point.x + col1 * point.y + col2 * point.z + col3 * point.w
     }
@@ -2106,6 +2111,7 @@ mod motion {
             1.0,
         );
         let mut local = rest;
+        let mut carried = rest;
         if held.joints > 0u32 {
             let skin = skins[vertex];
             let first = palette[held.palette + skin.joints.x];
@@ -2120,6 +2126,39 @@ mod motion {
                 + deformed(fourth.col0, fourth.col1, fourth.col2, fourth.col3, rest)
                     * skin.weights.w;
             local = fvec4(place.x, place.y, place.z, 1.0);
+            let was_first = previous[held.previous_palette + skin.joints.x];
+            let was_second = previous[held.previous_palette + skin.joints.y];
+            let was_third = previous[held.previous_palette + skin.joints.z];
+            let was_fourth = previous[held.previous_palette + skin.joints.w];
+            let was = deformed(
+                was_first.col0,
+                was_first.col1,
+                was_first.col2,
+                was_first.col3,
+                rest,
+            ) * skin.weights.x
+                + deformed(
+                    was_second.col0,
+                    was_second.col1,
+                    was_second.col2,
+                    was_second.col3,
+                    rest,
+                ) * skin.weights.y
+                + deformed(
+                    was_third.col0,
+                    was_third.col1,
+                    was_third.col2,
+                    was_third.col3,
+                    rest,
+                ) * skin.weights.z
+                + deformed(
+                    was_fourth.col0,
+                    was_fourth.col1,
+                    was_fourth.col2,
+                    was_fourth.col3,
+                    rest,
+                ) * skin.weights.w;
+            carried = fvec4(was.x, was.y, was.z, 1.0);
         }
         let current_world = held.model0 * local.x
             + held.model1 * local.y
@@ -2129,10 +2168,10 @@ mod motion {
             + held.clip1 * local.y
             + held.clip2 * local.z
             + held.clip3 * local.w;
-        let previous_world = held.previous0 * local.x
-            + held.previous1 * local.y
-            + held.previous2 * local.z
-            + held.previous3 * local.w;
+        let previous_world = held.previous0 * carried.x
+            + held.previous1 * carried.y
+            + held.previous2 * carried.z
+            + held.previous3 * carried.w;
         let previous_clip = camera.previous0 * previous_world.x
             + camera.previous1 * previous_world.y
             + camera.previous2 * previous_world.z

@@ -25,6 +25,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -419,20 +420,78 @@ impl Drop for Arena {
     }
 }
 
+struct Releases {
+    submitted: AtomicU64,
+    held: Mutex<Vec<(u64, Arc<GroupPool>, vk::DescriptorSet)>>,
+}
+
+impl Releases {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            submitted: AtomicU64::new(0),
+            held: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn submitted(&self, index: u64) {
+        self.submitted.store(index, Ordering::Release);
+    }
+
+    fn hold(&self, pool: &Arc<GroupPool>, set: vk::DescriptorSet) {
+        let index = self.submitted.load(Ordering::Acquire);
+        self.held
+            .lock()
+            .expect("the Vulkan descriptor releases are never poisoned")
+            .push((index, Arc::clone(pool), set));
+    }
+
+    fn advance(&self, completed: u64) {
+        let mut held = self
+            .held
+            .lock()
+            .expect("the Vulkan descriptor releases are never poisoned");
+        let mut at = 0;
+        while at < held.len() {
+            if held[at].0 > completed {
+                at += 1;
+                continue;
+            }
+            let (_, pool, set) = held.swap_remove(at);
+            pool.reclaim(set);
+        }
+    }
+
+    fn reclaim_all(&self) {
+        let mut held = self
+            .held
+            .lock()
+            .expect("the Vulkan descriptor releases are never poisoned");
+        for (_, pool, set) in held.drain(..) {
+            pool.reclaim(set);
+        }
+    }
+}
+
 struct GroupPool {
     raw: ash::Device,
     sizes: Vec<(vk::DescriptorType, u32)>,
     free: Mutex<Vec<vk::DescriptorSet>>,
     arenas: Mutex<Vec<Arc<Arena>>>,
+    releases: Arc<Releases>,
 }
 
 impl GroupPool {
-    fn new(raw: &ash::Device, sizes: Vec<(vk::DescriptorType, u32)>) -> Arc<Self> {
+    fn new(
+        raw: &ash::Device,
+        sizes: Vec<(vk::DescriptorType, u32)>,
+        releases: Arc<Releases>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             raw: raw.clone(),
             sizes,
             free: Mutex::new(Vec::new()),
             arenas: Mutex::new(Vec::new()),
+            releases,
         })
     }
 
@@ -473,7 +532,11 @@ impl GroupPool {
         }
     }
 
-    fn release(&self, set: vk::DescriptorSet) {
+    fn release(self: &Arc<Self>, set: vk::DescriptorSet) {
+        self.releases.hold(self, set);
+    }
+
+    fn reclaim(&self, set: vk::DescriptorSet) {
         self.free
             .lock()
             .expect("a Vulkan descriptor free list is never poisoned")
@@ -595,6 +658,7 @@ pub(crate) struct Device {
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
     state: Mutex<QueueState>,
+    releases: Arc<Releases>,
     pub(crate) gate: Arc<Gate>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
@@ -1037,6 +1101,7 @@ impl Facts {
             bits: self.bits,
             uuid: self.uuid,
             state: Mutex::new(QueueState::default()),
+            releases: Releases::new(),
             gate: Gate::of(parts.advance),
             _keep_alive: parts.keep_alive,
         })
@@ -1615,7 +1680,7 @@ impl Device {
                     None => sizes.push((binding.descriptor_type, binding.descriptor_count)),
                 }
             }
-            pools.push(GroupPool::new(&self.raw, sizes));
+            pools.push(GroupPool::new(&self.raw, sizes, Arc::clone(&self.releases)));
         }
         let layout = unsafe {
             self.raw.create_pipeline_layout(
@@ -2371,6 +2436,7 @@ impl Device {
             .checked_add(1)
             .expect("compute submission indices fit in u64");
         let index = state.next;
+        self.releases.submitted(index);
         let QueueState {
             frames, accesses, ..
         } = &mut *state;
@@ -2894,6 +2960,7 @@ impl Device {
             completed += 1;
         }
         state.completed = completed;
+        self.releases.advance(completed);
         self.record(state);
     }
 
@@ -3377,6 +3444,7 @@ impl Drop for BufferResource {
 impl Drop for Device {
     fn drop(&mut self) {
         self.release();
+        self.releases.reclaim_all();
         self.discard();
         unsafe {
             for (_, pass) in self

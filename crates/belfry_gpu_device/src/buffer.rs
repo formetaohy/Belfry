@@ -27,6 +27,23 @@ pub struct BufferBinding<'a> {
     pub(crate) size: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferRange {
+    pub allocation: u64,
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl BufferBinding<'_> {
+    pub fn range(&self) -> BufferRange {
+        BufferRange {
+            allocation: self.buffer.allocation(),
+            offset: self.offset,
+            size: self.size,
+        }
+    }
+}
+
 impl GpuBuffer {
     pub fn new(device: &Device, label: &str, size: u64, usage: BufferUsages) -> Self {
         assert!(size > 0, "a buffer of {label} must hold bytes");

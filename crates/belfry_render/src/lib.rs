@@ -1,4 +1,5 @@
 mod abi;
+mod batch;
 mod camera;
 pub mod environment;
 mod frame;
@@ -10,6 +11,7 @@ mod light;
 mod line;
 mod material;
 mod mesh;
+mod palette;
 mod pick;
 mod post;
 mod probe;

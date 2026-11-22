@@ -83,6 +83,10 @@ record!(DrawRecord, DRAW, "Draw" {
     pick: u32 => U32,
     palette: u32 => U32,
     joints: u32 => U32,
+    previous_palette: u32 => U32,
+    pad0: u32 => U32,
+    pad1: u32 => U32,
+    pad2: u32 => U32,
 });
 
 record!(InstanceRecord, INSTANCE, "Instance" {
@@ -105,8 +109,8 @@ record!(InstanceRecord, INSTANCE, "Instance" {
     material: u32 => U32,
     palette: u32 => U32,
     joints: u32 => U32,
+    previous_palette: u32 => U32,
     hzb: u32 => U32,
-    pad1: u32 => U32,
 });
 
 record!(SkinVertexRecord, SKIN_VERTEX, "SkinVertex" {

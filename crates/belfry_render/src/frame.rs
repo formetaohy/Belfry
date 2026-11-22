@@ -5,6 +5,7 @@ use crate::hidden::Hidden;
 use crate::instance::MeshInstance;
 use crate::light::DirectionalLight;
 use crate::mesh::{Geometry, Mesh};
+use crate::palette::Skinning;
 use crate::shadow::Cascade;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
@@ -15,12 +16,6 @@ use belfry_math::{Mat4, Transform, Vec3, Vec4};
 pub(crate) struct Batch {
     pub(crate) mesh: Mesh,
     pub(crate) count: u32,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Skinning {
-    pub(crate) palette: u32,
-    pub(crate) joints: u32,
 }
 
 pub(crate) struct Screen {
@@ -190,6 +185,7 @@ pub(crate) struct Placement {
     pub(crate) batch: u32,
     pub(crate) base: u32,
     pub(crate) skinning: Skinning,
+    pub(crate) previous_palette: u32,
     pub(crate) hzb: bool,
 }
 
@@ -235,8 +231,8 @@ pub(crate) fn record_of(
         material: instance.material.index(),
         palette: placement.skinning.palette,
         joints: placement.skinning.joints,
+        previous_palette: placement.previous_palette,
         hzb: u32::from(placement.hzb),
-        pad1: 0,
     }
 }
 

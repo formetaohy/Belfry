@@ -2,6 +2,7 @@ mod animation;
 mod animation_library;
 mod body;
 mod collider;
+mod deletion;
 mod digest;
 mod environment;
 mod field;
