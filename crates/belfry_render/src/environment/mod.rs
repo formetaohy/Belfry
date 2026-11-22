@@ -7,12 +7,26 @@ mod sample;
 use belfry_gpu_device::{Sampler, Texture, TextureFormat};
 use belfry_math::Vec3;
 
-pub use atmosphere::{Atmosphere, MODEL_VERSION};
+pub use atmosphere::{Atmosphere, MODEL_VERSION, PANORAMA_HEIGHT, PANORAMA_WIDTH};
 pub use bake::Baked;
 pub use brdf::brdf;
 pub use panorama::Panorama;
 
-pub(crate) use bake::Baker;
+pub(crate) use atmosphere::{AtmosphereBaker, AtmospherePanorama};
+pub(crate) use bake::{BakeJob, Baker};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BakeRequest(usize);
+
+impl BakeRequest {
+    pub(crate) fn of(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
 
 pub const BRDF_SIZE: u32 = 64;
 pub const BRDF_SAMPLES: u32 = 128;

@@ -1389,7 +1389,8 @@ fn ambient(backend: Backend) {
         address_v: AddressMode::ClampToEdge,
     });
     let panorama_texture = panorama.texture(&renderer, "ambient panorama");
-    let baked = renderer.bake(&panorama_texture, &sampler);
+    let request = renderer.bake(&panorama_texture, &sampler);
+    let baked = renderer.wait_baked(request);
     let environment = Environment::new(
         baked.radiance,
         panorama_texture,
@@ -1630,7 +1631,8 @@ fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
         address_v: AddressMode::ClampToEdge,
     });
     let texture = panorama.texture(renderer, "local panorama");
-    let baked = renderer.bake(&texture, &sampler);
+    let request = renderer.bake(&texture, &sampler);
+    let baked = renderer.wait_baked(request);
     Environment::new(
         baked.radiance,
         texture,

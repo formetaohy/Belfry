@@ -7,7 +7,8 @@ use crate::frame::vertical;
 use crate::program;
 use belfry_gpu_device::{
     Binding, BufferUsages, Device, Draw, GpuBuffer, GpuContext, GraphicsPipeline, PipelineHandle,
-    PipelineState, Queue, Sampler, Submission, Texture, TextureFormat, TextureUsages,
+    PipelineState, Queue, Sampler, Submission, SubmissionIndex, Texture, TextureFormat,
+    TextureUsages,
 };
 use belfry_math::Vec3;
 use std::mem::size_of;
@@ -25,6 +26,12 @@ pub struct Baked {
     pub irradiance: [Vec3; 9],
 }
 
+pub(crate) struct BakeJob {
+    radiance: Texture,
+    readback: GpuBuffer,
+    submission: SubmissionIndex,
+}
+
 pub(crate) struct Baker {
     device: Device,
     queue: Queue,
@@ -36,7 +43,6 @@ pub(crate) struct Baker {
     setup: GpuBuffer,
     partials: GpuBuffer,
     total: GpuBuffer,
-    readback: GpuBuffer,
 }
 
 impl Baker {
@@ -85,18 +91,12 @@ impl Baker {
                 IRRADIANCE_TOTAL_BYTES,
                 storage | BufferUsages::COPY_SRC,
             ),
-            readback: GpuBuffer::new(
-                &device,
-                "belfry bake readback",
-                IRRADIANCE_TOTAL_BYTES,
-                BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            ),
             queue: Queue::of(&device),
             device,
         }
     }
 
-    pub(crate) fn bake(&self, panorama: &Texture, sampler: &Sampler) -> Baked {
+    pub(crate) fn submit(&self, panorama: &Texture, sampler: &Sampler) -> BakeJob {
         assert_eq!(
             panorama.format(),
             TextureFormat::Rgba16Float,
@@ -141,6 +141,12 @@ impl Baker {
                 texels: texels as u32,
                 partials: IRRADIANCE_PARTIALS,
             }),
+        );
+        let readback = GpuBuffer::new(
+            &self.device,
+            "belfry bake readback",
+            IRRADIANCE_TOTAL_BYTES,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         );
         let mut submission = Submission::new(&self.device, "belfry environment");
         let source = [
@@ -208,11 +214,32 @@ impl Baker {
             ],
         );
         submission.dispatch(&self.reduction, &reduction, [1, 1, 1]);
-        submission.copy(&self.total, 0, &self.readback, 0, IRRADIANCE_TOTAL_BYTES);
-        let index = submission.submit(&self.queue);
-        let bytes = self
+        submission.copy(&self.total, 0, &readback, 0, IRRADIANCE_TOTAL_BYTES);
+        let submission = submission.submit(&self.queue);
+        BakeJob {
+            radiance,
+            readback,
+            submission,
+        }
+    }
+
+    pub(crate) fn take(&self, job: &BakeJob) -> Option<Baked> {
+        if !self.queue.complete(job.submission) {
+            return None;
+        }
+        Some(self.collect(job))
+    }
+
+    pub(crate) fn wait(&self, job: &BakeJob) -> Baked {
+        self.queue
+            .wait(job.submission, belfry_gpu_device::READBACK_TIMEOUT);
+        self.collect(job)
+    }
+
+    fn collect(&self, job: &BakeJob) -> Baked {
+        let bytes = job
             .readback
-            .read(&self.queue, index, IRRADIANCE_TOTAL_BYTES);
+            .read(&self.queue, job.submission, IRRADIANCE_TOTAL_BYTES);
         let mut irradiance = [Vec3::ZERO; 9];
         for (coefficient, held) in irradiance
             .iter_mut()
@@ -225,7 +252,7 @@ impl Baker {
             );
         }
         Baked {
-            radiance,
+            radiance: job.radiance.clone(),
             levels: LEVELS,
             irradiance,
         }

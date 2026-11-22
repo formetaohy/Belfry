@@ -1,11 +1,13 @@
 use super::work::{
-    ImageMips, Prepared, PreparedAnimation, PreparedEnvironment, PreparedImage, PreparedMaterial,
-    PreparedMesh, PreparedSkin, PreparedSound, format_of, image_modes,
+    EnvironmentData, ImageMips, Prepared, PreparedAnimation, PreparedEnvironment, PreparedImage,
+    PreparedMaterial, PreparedMesh, PreparedSkin, PreparedSound, format_of, image_modes,
 };
 use super::{AssetError, ImageRecord, ImageTexture, Library, MaterialRecord, MeshRecord, Refresh};
 use belfry_image::ColorSpace;
+use belfry_render::environment::BakeRequest;
 use belfry_render::{
-    Environment, Renderer, SamplerDesc, SkinVertexRecord, TextureFormat, TextureUsages, Vertex,
+    Environment, Renderer, Sampler, SamplerDesc, SkinVertexRecord, Texture, TextureFormat,
+    TextureUsages, Vertex,
 };
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
@@ -28,6 +30,15 @@ enum Stage {
     Done,
 }
 
+struct PendingEnvironment {
+    id: String,
+    fingerprint: crate::digest::Digest,
+    request: BakeRequest,
+    panorama: Texture,
+    sampler: Sampler,
+    lit: Option<f32>,
+}
+
 pub(super) struct Commit {
     prepared: Prepared,
     refresh: Refresh,
@@ -35,6 +46,7 @@ pub(super) struct Commit {
     index: usize,
     spent: u64,
     items: usize,
+    pending: Vec<PendingEnvironment>,
 }
 
 impl Commit {
@@ -51,6 +63,7 @@ impl Commit {
             index: 0,
             spent: 0,
             items: 0,
+            pending: Vec::new(),
         }
     }
 
@@ -156,15 +169,18 @@ impl Commit {
                     self.charge(cost);
                 }
                 Stage::Environments => {
-                    let Some(item) = self.prepared.environments.get(self.index) else {
+                    if self.index >= self.prepared.environments.len() {
+                        if !self.settle_environments(library, renderer) {
+                            return None;
+                        }
                         self.next(Stage::Finish);
                         continue;
-                    };
-                    let cost = environment_bytes(item);
+                    }
+                    let cost = environment_bytes(&self.prepared.environments[self.index]);
                     if !self.allows(cost, budget) {
                         return None;
                     }
-                    library.commit_environment(renderer, item);
+                    self.submit_environment(library, renderer);
                     self.charge(cost);
                 }
                 Stage::Finish => {
@@ -245,6 +261,104 @@ impl Commit {
     fn next(&mut self, stage: Stage) {
         self.stage = stage;
         self.index = 0;
+    }
+
+    fn submit_environment(&mut self, library: &mut Library, renderer: &mut Renderer) {
+        let item = &self.prepared.environments[self.index];
+        let sampler = library.sampler(
+            renderer,
+            SamplerDesc {
+                min_filter: belfry_render::Filter::Linear,
+                mag_filter: belfry_render::Filter::Linear,
+                mip_filter: belfry_render::Filter::Linear,
+                address_u: belfry_render::AddressMode::Repeat,
+                address_v: belfry_render::AddressMode::ClampToEdge,
+            },
+        );
+        if item.entry.capture() {
+            let empty = |label: &str| {
+                let texture = renderer.texture(
+                    label,
+                    1,
+                    1,
+                    1,
+                    TextureFormat::Rgba16Float,
+                    TextureUsages::SAMPLED | TextureUsages::COPY_DST,
+                );
+                renderer.write_texture(&texture, &[EMPTY_TEXEL]);
+                texture
+            };
+            let radiance = empty(&item.entry.id);
+            let panorama = empty(&format!("{}.panorama", item.entry.id));
+            library.environments.insert(
+                item.entry.id.clone(),
+                super::EnvironmentRecord {
+                    fingerprint: item.fingerprint,
+                    capture: true,
+                    environment: Environment::new(
+                        radiance,
+                        panorama,
+                        sampler,
+                        1,
+                        [belfry_math::Vec3::ZERO; 9],
+                    ),
+                },
+            );
+            return;
+        }
+        let (panorama, background, lit) = match &item.data {
+            EnvironmentData::Panorama(panorama) => {
+                let texture = panorama.texture(renderer, &item.entry.id);
+                (texture.clone(), texture, None)
+            }
+            EnvironmentData::Atmosphere(atmosphere) => {
+                let panoramas = renderer.atmosphere(atmosphere);
+                (
+                    panoramas.radiance,
+                    panoramas.background,
+                    Some(atmosphere.sun_intensity),
+                )
+            }
+        };
+        let request = renderer.bake(&panorama, &sampler);
+        self.pending.push(PendingEnvironment {
+            id: item.entry.id.clone(),
+            fingerprint: item.fingerprint,
+            request,
+            panorama: background,
+            sampler,
+            lit,
+        });
+    }
+
+    fn settle_environments(&mut self, library: &mut Library, renderer: &mut Renderer) -> bool {
+        let mut held = Vec::with_capacity(self.pending.len());
+        for pending in std::mem::take(&mut self.pending) {
+            let Some(baked) = renderer.take_baked(pending.request) else {
+                held.push(pending);
+                continue;
+            };
+            let mut environment = Environment::new(
+                baked.radiance,
+                pending.panorama,
+                pending.sampler,
+                baked.levels,
+                baked.irradiance,
+            );
+            if let Some(intensity) = pending.lit {
+                environment = environment.lit(intensity, true);
+            }
+            library.environments.insert(
+                pending.id,
+                super::EnvironmentRecord {
+                    fingerprint: pending.fingerprint,
+                    capture: false,
+                    environment,
+                },
+            );
+        }
+        self.pending = held;
+        self.pending.is_empty()
     }
 }
 
@@ -390,74 +504,15 @@ impl Library {
             },
         );
     }
-
-    fn commit_environment(&mut self, renderer: &mut Renderer, item: &PreparedEnvironment) {
-        let sampler = self.sampler(
-            renderer,
-            SamplerDesc {
-                min_filter: belfry_render::Filter::Linear,
-                mag_filter: belfry_render::Filter::Linear,
-                mip_filter: belfry_render::Filter::Linear,
-                address_u: belfry_render::AddressMode::Repeat,
-                address_v: belfry_render::AddressMode::ClampToEdge,
-            },
-        );
-        let environment = if item.entry.capture() {
-            let radiance = renderer.texture(
-                &item.entry.id,
-                1,
-                1,
-                1,
-                TextureFormat::Rgba16Float,
-                TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-            );
-            renderer.write_texture(&radiance, &[EMPTY_TEXEL]);
-            let panorama = renderer.texture(
-                &format!("{}.panorama", item.entry.id),
-                1,
-                1,
-                1,
-                TextureFormat::Rgba16Float,
-                TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-            );
-            renderer.write_texture(&panorama, &[EMPTY_TEXEL]);
-            Environment::new(radiance, panorama, sampler, 1, [belfry_math::Vec3::ZERO; 9])
-        } else {
-            let panorama = item.panorama.texture(renderer, &item.entry.id);
-            let background = match &item.sky {
-                Some(sky) => sky.texture(renderer, &format!("{}.sky", item.entry.id)),
-                None => panorama.clone(),
-            };
-            let baked = renderer.bake(&panorama, &sampler);
-            let environment = Environment::new(
-                baked.radiance,
-                background,
-                sampler,
-                baked.levels,
-                baked.irradiance,
-            );
-            match item.entry.atmosphere() {
-                Some(atmosphere) => environment.lit(atmosphere.sun_intensity, true),
-                None => environment,
-            }
-        };
-        self.environments.insert(
-            item.entry.id.clone(),
-            super::EnvironmentRecord {
-                fingerprint: item.fingerprint,
-                capture: item.entry.capture(),
-                environment,
-            },
-        );
-    }
 }
 
 fn environment_bytes(item: &PreparedEnvironment) -> u64 {
-    let panorama = u64::from(item.panorama.width()) * u64::from(item.panorama.height()) * 8;
-    let sky = item.sky.as_ref().map_or(0, |sky| {
-        u64::from(sky.width()) * u64::from(sky.height()) * 8
-    });
-    panorama + sky
+    match &item.data {
+        EnvironmentData::Panorama(panorama) => {
+            u64::from(panorama.width()) * u64::from(panorama.height()) * 8
+        }
+        EnvironmentData::Atmosphere(_) => 0,
+    }
 }
 
 fn mesh_bytes(item: &PreparedMesh) -> u64 {

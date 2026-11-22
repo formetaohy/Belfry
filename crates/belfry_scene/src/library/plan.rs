@@ -322,11 +322,10 @@ pub(super) fn plan(job: Job) -> Prepared {
             .map_err(|message| message.clone())
             .and_then(|_| environment_data(&scene, entry, &mut prepare.sources));
         match prepared {
-            Ok((panorama, sky)) => environments.push(PreparedEnvironment {
+            Ok(data) => environments.push(PreparedEnvironment {
                 entry: entry.clone(),
                 fingerprint,
-                panorama,
-                sky,
+                data,
             }),
             Err(message) => fail(
                 &mut errors,

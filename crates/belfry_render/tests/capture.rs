@@ -5,8 +5,8 @@ use belfry_gpu_device::{
 };
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{
-    Camera, CaptureProbe, DirectionalLight, Environment, MaterialDesc, MeshInstance, Renderer,
-    Target, Vertex,
+    Camera, Capture, CaptureProbe, DirectionalLight, Environment, MaterialDesc, MeshInstance,
+    Renderer, Target, Vertex,
 };
 
 const WALL: [Vertex; 6] = [
@@ -138,8 +138,7 @@ fn capture(backend: Backend) {
     world.insert(probe, placeholder(&mut renderer));
     world.insert(probe, CaptureProbe::default());
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
-    let captures = renderer.take_captures();
+    let captures = settled(&mut renderer, &world, &target);
     assert_eq!(
         captures.len(),
         1,
@@ -169,9 +168,8 @@ fn capture(backend: Backend) {
     );
     belfry_render::install_captures(&mut world, captures);
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
     assert!(
-        renderer.take_captures().is_empty(),
+        settled(&mut renderer, &world, &target).is_empty(),
         "{backend:?} captures a probe once for the box it holds",
     );
     world.insert(
@@ -182,12 +180,22 @@ fn capture(backend: Backend) {
             Vec3::new(1.0, 0.0, 0.0),
         ),
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
     assert_eq!(
-        renderer.take_captures().len(),
+        settled(&mut renderer, &world, &target).len(),
         1,
         "{backend:?} captures a probe whose box moved",
     );
+}
+
+fn settled(renderer: &mut Renderer, world: &World, target: &Texture) -> Vec<Capture> {
+    for _ in 0..8 {
+        renderer.render(world, Target::Texture(target), CLEAR, None);
+        let captures = renderer.take_captures();
+        if !captures.is_empty() {
+            return captures;
+        }
+    }
+    Vec::new()
 }
 
 fn placeholder(renderer: &mut Renderer) -> Environment {

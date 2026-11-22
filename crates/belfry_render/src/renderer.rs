@@ -8,7 +8,10 @@ use crate::abi::{
 use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
 use crate::capture::{self, Capture, CaptureFrame, CaptureProbe, Captures, Probe, SceneRevision};
 use crate::environment::BRDF_SIZE;
-use crate::environment::{Baked, Baker, Environment};
+use crate::environment::{
+    Atmosphere, AtmosphereBaker, AtmospherePanorama, BakeJob, BakeRequest, Baked, Baker,
+    Environment,
+};
 use crate::frame::{
     Batch, Placement, Screen, ambient_of, arguments_of, bases_of, camera_of, direction_record,
     light_of, record_of, record_of_cascade, record_of_main_view, record_of_view, vector,
@@ -116,6 +119,9 @@ pub struct Renderer {
     radiance: Texture,
     radiance_sampler: Sampler,
     baker: Baker,
+    atmospheres: AtmosphereBaker,
+    bakes: HashMap<usize, BakeJob>,
+    next_bake: usize,
     captures: Captures,
     ambient: Option<(usize, usize, usize)>,
     cascades: GpuBuffer,
@@ -408,6 +414,9 @@ impl Renderer {
             radiance,
             radiance_sampler,
             baker,
+            atmospheres: AtmosphereBaker::new(context),
+            bakes: HashMap::new(),
+            next_bake: 0,
             ambient,
             cascades,
             instances,
@@ -593,8 +602,31 @@ impl Renderer {
         Sampler::new(&self.device, desc)
     }
 
-    pub fn bake(&mut self, panorama: &Texture, sampler: &Sampler) -> Baked {
-        self.baker.bake(panorama, sampler)
+    pub fn bake(&mut self, panorama: &Texture, sampler: &Sampler) -> BakeRequest {
+        let request = BakeRequest::of(self.next_bake);
+        self.next_bake += 1;
+        self.bakes
+            .insert(request.index(), self.baker.submit(panorama, sampler));
+        request
+    }
+
+    pub fn atmosphere(&mut self, atmosphere: &Atmosphere) -> AtmospherePanorama {
+        self.atmospheres.bake(atmosphere)
+    }
+
+    pub fn take_baked(&mut self, request: BakeRequest) -> Option<Baked> {
+        let job = self.bakes.get(&request.index())?;
+        let baked = self.baker.take(job)?;
+        self.bakes.remove(&request.index());
+        Some(baked)
+    }
+
+    pub fn wait_baked(&mut self, request: BakeRequest) -> Baked {
+        let job = self
+            .bakes
+            .remove(&request.index())
+            .expect("an environment bake waits for a request it holds");
+        self.baker.wait(&job)
     }
 
     pub fn material(&mut self, desc: MaterialDesc) -> Material {
@@ -648,12 +680,16 @@ impl Renderer {
             Target::Surface(frame) => (frame.texture().clone(), Some(frame)),
         };
         self.flush_materials();
+        self.settle_captures();
         let ambient = ambient_of(world);
         let (environment, environment_transform) = match ambient.global {
             Some((environment, transform)) => (Some(environment), transform),
             None => (None, Transform::IDENTITY),
         };
-        let probe = Self::stale_probe(world);
+        let probe = match self.captures.pending() {
+            Some(_) => None,
+            None => Self::stale_probe(world),
+        };
         let (capture_rotation, capture_intensity) = match ambient.global {
             Some((held, transform)) => (
                 Mat4::from_quat(transform.rotation.normalize().inverse()),
@@ -1464,6 +1500,7 @@ impl Renderer {
     }
 
     pub fn take_captures(&mut self) -> Vec<Capture> {
+        self.settle_captures();
         self.captures.take()
     }
 
@@ -1629,26 +1666,30 @@ impl Renderer {
             &[Draw::new(&self.captures.convert, &convert, 3)],
         );
         submission.submit(&self.queue);
-        let baked = self.baker.bake(&panorama, &self.radiance_sampler);
-        let mut environment = Environment::new(
-            baked.radiance,
-            panorama,
-            self.radiance_sampler.clone(),
-            baked.levels,
-            baked.irradiance,
-        );
-        environment.intensity = probe.environment.intensity;
-        environment.background = probe.environment.background;
-        environment.local = probe.environment.local;
-        environment.blend = probe.environment.blend;
+        let sampler = self.radiance_sampler.clone();
+        let request = self.bake(&panorama, &sampler);
         let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
         let mut marker = probe.probe;
         marker.captured(probe.transform, revision);
-        self.captures.push(Capture {
+        self.captures.begin(capture::Pending {
             entity: probe.entity,
             probe: marker,
-            environment,
+            intensity: probe.environment.intensity,
+            background: probe.environment.background,
+            blend: probe.environment.blend,
+            panorama,
+            request,
         });
+    }
+
+    fn settle_captures(&mut self) {
+        let Some(request) = self.captures.pending().map(|pending| pending.request) else {
+            return;
+        };
+        let Some(baked) = self.take_baked(request) else {
+            return;
+        };
+        self.captures.settle(baked, &self.radiance_sampler);
     }
 
     pub fn pick(&mut self, point: Vec2) -> Option<Entity> {

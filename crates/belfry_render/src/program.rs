@@ -1,8 +1,8 @@
 use crate::abi::{
-    AtlasRecord, BakeLevelRecord, BloomRecord, BloomUpRecord, CascadeRecord, DebugLineRecord,
-    DrawRecord, HzbLevelRecord, HzbStepRecord, IRRADIANCE_PARTIALS, InstanceRecord,
-    IrradianceRecord, IrradianceSetupRecord, JointRecord, LIGHT_CAPACITY, LIGHT_SLICES,
-    LIGHT_STRIDE, LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord,
+    AtlasRecord, AtmosphereRecord, BakeLevelRecord, BloomRecord, BloomUpRecord, CascadeRecord,
+    DebugLineRecord, DrawRecord, HzbLevelRecord, HzbStepRecord, IRRADIANCE_PARTIALS,
+    InstanceRecord, IrradianceRecord, IrradianceSetupRecord, JointRecord, LIGHT_CAPACITY,
+    LIGHT_SLICES, LIGHT_STRIDE, LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord,
     SHADOW_CASCADES, SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord, TransparentRecord,
     TransparentSetupRecord, VERTEX_FLOATS, ViewRecord, WORKGROUP,
 };
@@ -83,6 +83,12 @@ pub(crate) const INTEGRATION_PANORAMA: u32 = 0;
 pub(crate) const INTEGRATION_SAMPLER: u32 = 1;
 pub(crate) const REDUCTION_PARTIALS: u32 = 0;
 pub(crate) const REDUCTION_TOTAL: u32 = 1;
+
+pub(crate) const ATMOSPHERE_SETUP: u32 = 0;
+pub(crate) const ATMOSPHERE_TRANSMITTANCE: u32 = 0;
+pub(crate) const ATMOSPHERE_SCATTERING: u32 = 1;
+pub(crate) const ATMOSPHERE_LUT_SAMPLER: u32 = 1;
+pub(crate) const ATMOSPHERE_SKY_SAMPLER: u32 = 2;
 
 pub(crate) const BLOOM_SETTINGS: u32 = 0;
 pub(crate) const EXTRACT_SOURCE: u32 = 0;
@@ -2196,6 +2202,506 @@ mod irradiance_reduction {
 
 pub(crate) fn prefiltering() -> GraphicsProgram {
     prefilter()
+}
+
+#[belfry_gpu::graphics]
+mod atmosphere_transmittance {
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x, y);
+    }
+
+    #[fragment]
+    fn fragment(setup: Read<AtmosphereRecord>, at: In<Fvec2>, target: Out<Fvec4>) {
+        let held = setup[0u32];
+        let cosine = (at.x * 0.5 + 0.5) * 2.0 - 1.0;
+        let altitude = (at.y * held.vertical + 0.5) * 60.0;
+        let origin = fvec4(0.0, 6360.0 + altitude, 0.0, 0.0);
+        let sine = sqrt(max(1.0 - cosine * cosine, 0.0));
+        let direction = fvec4(0.0, cosine, 0.0 - sine, 0.0);
+        let mut transmittance = fvec4(0.0, 0.0, 0.0, 1.0);
+        if sphere(origin, direction, 6360.0).x <= 0.0 {
+            let atmosphere = sphere(origin, direction, 6420.0);
+            if atmosphere.y > 0.0 {
+                let step = max(atmosphere.y, 0.0) * (1.0 / 40.0);
+                let mut optical = fvec4(0.0, 0.0, 0.0, 0.0);
+                let mut start = 0.0;
+                for _step in stride(0u32, 40u32, 1u32) {
+                    let middle = origin + direction * (start + step * 0.3);
+                    optical = optical
+                        + extinction_of(
+                            held.rayleigh,
+                            held.mie,
+                            held.absorption,
+                            held.ozone,
+                            length3(middle) - 6360.0,
+                        ) * step;
+                    start += step;
+                }
+                transmittance = fvec4(
+                    exp(0.0 - optical.x),
+                    exp(0.0 - optical.y),
+                    exp(0.0 - optical.z),
+                    1.0,
+                );
+            }
+        }
+        target = transmittance;
+    }
+
+    fn extinction_of(
+        rayleigh: Fvec4,
+        mie: Fvec4,
+        absorption: Fvec4,
+        ozone: Fvec4,
+        altitude: f32,
+    ) -> Fvec4 {
+        let thin = exp(0.0 - altitude * (1.0 / 8.0));
+        let haze = exp(0.0 - altitude * (1.0 / 1.2));
+        let layer = max(1.0 - abs(altitude - 25.0) * (1.0 / 15.0), 0.0);
+        fvec4(
+            rayleigh.x * thin + mie.x * haze + absorption.x * haze + ozone.x * layer,
+            rayleigh.y * thin + mie.y * haze + absorption.y * haze + ozone.y * layer,
+            rayleigh.z * thin + mie.z * haze + absorption.z * haze + ozone.z * layer,
+            0.0,
+        )
+    }
+
+    fn sphere(origin: Fvec4, direction: Fvec4, radius: f32) -> Fvec4 {
+        let along = dot3(origin, direction);
+        let outside = dot3(origin, origin) - radius * radius;
+        let discriminant = along * along - outside;
+        if discriminant < 0.0 {
+            return fvec4(-1.0, -1.0, 0.0, 0.0);
+        }
+        let root = sqrt(discriminant);
+        fvec4(0.0 - along - root, 0.0 - along + root, 0.0, 0.0)
+    }
+
+    fn length3(value: Fvec4) -> f32 {
+        sqrt(dot3(value, value))
+    }
+
+    fn dot3(left: Fvec4, right: Fvec4) -> f32 {
+        left.x * right.x + left.y * right.y + left.z * right.z
+    }
+}
+
+#[belfry_gpu::graphics]
+mod atmosphere_scattering {
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x, y);
+    }
+
+    #[fragment]
+    fn fragment(
+        setup: Read<AtmosphereRecord>,
+        transmittance: Texture2D,
+        sampler: Sampler,
+        at: In<Fvec2>,
+        target: Out<Fvec4>,
+    ) {
+        let held = setup[0u32];
+        let cosine = (at.x * 0.5 + 0.5) * 2.0 - 1.0;
+        let altitude = (at.y * held.vertical + 0.5) * 60.0;
+        let origin = fvec4(0.0, 6360.0 + altitude, 0.0, 0.0);
+        let sine = sqrt(max(1.0 - cosine * cosine, 0.0));
+        let sun = fvec4(0.0, cosine, 0.0 - sine, 0.0);
+        let mut luminance = fvec4(0.0, 0.0, 0.0, 0.0);
+        let mut transfer = fvec4(0.0, 0.0, 0.0, 0.0);
+        for index in stride(0u32, 64u32, 1u32) {
+            let rank = 1.0 - 2.0 * ((index as f32) + 0.5) * (1.0 / 64.0);
+            let radius = sqrt(max(1.0 - rank * rank, 0.0));
+            let angle = 2.3999632 * (index as f32);
+            let direction = fvec4(radius * cos(angle), rank, radius * sin(angle), 0.0);
+            let atmosphere = sphere(origin, direction, 6420.0);
+            if atmosphere.y > 0.0 {
+                let ground = sphere(origin, direction, 6360.0);
+                let beyond = ground.x > 0.0;
+                let mut distance = atmosphere.y;
+                if beyond {
+                    distance = ground.x;
+                }
+                let incident = dot3(direction, sun);
+                let rayleigh = phase_rayleigh(incident);
+                let mie = phase_mie(incident, held.anisotropy);
+                let step = distance * (1.0 / 20.0);
+                let mut view = fvec4(1.0, 1.0, 1.0, 0.0);
+                let mut absorbed = fvec4(0.0, 0.0, 0.0, 0.0);
+                let mut lost = fvec4(0.0, 0.0, 0.0, 0.0);
+                let mut start = 0.0;
+                for _step in stride(0u32, 20u32, 1u32) {
+                    let middle = origin + direction * (start + step * 0.3);
+                    let here = length3(middle) - 6360.0;
+                    let scattered = thin(held.rayleigh, here);
+                    let suspended = haze(held.mie, here);
+                    let extinction =
+                        extinction_of(held.rayleigh, held.mie, held.absorption, held.ozone, here);
+                    let sunlight = sampled(transmittance, sampler, sun.y, here);
+                    let in_scattering =
+                        scattered * (sunlight * rayleigh) + suspended * (sunlight * mie);
+                    let local = attenuation(extinction, step);
+                    absorbed = absorbed + view * integrated(in_scattering, local, extinction);
+                    lost = lost + view * integrated(scattered + suspended, local, extinction);
+                    view = view * local;
+                    start += step;
+                }
+                luminance = luminance + absorbed;
+                transfer = transfer + lost;
+                if beyond {
+                    let surface = normalized(origin + direction * distance);
+                    let sunlight = sampled(
+                        transmittance,
+                        sampler,
+                        sun.y,
+                        length3(origin + direction * distance) - 6360.0,
+                    );
+                    let incidence = dot3(surface, sun);
+                    if incidence > 0.0 {
+                        luminance = luminance + view * held.ground * sunlight * incidence;
+                    }
+                }
+            }
+        }
+        let scale = 1.0 / 64.0;
+        target = fvec4(
+            luminance.x * scale / max(1.0 - transfer.x * scale, 0.0001),
+            luminance.y * scale / max(1.0 - transfer.y * scale, 0.0001),
+            luminance.z * scale / max(1.0 - transfer.z * scale, 0.0001),
+            1.0,
+        );
+    }
+
+    fn sampled(lookup: Texture2D, filter: Sampler, cosine: f32, altitude: f32) -> Fvec4 {
+        sample_lod(
+            lookup,
+            filter,
+            fvec2(
+                0.5 + 0.5 * cosine,
+                min(max(altitude * (1.0 / 60.0), 0.0), 1.0),
+            ),
+            0.0,
+        )
+    }
+
+    fn thin(rayleigh: Fvec4, altitude: f32) -> Fvec4 {
+        let held = exp(0.0 - altitude * (1.0 / 8.0));
+        fvec4(rayleigh.x * held, rayleigh.y * held, rayleigh.z * held, 0.0)
+    }
+
+    fn haze(mie: Fvec4, altitude: f32) -> Fvec4 {
+        let held = exp(0.0 - altitude * (1.0 / 1.2));
+        fvec4(mie.x * held, mie.y * held, mie.z * held, 0.0)
+    }
+
+    fn extinction_of(
+        rayleigh: Fvec4,
+        mie: Fvec4,
+        absorption: Fvec4,
+        ozone: Fvec4,
+        altitude: f32,
+    ) -> Fvec4 {
+        let held_thin = thin(rayleigh, altitude);
+        let held_haze = haze(mie, altitude);
+        let held_ozone = exp(0.0 - altitude * (1.0 / 1.2));
+        let layer = max(1.0 - abs(altitude - 25.0) * (1.0 / 15.0), 0.0);
+        fvec4(
+            held_thin.x + held_haze.x + absorption.x * held_ozone + ozone.x * layer,
+            held_thin.y + held_haze.y + absorption.y * held_ozone + ozone.y * layer,
+            held_thin.z + held_haze.z + absorption.z * held_ozone + ozone.z * layer,
+            0.0,
+        )
+    }
+
+    fn attenuation(extinction: Fvec4, distance: f32) -> Fvec4 {
+        fvec4(
+            exp(0.0 - extinction.x * distance),
+            exp(0.0 - extinction.y * distance),
+            exp(0.0 - extinction.z * distance),
+            1.0,
+        )
+    }
+
+    fn integrated(in_scattering: Fvec4, local: Fvec4, extinction: Fvec4) -> Fvec4 {
+        fvec4(
+            (in_scattering.x - in_scattering.x * local.x) / max(extinction.x, 0.000000000001),
+            (in_scattering.y - in_scattering.y * local.y) / max(extinction.y, 0.000000000001),
+            (in_scattering.z - in_scattering.z * local.z) / max(extinction.z, 0.000000000001),
+            0.0,
+        )
+    }
+
+    fn phase_rayleigh(cosine: f32) -> f32 {
+        0.059683104 * (1.0 + cosine * cosine)
+    }
+
+    fn phase_mie(cosine: f32, anisotropy: f32) -> f32 {
+        let numerator = (1.0 - anisotropy * anisotropy) * (1.0 + cosine * cosine);
+        let denominator = (2.0 + anisotropy * anisotropy)
+            * pow(
+                1.0 + anisotropy * anisotropy - 2.0 * anisotropy * cosine,
+                1.5,
+            );
+        0.11936621 * numerator / denominator
+    }
+
+    fn sphere(origin: Fvec4, direction: Fvec4, radius: f32) -> Fvec4 {
+        let along = dot3(origin, direction);
+        let outside = dot3(origin, origin) - radius * radius;
+        let discriminant = along * along - outside;
+        if discriminant < 0.0 {
+            return fvec4(-1.0, -1.0, 0.0, 0.0);
+        }
+        let root = sqrt(discriminant);
+        fvec4(0.0 - along - root, 0.0 - along + root, 0.0, 0.0)
+    }
+
+    fn length3(value: Fvec4) -> f32 {
+        sqrt(dot3(value, value))
+    }
+
+    fn normalized(vector: Fvec4) -> Fvec4 {
+        let inverse = 1.0 / max(length3(vector), 0.0000001);
+        fvec4(
+            vector.x * inverse,
+            vector.y * inverse,
+            vector.z * inverse,
+            0.0,
+        )
+    }
+
+    fn dot3(left: Fvec4, right: Fvec4) -> f32 {
+        left.x * right.x + left.y * right.y + left.z * right.z
+    }
+}
+
+#[belfry_gpu::graphics]
+mod atmosphere_sky {
+    #[vertex]
+    fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
+        let mut x = -1.0;
+        let mut y = -1.0;
+        if vertex == 1u32 {
+            x = 3.0;
+        }
+        if vertex == 2u32 {
+            y = 3.0;
+        }
+        position = fvec4(x, y, 0.0, 1.0);
+        surface = fvec2(x, y);
+    }
+
+    #[fragment]
+    fn fragment(
+        setup: Read<AtmosphereRecord>,
+        transmittance: Texture2D,
+        scattering: Texture2D,
+        sampler: Sampler,
+        at: In<Fvec2>,
+        target: Out<Fvec4>,
+    ) {
+        let held = setup[0u32];
+        let u = at.x * 0.5 + 0.5;
+        let v = at.y * held.vertical + 0.5;
+        let phi = (u - 0.5) * (710.0 / 113.0);
+        let theta = v * (355.0 / 113.0);
+        let sine = sin(theta);
+        let direction = fvec4(sine * sin(phi), cos(theta), 0.0 - sine * cos(phi), 0.0);
+        let origin = fvec4(0.0, 6360.0 + held.altitude, 0.0, 0.0);
+        let mut radiance = fvec4(0.0, 0.0, 0.0, 0.0);
+        let atmosphere = sphere(origin, direction, 6420.0);
+        if atmosphere.y > 0.0 {
+            let ground = sphere(origin, direction, 6360.0);
+            let beyond = ground.x > 0.0;
+            let mut distance = atmosphere.y;
+            if beyond {
+                distance = ground.x;
+            }
+            if distance > 0.0 {
+                let incident = dot3(direction, held.sun);
+                let rayleigh = phase_rayleigh(incident);
+                let mie = phase_mie(incident, held.anisotropy);
+                let step = distance * (1.0 / 24.0);
+                let mut view = fvec4(1.0, 1.0, 1.0, 0.0);
+                let mut start = 0.0;
+                for _step in stride(0u32, 24u32, 1u32) {
+                    let middle = origin + direction * (start + step * 0.3);
+                    let here = length3(middle) - 6360.0;
+                    let scattered = thin(held.rayleigh, here);
+                    let suspended = haze(held.mie, here);
+                    let extinction =
+                        extinction_of(held.rayleigh, held.mie, held.absorption, held.ozone, here);
+                    let sunlight = sampled(transmittance, sampler, held.sun.y, here);
+                    let rebound = sampled(scattering, sampler, held.sun.y, here);
+                    let in_scattering = scattered * (sunlight * rayleigh + rebound)
+                        + suspended * (sunlight * mie + rebound);
+                    let local = attenuation(extinction, step);
+                    radiance = radiance + view * integrated(in_scattering, local, extinction);
+                    view = view * local;
+                    start += step;
+                }
+                if beyond {
+                    let surface = normalized(origin + direction * distance);
+                    let sunlight = sampled(
+                        transmittance,
+                        sampler,
+                        held.sun.y,
+                        length3(origin + direction * distance) - 6360.0,
+                    );
+                    radiance = radiance
+                        + view * held.ground * sunlight * max(dot3(surface, held.sun), 0.0);
+                }
+            }
+        }
+        if held.disk == 1u32 {
+            let angle = acos(min(max(dot3(direction, held.sun), -1.0), 1.0));
+            let half = 0.5
+                * max(
+                    (710.0 / 113.0) * (1.0 / held.width) * sin(v * (355.0 / 113.0)),
+                    (355.0 / 113.0) * (1.0 / held.height),
+                );
+            let coverage = min(max((0.004675 + half - angle) / (2.0 * half), 0.0), 1.0);
+            if coverage > 0.0 {
+                let disk = sampled(transmittance, sampler, held.sun.y, held.altitude)
+                    * (1.0 / ((355.0 / 113.0) * 0.0000218556));
+                radiance = radiance + disk * coverage;
+            }
+        }
+        target = fvec4(radiance.x, radiance.y, radiance.z, 1.0);
+    }
+
+    fn sampled(lookup: Texture2D, filter: Sampler, cosine: f32, altitude: f32) -> Fvec4 {
+        sample_lod(
+            lookup,
+            filter,
+            fvec2(
+                0.5 + 0.5 * cosine,
+                min(max(altitude * (1.0 / 60.0), 0.0), 1.0),
+            ),
+            0.0,
+        )
+    }
+
+    fn thin(rayleigh: Fvec4, altitude: f32) -> Fvec4 {
+        let held = exp(0.0 - altitude * (1.0 / 8.0));
+        fvec4(rayleigh.x * held, rayleigh.y * held, rayleigh.z * held, 0.0)
+    }
+
+    fn haze(mie: Fvec4, altitude: f32) -> Fvec4 {
+        let held = exp(0.0 - altitude * (1.0 / 1.2));
+        fvec4(mie.x * held, mie.y * held, mie.z * held, 0.0)
+    }
+
+    fn extinction_of(
+        rayleigh: Fvec4,
+        mie: Fvec4,
+        absorption: Fvec4,
+        ozone: Fvec4,
+        altitude: f32,
+    ) -> Fvec4 {
+        let held_thin = thin(rayleigh, altitude);
+        let held_haze = haze(mie, altitude);
+        let held_ozone = exp(0.0 - altitude * (1.0 / 1.2));
+        let layer = max(1.0 - abs(altitude - 25.0) * (1.0 / 15.0), 0.0);
+        fvec4(
+            held_thin.x + held_haze.x + absorption.x * held_ozone + ozone.x * layer,
+            held_thin.y + held_haze.y + absorption.y * held_ozone + ozone.y * layer,
+            held_thin.z + held_haze.z + absorption.z * held_ozone + ozone.z * layer,
+            0.0,
+        )
+    }
+
+    fn attenuation(extinction: Fvec4, distance: f32) -> Fvec4 {
+        fvec4(
+            exp(0.0 - extinction.x * distance),
+            exp(0.0 - extinction.y * distance),
+            exp(0.0 - extinction.z * distance),
+            1.0,
+        )
+    }
+
+    fn integrated(in_scattering: Fvec4, local: Fvec4, extinction: Fvec4) -> Fvec4 {
+        fvec4(
+            (in_scattering.x - in_scattering.x * local.x) / max(extinction.x, 0.000000000001),
+            (in_scattering.y - in_scattering.y * local.y) / max(extinction.y, 0.000000000001),
+            (in_scattering.z - in_scattering.z * local.z) / max(extinction.z, 0.000000000001),
+            0.0,
+        )
+    }
+
+    fn phase_rayleigh(cosine: f32) -> f32 {
+        0.059683104 * (1.0 + cosine * cosine)
+    }
+
+    fn phase_mie(cosine: f32, anisotropy: f32) -> f32 {
+        let numerator = (1.0 - anisotropy * anisotropy) * (1.0 + cosine * cosine);
+        let denominator = (2.0 + anisotropy * anisotropy)
+            * pow(
+                1.0 + anisotropy * anisotropy - 2.0 * anisotropy * cosine,
+                1.5,
+            );
+        0.11936621 * numerator / denominator
+    }
+
+    fn sphere(origin: Fvec4, direction: Fvec4, radius: f32) -> Fvec4 {
+        let along = dot3(origin, direction);
+        let outside = dot3(origin, origin) - radius * radius;
+        let discriminant = along * along - outside;
+        if discriminant < 0.0 {
+            return fvec4(-1.0, -1.0, 0.0, 0.0);
+        }
+        let root = sqrt(discriminant);
+        fvec4(0.0 - along - root, 0.0 - along + root, 0.0, 0.0)
+    }
+
+    fn length3(value: Fvec4) -> f32 {
+        sqrt(dot3(value, value))
+    }
+
+    fn normalized(vector: Fvec4) -> Fvec4 {
+        let inverse = 1.0 / max(length3(vector), 0.0000001);
+        fvec4(
+            vector.x * inverse,
+            vector.y * inverse,
+            vector.z * inverse,
+            0.0,
+        )
+    }
+
+    fn dot3(left: Fvec4, right: Fvec4) -> f32 {
+        left.x * right.x + left.y * right.y + left.z * right.z
+    }
+}
+
+pub(crate) fn atmosphere_transmittance_program() -> GraphicsProgram {
+    atmosphere_transmittance()
+}
+
+pub(crate) fn atmosphere_scattering_program() -> GraphicsProgram {
+    atmosphere_scattering()
+}
+
+pub(crate) fn atmosphere_sky_program() -> GraphicsProgram {
+    atmosphere_sky()
 }
 
 pub(crate) fn integrating() -> GraphicsProgram {

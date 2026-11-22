@@ -1,29 +1,32 @@
-use crate::environment::Panorama;
+use crate::abi::{ATMOSPHERE_RECORDS, AtmosphereRecord};
+use crate::frame::vertical;
+use crate::program;
+use belfry_gpu::Fvec4;
+use belfry_gpu_device::{
+    AddressMode, BindGroup, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GpuContext,
+    GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
+    TextureFormat, TextureUsages,
+};
 use belfry_math::Vec3;
-use std::f32::consts::{PI, TAU};
+use std::mem::size_of;
 
-pub const MODEL_VERSION: u32 = 1;
+pub const MODEL_VERSION: u32 = 2;
+pub const PANORAMA_WIDTH: u32 = 1024;
+pub const PANORAMA_HEIGHT: u32 = PANORAMA_WIDTH / 2;
+pub const TRANSMITTANCE_WIDTH: u32 = 256;
+pub const TRANSMITTANCE_HEIGHT: u32 = 64;
+pub const SCATTERING_WIDTH: u32 = 32;
+pub const SCATTERING_HEIGHT: u32 = 32;
 
-const GROUND_RADIUS_KM: f32 = 6360.0;
 const THICKNESS_KM: f32 = 60.0;
-const RAYLEIGH_HEIGHT_KM: f32 = 8.0;
-const MIE_HEIGHT_KM: f32 = 1.2;
-const OZONE_CENTER_KM: f32 = 25.0;
-const OZONE_HALF_WIDTH_KM: f32 = 15.0;
+const OBSERVER_ALTITUDE_KM: f32 = 0.001;
 const RAYLEIGH_SCATTERING_KM: Vec3 = Vec3::new(0.005_802, 0.013_558, 0.033_1);
 const MIE_SCATTERING_KM: f32 = 0.003_996;
 const MIE_ABSORPTION_KM: f32 = 0.004_44;
 const OZONE_ABSORPTION_KM: Vec3 = Vec3::new(0.000_65, 0.001_881, 0.000_085);
-const SUN_ANGULAR_RADIUS: f32 = 0.004_675;
-const TRANS_W: usize = 256;
-const TRANS_H: usize = 64;
-const MULTI_W: usize = 32;
-const MULTI_H: usize = 32;
-const MULTI_DIRECTIONS: usize = 64;
-const TRANS_STEPS: usize = 40;
-const MULTI_STEPS: usize = 20;
-const SKY_STEPS: usize = 24;
-const SEGMENT_OFFSET: f32 = 0.3;
+const RECORD_BYTES: u64 = size_of::<AtmosphereRecord>() as u64;
+const FULLSCREEN_VERTICES: u32 = 3;
+const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Atmosphere {
@@ -65,69 +68,6 @@ impl Atmosphere {
         )
     }
 
-    pub fn panoramas(&self, width: u32) -> (Panorama, Panorama) {
-        assert!(
-            width >= 32 && width.is_multiple_of(2),
-            "an atmosphere panorama spans {width} texels",
-        );
-        let params = self.parameters();
-        let luts = Luts::new(&params);
-        let sun = self.sun();
-        let height = width / 2;
-        let altitude = params.altitude.max(0.001);
-        let observer = Vec3::new(0.0, GROUND_RADIUS_KM + altitude, 0.0);
-        let disk = Disk {
-            direction: sun,
-            radiance: self.sun_disk(&luts, observer),
-        };
-        let mut radiance = Vec::with_capacity(height as usize * width as usize * 3);
-        let mut background = Vec::with_capacity(height as usize * width as usize * 3);
-        for y in 0..height {
-            let v = (y as f32 + 0.5) / height as f32;
-            for x in 0..width {
-                let u = (x as f32 + 0.5) / width as f32;
-                let direction = crate::environment::panorama::direction(u, v);
-                let lit = sky(&params, &luts, observer, direction, sun);
-                assert!(
-                    lit.x.is_finite() && lit.y.is_finite() && lit.z.is_finite(),
-                    "an atmosphere renders the texel ({x}, {y}) as {lit:?}",
-                );
-                radiance.push(lit.x);
-                radiance.push(lit.y);
-                radiance.push(lit.z);
-                let mut background_lit = lit;
-                let angle = direction.dot(disk.direction).clamp(-1.0, 1.0).acos();
-                let half = 0.5 * ((TAU / width as f32) * (v * PI).sin()).max(PI / height as f32);
-                let coverage = ((SUN_ANGULAR_RADIUS + half - angle) / (2.0 * half)).clamp(0.0, 1.0);
-                if coverage > 0.0 {
-                    background_lit += disk.radiance * coverage;
-                }
-                assert!(
-                    background_lit.x.is_finite()
-                        && background_lit.y.is_finite()
-                        && background_lit.z.is_finite(),
-                    "an atmosphere lights the sky texel ({x}, {y}) as {background_lit:?}",
-                );
-                background.push(background_lit.x);
-                background.push(background_lit.y);
-                background.push(background_lit.z);
-            }
-        }
-        (
-            Panorama::new(width, height, &radiance),
-            Panorama::new(width, height, &background),
-        )
-    }
-
-    fn sun_disk(&self, luts: &Luts, observer: Vec3) -> Vec3 {
-        let solid = PI * SUN_ANGULAR_RADIUS * SUN_ANGULAR_RADIUS;
-        let sun = self.sun();
-        let transmittance = luts
-            .transmittance
-            .sun(observer.length() - GROUND_RADIUS_KM, sun);
-        transmittance * (1.0 / solid)
-    }
-
     fn parameters(&self) -> Parameters {
         assert!(
             self.sun_elevation.is_finite() && (-90.0..=90.0).contains(&self.sun_elevation),
@@ -165,12 +105,9 @@ impl Atmosphere {
             self.ozone,
         );
         assert!(
-            self.ground_albedo.x >= 0.0
-                && self.ground_albedo.x <= 1.0
-                && self.ground_albedo.y >= 0.0
-                && self.ground_albedo.y <= 1.0
-                && self.ground_albedo.z >= 0.0
-                && self.ground_albedo.z <= 1.0,
+            (0.0..=1.0).contains(&self.ground_albedo.x)
+                && (0.0..=1.0).contains(&self.ground_albedo.y)
+                && (0.0..=1.0).contains(&self.ground_albedo.z),
             "an atmosphere reflects its ground at {:?}",
             self.ground_albedo,
         );
@@ -182,8 +119,10 @@ impl Atmosphere {
             self.altitude,
         );
         assert!(
-            self.rayleigh > 0.0 || self.mie > 0.0 || self.ozone > 0.0,
-            "an atmosphere without Rayleigh, Mie or ozone light scatters nothing",
+            self.mie > 0.0 || self.ozone > 0.0,
+            "an atmosphere of mie {} and ozone {} scatters every photon it gathers",
+            self.mie,
+            self.ozone,
         );
         Parameters {
             rayleigh: RAYLEIGH_SCATTERING_KM * self.rayleigh,
@@ -195,11 +134,26 @@ impl Atmosphere {
             altitude: self.altitude / 1000.0,
         }
     }
-}
 
-struct Disk {
-    direction: Vec3,
-    radiance: Vec3,
+    fn record(&self, vertical: f32, disk: bool) -> AtmosphereRecord {
+        let held = self.parameters();
+        AtmosphereRecord {
+            rayleigh: vector(held.rayleigh),
+            mie: vector(held.mie),
+            absorption: vector(held.mie_absorption),
+            ozone: vector(held.ozone),
+            ground: vector(held.ground_albedo),
+            sun: vector(self.sun()),
+            altitude: held.altitude.max(OBSERVER_ALTITUDE_KM),
+            anisotropy: held.mie_anisotropy,
+            vertical,
+            width: PANORAMA_WIDTH as f32,
+            height: PANORAMA_HEIGHT as f32,
+            disk: u32::from(disk),
+            pad0: 0,
+            pad1: 0,
+        }
+    }
 }
 
 struct Parameters {
@@ -212,314 +166,203 @@ struct Parameters {
     altitude: f32,
 }
 
-struct Scattering {
-    rayleigh: Vec3,
-    mie: Vec3,
-    extinction: Vec3,
+pub struct AtmospherePanorama {
+    pub radiance: Texture,
+    pub background: Texture,
 }
 
-struct Luts {
-    transmittance: Lut,
-    multiple: Lut,
+pub(crate) struct AtmosphereBaker {
+    device: Device,
+    queue: Queue,
+    transmittance: Texture,
+    scattering: Texture,
+    transmittance_pass: GraphicsPipeline,
+    scattering_pass: GraphicsPipeline,
+    sky: GraphicsPipeline,
+    setup: GpuBuffer,
+    transmittance_group: BindGroup,
+    scattering_group: BindGroup,
+    radiance_group: BindGroup,
+    background_group: BindGroup,
+    scattering_source: BindGroup,
+    sky_source: BindGroup,
 }
 
-impl Luts {
-    fn new(params: &Parameters) -> Self {
-        let transmittance = Lut::new(TRANS_W, TRANS_H, |u, v| {
-            let height = v * THICKNESS_KM;
-            let cosine = u * 2.0 - 1.0;
-            transmittance(params, height, cosine)
-        });
-        let multiple = Lut::new(MULTI_W, MULTI_H, |u, v| {
-            let height = v * THICKNESS_KM;
-            let cosine = u * 2.0 - 1.0;
-            multiple(params, &transmittance, height, cosine)
-        });
+impl AtmosphereBaker {
+    pub(crate) fn new(context: &GpuContext) -> Self {
+        let device = context.device().clone();
+        let queue = Queue::of(&device);
+        let lut = TextureUsages::SAMPLED | TextureUsages::RENDER_ATTACHMENT;
+        let transmittance = Texture::new(
+            &device,
+            "belfry atmosphere transmittance",
+            TRANSMITTANCE_WIDTH,
+            TRANSMITTANCE_HEIGHT,
+            1,
+            TextureFormat::Rgba16Float,
+            lut,
+        );
+        let scattering = Texture::new(
+            &device,
+            "belfry atmosphere scattering",
+            SCATTERING_WIDTH,
+            SCATTERING_HEIGHT,
+            1,
+            TextureFormat::Rgba16Float,
+            lut,
+        );
+        let sampler = Sampler::new(
+            &device,
+            SamplerDesc {
+                min_filter: Filter::Linear,
+                mag_filter: Filter::Linear,
+                mip_filter: Filter::Nearest,
+                address_u: AddressMode::ClampToEdge,
+                address_v: AddressMode::ClampToEdge,
+            },
+        );
+        let transmittance_pass = GraphicsPipeline::new(
+            &device,
+            program::atmosphere_transmittance_program(),
+            TextureFormat::Rgba16Float,
+            PipelineState::SCREEN,
+        );
+        let scattering_pass = GraphicsPipeline::new(
+            &device,
+            program::atmosphere_scattering_program(),
+            TextureFormat::Rgba16Float,
+            PipelineState::SCREEN,
+        );
+        let sky = GraphicsPipeline::new(
+            &device,
+            program::atmosphere_sky_program(),
+            TextureFormat::Rgba16Float,
+            PipelineState::SCREEN,
+        );
+        let setup = GpuBuffer::new(
+            &device,
+            "belfry atmosphere setup",
+            RECORD_BYTES * u64::from(ATMOSPHERE_RECORDS),
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        let record = |index: u64| setup.binding(index * RECORD_BYTES, RECORD_BYTES);
+        let transmittance_group = transmittance_pass
+            .bind_group(0, &[Binding::buffer(program::ATMOSPHERE_SETUP, record(0))]);
+        let scattering_group =
+            scattering_pass.bind_group(0, &[Binding::buffer(program::ATMOSPHERE_SETUP, record(1))]);
+        let radiance_group =
+            sky.bind_group(0, &[Binding::buffer(program::ATMOSPHERE_SETUP, record(2))]);
+        let background_group =
+            sky.bind_group(0, &[Binding::buffer(program::ATMOSPHERE_SETUP, record(3))]);
+        let scattering_source = scattering_pass.bind_group(
+            1,
+            &[
+                Binding::texture(program::ATMOSPHERE_TRANSMITTANCE, &transmittance),
+                Binding::sampler(program::ATMOSPHERE_LUT_SAMPLER, &sampler),
+            ],
+        );
+        let sky_source = sky.bind_group(
+            1,
+            &[
+                Binding::texture(program::ATMOSPHERE_TRANSMITTANCE, &transmittance),
+                Binding::texture(program::ATMOSPHERE_SCATTERING, &scattering),
+                Binding::sampler(program::ATMOSPHERE_SKY_SAMPLER, &sampler),
+            ],
+        );
         Self {
+            device,
+            queue,
             transmittance,
-            multiple,
-        }
-    }
-}
-
-struct Lut {
-    width: usize,
-    height: usize,
-    texels: Vec<Vec3>,
-}
-
-impl Lut {
-    fn new(width: usize, height: usize, mut texel: impl FnMut(f32, f32) -> Vec3) -> Self {
-        let mut texels = Vec::with_capacity(width * height);
-        for y in 0..height {
-            let v = (y as f32 + 0.5) / height as f32;
-            for x in 0..width {
-                let u = (x as f32 + 0.5) / width as f32;
-                texels.push(texel(u, v));
-            }
-        }
-        Self {
-            width,
-            height,
-            texels,
+            scattering,
+            transmittance_pass,
+            scattering_pass,
+            sky,
+            setup,
+            transmittance_group,
+            scattering_group,
+            radiance_group,
+            background_group,
+            scattering_source,
+            sky_source,
         }
     }
 
-    fn sun(&self, height_km: f32, sun: Vec3) -> Vec3 {
-        let cosine = sun.y.clamp(-1.0, 1.0);
-        self.sample(
-            0.5 + 0.5 * cosine,
-            (height_km / THICKNESS_KM).clamp(0.0, 1.0),
-        )
-    }
-
-    fn sample(&self, u: f32, v: f32) -> Vec3 {
-        let x = (u.clamp(0.0, 1.0) * self.width as f32 - 0.5).max(0.0);
-        let y = (v.clamp(0.0, 1.0) * self.height as f32 - 0.5).max(0.0);
-        let left = x.floor() as usize;
-        let low = y.floor() as usize;
-        let right = (left + 1).min(self.width - 1);
-        let high = (low + 1).min(self.height - 1);
-        let amount_x = x - left as f32;
-        let amount_y = y - low as f32;
-        let low = self.texel(left, low).lerp(self.texel(right, low), amount_x);
-        let high = self
-            .texel(left, high)
-            .lerp(self.texel(right, high), amount_x);
-        low.lerp(high, amount_y)
-    }
-
-    fn texel(&self, x: usize, y: usize) -> Vec3 {
-        self.texels[y * self.width + x]
-    }
-}
-
-fn transmittance(params: &Parameters, height_km: f32, cosine: f32) -> Vec3 {
-    let origin = Vec3::new(0.0, GROUND_RADIUS_KM + height_km, 0.0);
-    let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
-    let direction = Vec3::new(0.0, cosine, -sine);
-    if sphere(origin, direction, GROUND_RADIUS_KM).entry > 0.0 {
-        return Vec3::ZERO;
-    }
-    let atmosphere = sphere(origin, direction, GROUND_RADIUS_KM + THICKNESS_KM);
-    if atmosphere.exit <= 0.0 {
-        return Vec3::ZERO;
-    }
-    march_transmittance(origin, direction, atmosphere.exit.max(0.0), params)
-}
-
-fn march_transmittance(origin: Vec3, direction: Vec3, distance: f32, params: &Parameters) -> Vec3 {
-    let mut depth = Vec3::ZERO;
-    let mut start = 0.0;
-    let step = distance / TRANS_STEPS as f32;
-    for _ in 0..TRANS_STEPS {
-        let end = start + step;
-        let at = origin + direction * (start + (end - start) * SEGMENT_OFFSET);
-        depth += scattering(params, at.length() - GROUND_RADIUS_KM).extinction * (end - start);
-        start = end;
-    }
-    exp(-depth)
-}
-
-fn multiple(params: &Parameters, lookup: &Lut, height_km: f32, cosine: f32) -> Vec3 {
-    let origin = Vec3::new(0.0, GROUND_RADIUS_KM + height_km, 0.0);
-    let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
-    let sun = Vec3::new(0.0, cosine, -sine);
-    let golden = PI * (3.0 - 5.0_f32.sqrt());
-    let mut luminance = Vec3::ZERO;
-    let mut transfer = Vec3::ZERO;
-    for index in 0..MULTI_DIRECTIONS {
-        let y = 1.0 - 2.0 * (index as f32 + 0.5) / MULTI_DIRECTIONS as f32;
-        let radius = (1.0 - y * y).max(0.0).sqrt();
-        let angle = golden * index as f32;
-        let direction = Vec3::new(radius * angle.cos(), y, radius * angle.sin());
-        let atmosphere = sphere(origin, direction, GROUND_RADIUS_KM + THICKNESS_KM);
-        if atmosphere.exit <= 0.0 {
-            continue;
-        }
-        let ground = sphere(origin, direction, GROUND_RADIUS_KM);
-        let hit = ground.entry > 0.0;
-        let distance = if hit { ground.entry } else { atmosphere.exit };
-        let ray = march_multiple(params, lookup, origin, direction, distance, sun);
-        luminance += ray.luminance;
-        transfer += ray.transfer;
-        if hit {
-            let at = origin + direction * distance;
-            let normal = at.normalize();
-            let sun_transmittance = lookup.sun(at.length() - GROUND_RADIUS_KM, sun);
-            if normal.dot(sun) > 0.0 {
-                luminance +=
-                    ray.transmittance * params.ground_albedo * sun_transmittance * normal.dot(sun);
-            }
-        }
-    }
-    let scale = 1.0 / MULTI_DIRECTIONS as f32;
-    let mut result = Vec3::ZERO;
-    for axis in 0..3 {
-        let luminance = axis_of(luminance, axis) * scale;
-        let transfer = axis_of(transfer, axis) * scale;
-        let held = luminance / (1.0 - transfer).max(1.0e-4);
-        result = set_axis(result, axis, held);
-    }
-    result
-}
-
-struct Multiple {
-    luminance: Vec3,
-    transfer: Vec3,
-    transmittance: Vec3,
-}
-
-fn march_multiple(
-    params: &Parameters,
-    lookup: &Lut,
-    origin: Vec3,
-    direction: Vec3,
-    distance: f32,
-    sun: Vec3,
-) -> Multiple {
-    let cosine = direction.dot(sun);
-    let rayleigh = rayleigh_phase(cosine);
-    let mie = mie_phase(cosine, params.mie_anisotropy);
-    let mut luminance = Vec3::ZERO;
-    let mut transfer = Vec3::ZERO;
-    let mut view = Vec3::ONE;
-    let mut start = 0.0;
-    let step = distance / MULTI_STEPS as f32;
-    for _ in 0..MULTI_STEPS {
-        let end = start + step;
-        let at = origin + direction * (start + (end - start) * SEGMENT_OFFSET);
-        let height = at.length() - GROUND_RADIUS_KM;
-        let held = scattering(params, height);
-        let sun_transmittance = lookup.sun(height, sun);
-        let in_scattering =
-            held.rayleigh * (sun_transmittance * rayleigh) + held.mie * (sun_transmittance * mie);
-        let local = exp(-held.extinction * (end - start));
-        luminance += view * integrated(in_scattering, local, held.extinction);
-        transfer += view * integrated(held.rayleigh + held.mie, local, held.extinction);
-        view = view * local;
-        start = end;
-    }
-    Multiple {
-        luminance,
-        transfer,
-        transmittance: view,
-    }
-}
-
-fn sky(params: &Parameters, luts: &Luts, observer: Vec3, direction: Vec3, sun: Vec3) -> Vec3 {
-    let atmosphere = sphere(observer, direction, GROUND_RADIUS_KM + THICKNESS_KM);
-    if atmosphere.exit <= 0.0 {
-        return Vec3::ZERO;
-    }
-    let ground = sphere(observer, direction, GROUND_RADIUS_KM);
-    let hit = ground.entry > 0.0;
-    let distance = if hit { ground.entry } else { atmosphere.exit };
-    if distance <= 0.0 {
-        return Vec3::ZERO;
-    }
-    let cosine = direction.dot(sun);
-    let rayleigh = rayleigh_phase(cosine);
-    let mie = mie_phase(cosine, params.mie_anisotropy);
-    let mut radiance = Vec3::ZERO;
-    let mut view = Vec3::ONE;
-    let mut start = 0.0;
-    let step = distance / SKY_STEPS as f32;
-    for _ in 0..SKY_STEPS {
-        let end = start + step;
-        let at = observer + direction * (start + (end - start) * SEGMENT_OFFSET);
-        let height = at.length() - GROUND_RADIUS_KM;
-        let held = scattering(params, height);
-        let sun_transmittance = luts.transmittance.sun(height, sun);
-        let psi = luts.multiple.sun(height, sun);
-        let in_scattering = held.rayleigh * (sun_transmittance * rayleigh + psi)
-            + held.mie * (sun_transmittance * mie + psi);
-        let local = exp(-held.extinction * (end - start));
-        radiance += view * integrated(in_scattering, local, held.extinction);
-        view = view * local;
-        start = end;
-    }
-    if !hit {
-        return radiance;
-    }
-    let at = observer + direction * distance;
-    let normal = at.normalize();
-    let sun_transmittance = luts.transmittance.sun(at.length() - GROUND_RADIUS_KM, sun);
-    let lit = params.ground_albedo * sun_transmittance * normal.dot(sun).max(0.0);
-    radiance + view * lit
-}
-
-fn scattering(params: &Parameters, height_km: f32) -> Scattering {
-    let rayleigh = params.rayleigh * (-height_km / RAYLEIGH_HEIGHT_KM).exp();
-    let mie = params.mie * (-height_km / MIE_HEIGHT_KM).exp();
-    let mie_absorption = params.mie_absorption * (-height_km / MIE_HEIGHT_KM).exp();
-    let ozone =
-        params.ozone * (1.0 - (height_km - OZONE_CENTER_KM).abs() / OZONE_HALF_WIDTH_KM).max(0.0);
-    Scattering {
-        rayleigh,
-        mie,
-        extinction: rayleigh + mie + mie_absorption + ozone,
-    }
-}
-
-fn integrated(inscattering: Vec3, local: Vec3, extinction: Vec3) -> Vec3 {
-    Vec3::new(
-        (inscattering.x - inscattering.x * local.x) / extinction.x.max(1.0e-12),
-        (inscattering.y - inscattering.y * local.y) / extinction.y.max(1.0e-12),
-        (inscattering.z - inscattering.z * local.z) / extinction.z.max(1.0e-12),
-    )
-}
-
-fn rayleigh_phase(cosine: f32) -> f32 {
-    (3.0 / (16.0 * PI)) * (1.0 + cosine * cosine)
-}
-
-fn mie_phase(cosine: f32, anisotropy: f32) -> f32 {
-    let g = anisotropy;
-    let numerator = (1.0 - g * g) * (1.0 + cosine * cosine);
-    let denominator = (2.0 + g * g) * (1.0 + g * g - 2.0 * g * cosine).powf(1.5);
-    (3.0 / (8.0 * PI)) * numerator / denominator
-}
-
-fn sphere(origin: Vec3, direction: Vec3, radius: f32) -> Hit {
-    let b = origin.dot(direction);
-    let c = origin.dot(origin) - radius * radius;
-    let discriminant = b * b - c;
-    if discriminant < 0.0 {
-        return Hit {
-            entry: -1.0,
-            exit: -1.0,
+    pub(crate) fn bake(&self, atmosphere: &Atmosphere) -> AtmospherePanorama {
+        let vertical = vertical(&self.device);
+        let records = [
+            atmosphere.record(vertical, false),
+            atmosphere.record(vertical, false),
+            atmosphere.record(vertical, false),
+            atmosphere.record(vertical, true),
+        ];
+        self.setup
+            .write(&self.queue, bytemuck::cast_slice(&records));
+        let panorama = || {
+            Texture::new(
+                &self.device,
+                "belfry atmosphere panorama",
+                PANORAMA_WIDTH,
+                PANORAMA_HEIGHT,
+                1,
+                TextureFormat::Rgba16Float,
+                TextureUsages::SAMPLED | TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            )
         };
-    }
-    let root = discriminant.sqrt();
-    Hit {
-        entry: -b - root,
-        exit: -b + root,
+        let radiance = panorama();
+        let background = panorama();
+        let mut submission = Submission::new(&self.device, "belfry atmosphere");
+        submission.render(
+            &self.transmittance,
+            CLEAR,
+            &[Draw::new(
+                &self.transmittance_pass,
+                std::slice::from_ref(&self.transmittance_group),
+                FULLSCREEN_VERTICES,
+            )],
+        );
+        submission.render(
+            &self.scattering,
+            CLEAR,
+            &[Draw::new(
+                &self.scattering_pass,
+                &[
+                    self.scattering_group.clone(),
+                    self.scattering_source.clone(),
+                ],
+                FULLSCREEN_VERTICES,
+            )],
+        );
+        submission.render(
+            &radiance,
+            CLEAR,
+            &[Draw::new(
+                &self.sky,
+                &[self.radiance_group.clone(), self.sky_source.clone()],
+                FULLSCREEN_VERTICES,
+            )],
+        );
+        submission.render(
+            &background,
+            CLEAR,
+            &[Draw::new(
+                &self.sky,
+                &[self.background_group.clone(), self.sky_source.clone()],
+                FULLSCREEN_VERTICES,
+            )],
+        );
+        submission.submit(&self.queue);
+        AtmospherePanorama {
+            radiance,
+            background,
+        }
     }
 }
 
-struct Hit {
-    entry: f32,
-    exit: f32,
-}
-
-fn exp(value: Vec3) -> Vec3 {
-    Vec3::new(value.x.exp(), value.y.exp(), value.z.exp())
-}
-
-fn axis_of(value: Vec3, axis: usize) -> f32 {
-    match axis {
-        0 => value.x,
-        1 => value.y,
-        _ => value.z,
+fn vector(value: Vec3) -> Fvec4 {
+    Fvec4 {
+        x: value.x,
+        y: value.y,
+        z: value.z,
+        w: 0.0,
     }
-}
-
-fn set_axis(mut value: Vec3, axis: usize, held: f32) -> Vec3 {
-    match axis {
-        0 => value.x = held,
-        1 => value.y = held,
-        _ => value.z = held,
-    }
-    value
 }

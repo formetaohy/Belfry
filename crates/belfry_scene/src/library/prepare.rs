@@ -1,4 +1,5 @@
 use super::AssetError;
+use super::work::EnvironmentData;
 use crate::animation::AnimationEntry;
 use crate::collider::{ColliderRef, ShapeKind};
 use crate::digest::{Digest, DigestBuilder};
@@ -17,15 +18,13 @@ use belfry_image::Image;
 use belfry_image::Radiance;
 use belfry_math::Mat4;
 use belfry_physics::TriangleMesh;
-use belfry_render::environment::{Atmosphere, Panorama};
+use belfry_render::environment::Panorama;
 use belfry_render::{AddressMode, Filter, SamplerDesc, SkinVertexRecord, Vertex};
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
-
-const ATMOSPHERE_WIDTH: u32 = 1024;
 
 pub(super) struct ImageBytes {
     pub(super) width: u32,
@@ -423,7 +422,7 @@ pub(super) fn environment_data(
     scene: &Scene,
     entry: &EnvironmentEntry,
     sources: &mut Sources,
-) -> Result<(Panorama, Option<Panorama>), String> {
+) -> Result<EnvironmentData, String> {
     match &entry.source {
         EnvironmentSource::Panorama(path) => {
             let file = scene.root().join(path);
@@ -432,21 +431,24 @@ pub(super) fn environment_data(
                 Radiance::decode(&bytes, &format!("the environment {}", file.display()))
             }))
             .map_err(|payload| panic_message(payload.as_ref()))?;
-            Ok((
-                Panorama::new(radiance.width(), radiance.height(), radiance.rgb()),
-                None,
-            ))
+            Ok(EnvironmentData::Panorama(Panorama::new(
+                radiance.width(),
+                radiance.height(),
+                radiance.rgb(),
+            )))
         }
-        EnvironmentSource::Atmosphere(atmosphere) => catch_unwind(AssertUnwindSafe(|| {
-            let (radiance, sky) = atmosphere.panoramas(ATMOSPHERE_WIDTH);
-            (radiance, Some(sky))
-        }))
-        .map_err(|payload| panic_message(payload.as_ref())),
-        EnvironmentSource::Capture => Ok((Panorama::new(1, 1, &[0.0, 0.0, 0.0]), None)),
+        EnvironmentSource::Atmosphere(atmosphere) => Ok(EnvironmentData::Atmosphere(*atmosphere)),
+        EnvironmentSource::Capture => Ok(EnvironmentData::Panorama(Panorama::new(
+            1,
+            1,
+            &[0.0, 0.0, 0.0],
+        ))),
     }
 }
 
-pub(super) fn atmosphere_fingerprint(atmosphere: &Atmosphere) -> Digest {
+pub(super) fn atmosphere_fingerprint(
+    atmosphere: &belfry_render::environment::Atmosphere,
+) -> Digest {
     let mut fingerprint = Digest::builder();
     fingerprint
         .text("atmosphere")

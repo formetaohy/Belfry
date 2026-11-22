@@ -1,5 +1,5 @@
 use crate::abi::{AtlasRecord, DrawRecord, InstanceRecord, SkyRecord, ViewRecord};
-use crate::environment::Environment;
+use crate::environment::{BakeRequest, Baked, Environment};
 use crate::frame::{direction_record, record_of_view, vector};
 use crate::growing::Growing;
 use crate::program;
@@ -90,6 +90,16 @@ pub(crate) struct CaptureFrame<'a> {
     pub(crate) intensity: f32,
 }
 
+pub(crate) struct Pending {
+    pub(crate) entity: Entity,
+    pub(crate) probe: CaptureProbe,
+    pub(crate) intensity: f32,
+    pub(crate) background: bool,
+    pub(crate) blend: f32,
+    pub(crate) panorama: Texture,
+    pub(crate) request: BakeRequest,
+}
+
 pub(crate) struct Captures {
     pub(crate) atlas: Texture,
     pub(crate) views: GpuBuffer,
@@ -99,6 +109,7 @@ pub(crate) struct Captures {
     pub(crate) convert: GraphicsPipeline,
     pub(crate) sampler: Sampler,
     slots: u32,
+    pending: Option<Pending>,
     results: Vec<Capture>,
 }
 
@@ -160,6 +171,7 @@ impl Captures {
                 },
             ),
             results: Vec::new(),
+            pending: None,
         }
     }
 
@@ -167,8 +179,39 @@ impl Captures {
         std::mem::take(&mut self.results)
     }
 
-    pub(crate) fn push(&mut self, capture: Capture) {
-        self.results.push(capture);
+    pub(crate) fn pending(&self) -> Option<&Pending> {
+        self.pending.as_ref()
+    }
+
+    pub(crate) fn begin(&mut self, pending: Pending) {
+        assert!(
+            self.pending.is_none(),
+            "a capture submits one bake before its probe settles",
+        );
+        self.pending = Some(pending);
+    }
+
+    pub(crate) fn settle(&mut self, baked: Baked, sampler: &Sampler) {
+        let pending = self
+            .pending
+            .take()
+            .expect("a settled capture answers the bake it submitted");
+        let mut environment = Environment::new(
+            baked.radiance,
+            pending.panorama,
+            sampler.clone(),
+            baked.levels,
+            baked.irradiance,
+        );
+        environment.intensity = pending.intensity;
+        environment.background = pending.background;
+        environment.local = true;
+        environment.blend = pending.blend;
+        self.results.push(Capture {
+            entity: pending.entity,
+            probe: pending.probe,
+            environment,
+        });
     }
 
     pub(crate) fn panorama(&self, device: &Device) -> Texture {

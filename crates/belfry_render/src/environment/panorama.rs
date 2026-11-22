@@ -1,7 +1,6 @@
 use belfry_gpu_device::{Texture, TextureFormat, TextureUsages};
 use belfry_math::Vec3;
 use half::f16;
-use std::f32::consts::{PI, TAU};
 
 pub struct Panorama {
     width: u32,
@@ -75,11 +74,4 @@ fn half(value: f32) -> u16 {
     );
     let maximum = f16::MAX.to_f32();
     f16::from_f32(value.clamp(-maximum, maximum)).to_bits()
-}
-
-pub(crate) fn direction(u: f32, v: f32) -> Vec3 {
-    let phi = (u - 0.5) * TAU;
-    let theta = v * PI;
-    let sine = theta.sin();
-    Vec3::new(sine * phi.sin(), theta.cos(), -sine * phi.cos())
 }

@@ -13,7 +13,7 @@ use belfry_animation::Clip;
 use belfry_audio::Source;
 use belfry_image::ColorSpace;
 use belfry_render::TextureFormat;
-use belfry_render::environment::Panorama;
+use belfry_render::environment::{Atmosphere, Panorama};
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -101,8 +101,12 @@ pub(super) struct PreparedSound {
 pub(super) struct PreparedEnvironment {
     pub(super) entry: EnvironmentEntry,
     pub(super) fingerprint: Digest,
-    pub(super) panorama: Panorama,
-    pub(super) sky: Option<Panorama>,
+    pub(super) data: EnvironmentData,
+}
+
+pub(super) enum EnvironmentData {
+    Panorama(Panorama),
+    Atmosphere(Atmosphere),
 }
 
 #[derive(Default)]

@@ -21,6 +21,12 @@ pub const ALPHA_BLEND: u32 = 2;
 pub const IRRADIANCE_PARTIALS: u32 = 1024;
 pub const IRRADIANCE_WORDS: u32 = 36;
 pub const IRRADIANCE_TOTAL_BYTES: u64 = 108;
+pub const ATMOSPHERE_RECORDS: u32 = 4;
+
+const _: () = assert!(
+    size_of::<AtmosphereRecord>() * ATMOSPHERE_RECORDS as usize == 512,
+    "an atmosphere writes its four pass records into one setup buffer",
+);
 
 const _: () = assert!(
     SHADOW_CASCADES == SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_COLUMNS,
@@ -346,6 +352,23 @@ record!(AtlasRecord, ATLAS, "Atlas" {
     vertical: f32 => F32,
     texel: f32 => F32,
     pad0: f32 => F32,
+});
+
+record!(AtmosphereRecord, ATMOSPHERE, "Atmosphere" {
+    rayleigh: Fvec4 => F32x4,
+    mie: Fvec4 => F32x4,
+    absorption: Fvec4 => F32x4,
+    ozone: Fvec4 => F32x4,
+    ground: Fvec4 => F32x4,
+    sun: Fvec4 => F32x4,
+    altitude: f32 => F32,
+    anisotropy: f32 => F32,
+    vertical: f32 => F32,
+    width: f32 => F32,
+    height: f32 => F32,
+    disk: u32 => U32,
+    pad0: u32 => U32,
+    pad1: u32 => U32,
 });
 
 record!(BloomRecord, BLOOM, "Bloom" {
