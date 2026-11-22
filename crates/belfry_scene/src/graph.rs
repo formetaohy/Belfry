@@ -340,6 +340,11 @@ impl GraphAsset {
                 transition.to,
             );
             assert!(
+                transition.from != transition.to,
+                "the animation transition leaves {} for itself",
+                transition.from,
+            );
+            assert!(
                 transition.fade.is_finite() && transition.fade >= 0.0,
                 "the animation transition {} to {} fades over {}",
                 transition.from,
@@ -449,6 +454,9 @@ impl GraphTransition {
             return Err(format!(
                 "the animation transition {from} to {to} fades over {fade}"
             ));
+        }
+        if from == to {
+            return Err(format!("the animation transition leaves {from} for itself"));
         }
         if !(0.0..=1.0).contains(&exit) {
             return Err(format!(

@@ -2,7 +2,7 @@ use crate::contact::{CONTACT_GAP, Manifold};
 use crate::shape::Shape;
 use crate::shape::capsule_segment;
 use crate::solid::Solid;
-use crate::triangle_contact;
+use crate::triangle_contact::{self, Contact};
 use belfry_math::{Aabb, Vec3};
 
 pub(crate) fn collide(first: &Solid, second: &Solid, gap: f32, contacts: &mut Vec<Manifold>) {
@@ -45,57 +45,20 @@ fn mesh_convex(mesh: &Solid, convex: &Solid, flip: bool, gap: f32, contacts: &mu
     let bounds = Aabb::new(bounds.min - margin, bounds.max + margin);
     for index in held.candidates(bounds) {
         let triangle = held.triangle(index);
-        let contact = match &local.shape {
-            Shape::Sphere { radius } => {
-                triangle_contact::sphere(triangle, local.position, *radius, local_gap)
-            }
-            Shape::Capsule {
-                radius,
-                half_height,
-            } => {
-                let (start, end) = capsule_segment(local.position, local.rotation, *half_height);
-                triangle_contact::capsule(triangle, start, end, *radius, local_gap)
-            }
-            Shape::Cuboid { half_extents } => {
-                let rotation = local.rotation.inverse();
-                let held = triangle.map(|vertex| rotation.rotate_vec3(vertex - local.position));
-                triangle_contact::cuboid(held, *half_extents, local_gap).map(|mut contact| {
-                    contact.manifold.normal = local.rotation.rotate_vec3(contact.manifold.normal);
-                    for point in &mut contact.manifold.points {
-                        point.position =
-                            local.position + local.rotation.rotate_vec3(point.position);
-                    }
-                    contact
-                })
-            }
-            Shape::Mesh { .. } => continue,
-        };
-        let Some(contact) = contact else {
+        let Some(contact) = contact_of(&local, triangle, local_gap) else {
             continue;
         };
-        let (manifold, edges) = (contact.manifold, contact.edges);
-        let internal = held.internal(index);
-        let manifold = if edges != 0 && edges & !internal == 0 {
-            match &local.shape {
-                Shape::Sphere { radius } => {
-                    triangle_contact::face_sphere(triangle, local.position, *radius, local_gap)
-                        .unwrap_or(manifold)
-                }
-                Shape::Capsule {
-                    radius,
-                    half_height,
-                } => {
-                    let (start, end) =
-                        capsule_segment(local.position, local.rotation, *half_height);
-                    triangle_contact::face_capsule(triangle, start, end, *radius, local_gap)
-                        .unwrap_or(manifold)
-                }
-                Shape::Cuboid { .. } | Shape::Mesh { .. } => continue,
-            }
-        } else {
-            manifold
-        };
-        let mut manifold = manifold;
+        let Contact {
+            mut manifold,
+            edges,
+        } = contact;
+        if let Some(feature) = held.feature(index, edges) {
+            manifold.normal = if manifold.normal.dot(feature) >= 0.0 {
+                feature
+            } else {
+                -feature
+            };
+        }
         for point in &mut manifold.points {
             point.position = mesh.position + mesh.rotation.rotate_vec3(point.position * *scale);
             point.separation *= *scale;
@@ -108,5 +71,32 @@ fn mesh_convex(mesh: &Solid, convex: &Solid, flip: bool, gap: f32, contacts: &mu
         manifold.normal = if flip { -normal } else { normal };
         manifold.feature = index;
         contacts.push(manifold);
+    }
+}
+
+fn contact_of(local: &Solid, triangle: [Vec3; 3], gap: f32) -> Option<Contact> {
+    match &local.shape {
+        Shape::Sphere { radius } => {
+            triangle_contact::sphere(triangle, local.position, *radius, gap)
+        }
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            let (start, end) = capsule_segment(local.position, local.rotation, *half_height);
+            triangle_contact::capsule(triangle, start, end, *radius, gap)
+        }
+        Shape::Cuboid { half_extents } => {
+            let rotation = local.rotation.inverse();
+            let held = triangle.map(|vertex| rotation.rotate_vec3(vertex - local.position));
+            triangle_contact::cuboid(held, *half_extents, gap).map(|mut contact| {
+                contact.manifold.normal = local.rotation.rotate_vec3(contact.manifold.normal);
+                for point in &mut contact.manifold.points {
+                    point.position = local.position + local.rotation.rotate_vec3(point.position);
+                }
+                contact
+            })
+        }
+        Shape::Mesh { .. } => panic!("a mesh collider holds no mesh inside a mesh contact"),
     }
 }

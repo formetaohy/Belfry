@@ -135,10 +135,7 @@ impl SceneSync {
         self.applied = Some(scene.clone());
         self.entities = entities.into_iter().map(|(entity, _)| entity).collect();
         self.ids = ids;
-        let revision = world
-            .resource::<SceneRevision>()
-            .map_or(1, |held| held.0.wrapping_add(1));
-        world.insert_resource(SceneRevision(revision));
+        advance_revision(world);
         belfry_animation::settle(world);
         propagate(world);
     }
@@ -196,9 +193,17 @@ impl SceneSync {
         {
             applied.remember_node(at, handle);
         }
+        advance_revision(world);
         belfry_animation::settle(world);
         propagate(world);
     }
+}
+
+fn advance_revision(world: &mut World) {
+    let revision = world
+        .resource::<SceneRevision>()
+        .map_or(1, |held| held.0.wrapping_add(1));
+    world.insert_resource(SceneRevision(revision));
 }
 
 impl Default for SceneSync {

@@ -27,6 +27,7 @@ pub fn step(world: &mut World, delta: f32) {
     if bodies.is_empty() {
         collisions.settle(BTreeMap::new());
         world.insert_resource(collisions);
+        world.insert_resource(held_cache);
         return;
     }
     for body in &mut bodies {
@@ -80,7 +81,11 @@ pub fn step(world: &mut World, delta: f32) {
         if jointed.contains(&cache::key(bodies[first].entity, bodies[second].entity)) {
             continue;
         }
-        if !bodies[first].pushable() && !bodies[second].pushable() {
+        if !bodies[first].pushable()
+            && !bodies[second].pushable()
+            && !bodies[first].senses()
+            && !bodies[second].senses()
+        {
             continue;
         }
         let movable = bodies[first].movable() || bodies[second].movable();
@@ -118,7 +123,7 @@ pub fn step(world: &mut World, delta: f32) {
                             })
                         };
                         if triggered {
-                            *touched_pair.get_or_insert(true) = true;
+                            touched_pair = Some(touched_pair.unwrap_or(true));
                         }
                     }
                     continue;
@@ -134,7 +139,7 @@ pub fn step(world: &mut World, delta: f32) {
                         .iter()
                         .any(|point| point.separation <= solver::LINEAR_SLOP)
                 }) {
-                    touched_pair.get_or_insert(false);
+                    touched_pair = Some(false);
                     solid = true;
                 }
                 for manifold in manifolds.drain(..) {
@@ -155,7 +160,7 @@ pub fn step(world: &mut World, delta: f32) {
         };
         touched
             .entry(cache::key(bodies[first].entity, bodies[second].entity))
-            .and_modify(|held| *held |= sensor)
+            .and_modify(|held| *held &= sensor)
             .or_insert(sensor);
         if !solid {
             continue;
@@ -168,6 +173,18 @@ pub fn step(world: &mut World, delta: f32) {
         }
         if bodies[second].sleeping() && bodies[first].active() {
             bodies[second].wake();
+        }
+    }
+    for (first, second) in held_cache.pairs() {
+        if touched.contains_key(&cache::key(first, second)) {
+            continue;
+        }
+        for entity in [first, second] {
+            if let Some(index) = indices.get(&entity)
+                && bodies[*index].sleeping()
+            {
+                bodies[*index].wake();
+            }
         }
     }
     assembly::wake(&mut bodies, &pairs);

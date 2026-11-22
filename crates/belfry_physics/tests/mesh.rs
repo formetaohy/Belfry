@@ -64,7 +64,7 @@ fn transform(world: &World, entity: Entity) -> Transform {
 }
 
 #[test]
-fn a_sphere_rests_on_a_triangle_mesh() {
+fn a_sphere_and_a_capsule_rest_on_a_triangle_mesh_and_a_ray_meets_it() {
     let mut world = world();
     let floor = floor(&mut world, &FLOOR, Vec3::ONE);
     let sphere = spawn(
@@ -73,6 +73,14 @@ fn a_sphere_rests_on_a_triangle_mesh() {
         Quat::IDENTITY,
         Vec3::ONE,
         Shape::sphere(0.5),
+        BodyKind::Dynamic,
+    );
+    let capsule = spawn(
+        &mut world,
+        Vec3::new(-2.0, 3.0, 0.0),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        Vec3::ONE,
+        Shape::capsule(0.25, 0.5),
         BodyKind::Dynamic,
     );
     settle(&mut world, 240);
@@ -87,6 +95,11 @@ fn a_sphere_rests_on_a_triangle_mesh() {
             .expect("the sphere holds its body")
             .is_sleeping(),
         "a sphere resting on a triangle mesh falls asleep",
+    );
+    let held = transform(&world, capsule).translation;
+    assert!(
+        (held.y - 0.25).abs() < 0.05,
+        "a capsule rests on a triangle mesh at {held:?}",
     );
     let hit = raycast(
         &world,
@@ -127,26 +140,6 @@ fn a_cuboid_rests_flat_on_a_triangle_mesh() {
     assert!(
         rotation.x.abs() + rotation.y.abs() + rotation.z.abs() < 0.05,
         "a cuboid rests flat on a triangle mesh at {rotation:?}",
-    );
-}
-
-#[test]
-fn a_horizontal_capsule_rests_on_a_triangle_mesh() {
-    let mut world = world();
-    floor(&mut world, &FLOOR, Vec3::ONE);
-    let capsule = spawn(
-        &mut world,
-        Vec3::new(0.0, 3.0, 0.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-        Vec3::ONE,
-        Shape::capsule(0.25, 0.5),
-        BodyKind::Dynamic,
-    );
-    settle(&mut world, 240);
-    let held = transform(&world, capsule).translation;
-    assert!(
-        (held.y - 0.25).abs() < 0.05,
-        "a capsule rests on a triangle mesh at {held:?}",
     );
 }
 

@@ -4,10 +4,12 @@ use crate::mesh_contact;
 use crate::segment::{closest_point_segment, closest_segment_segment};
 use crate::shape::capsule_segment;
 use crate::solid::Solid;
-use belfry_math::Vec3;
+use belfry_math::{Vec2, Vec3};
 
 pub(crate) const CONTACT_GAP: f32 = 0.01;
 const DISTANCE_EPSILON: f32 = 1e-6;
+const MANIFOLD_POINTS: usize = 4;
+const MANIFOLD_CANDIDATES: usize = 8;
 
 pub(crate) struct Manifold {
     pub normal: Vec3,
@@ -29,19 +31,16 @@ impl Manifold {
         );
         let normal = normal / length;
         points.retain(|(_, separation)| *separation <= gap);
-        points.sort_by(|left, right| {
-            let left = left.0.to_array();
-            let right = right.0.to_array();
-            left[0]
-                .total_cmp(&right[0])
-                .then(left[1].total_cmp(&right[1]))
-                .then(left[2].total_cmp(&right[2]))
-        });
+        points.sort_by(|left, right| lexicographic(left.0, right.0));
         points.dedup_by(|left, right| (left.0 - right.0).length_squared() < 1e-8);
-        points.truncate(4);
         if points.is_empty() {
             return None;
         }
+        let points = if points.len() > MANIFOLD_POINTS {
+            spread(&points, normal)
+        } else {
+            points
+        };
         Some(Self {
             normal,
             points: points
@@ -54,6 +53,113 @@ impl Manifold {
             feature: 0,
         })
     }
+}
+
+fn spread(points: &[(Vec3, f32)], normal: Vec3) -> Vec<(Vec3, f32)> {
+    assert!(
+        points.len() <= MANIFOLD_CANDIDATES,
+        "a contact manifold of {} points outruns the {MANIFOLD_CANDIDATES} a spread selects from",
+        points.len(),
+    );
+    let basis = plane_basis(normal);
+    let mut flat = [Vec2::ZERO; MANIFOLD_CANDIDATES];
+    for (at, (position, _)) in points.iter().enumerate() {
+        flat[at] = Vec2::new(basis.0.dot(*position), basis.1.dot(*position));
+    }
+    let mut chosen = [0usize; MANIFOLD_POINTS];
+    chosen[0] = (0..points.len())
+        .min_by(|left, right| points[*left].1.total_cmp(&points[*right].1))
+        .expect("a spread manifold holds a point");
+    let mut count = 1;
+    while count < MANIFOLD_POINTS {
+        let mut best = None;
+        for index in 0..points.len() {
+            if chosen[..count].contains(&index) {
+                continue;
+            }
+            let area = covered(&flat, &chosen[..count], index);
+            if best.is_none_or(|(_, held): (usize, f32)| area >= held) {
+                best = Some((index, area));
+            }
+        }
+        chosen[count] = best.expect("a spread manifold holds a spare point").0;
+        count += 1;
+    }
+    let mut held = chosen
+        .iter()
+        .map(|index| points[*index])
+        .collect::<Vec<_>>();
+    held.sort_by(|left, right| lexicographic(left.0, right.0));
+    held
+}
+
+fn covered(flat: &[Vec2], chosen: &[usize], candidate: usize) -> f32 {
+    let mut sorted = [Vec2::ZERO; MANIFOLD_POINTS];
+    for (at, index) in chosen.iter().enumerate() {
+        sorted[at] = flat[*index];
+    }
+    let length = chosen.len() + 1;
+    sorted[length - 1] = flat[candidate];
+    for at in 1..length {
+        let mut cursor = at;
+        while cursor > 0 && lexicographic2(sorted[cursor], sorted[cursor - 1]).is_lt() {
+            sorted.swap(cursor, cursor - 1);
+            cursor -= 1;
+        }
+    }
+    let mut hull = [Vec2::ZERO; MANIFOLD_CANDIDATES];
+    let mut top = 0;
+    for point in &sorted[..length] {
+        while top >= 2 && turn(hull[top - 2], hull[top - 1], *point) <= 0.0 {
+            top -= 1;
+        }
+        hull[top] = *point;
+        top += 1;
+    }
+    let lower = top + 1;
+    for point in sorted[..length].iter().rev().skip(1) {
+        while top >= lower && turn(hull[top - 2], hull[top - 1], *point) <= 0.0 {
+            top -= 1;
+        }
+        hull[top] = *point;
+        top += 1;
+    }
+    top -= 1;
+    if top < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for index in 0..top {
+        let current = hull[index];
+        let next = hull[(index + 1) % top];
+        area += current.x * next.y - next.x * current.y;
+    }
+    area.abs() * 0.5
+}
+
+fn turn(first: Vec2, second: Vec2, third: Vec2) -> f32 {
+    (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
+}
+
+fn plane_basis(normal: Vec3) -> (Vec3, Vec3) {
+    let reference = if normal.x.abs() < 0.577 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
+    let first = normal.cross(reference).normalize();
+    (first, normal.cross(first))
+}
+
+fn lexicographic(left: Vec3, right: Vec3) -> std::cmp::Ordering {
+    left.x
+        .total_cmp(&right.x)
+        .then(left.y.total_cmp(&right.y))
+        .then(left.z.total_cmp(&right.z))
+}
+
+fn lexicographic2(left: Vec2, right: Vec2) -> std::cmp::Ordering {
+    left.x.total_cmp(&right.x).then(left.y.total_cmp(&right.y))
 }
 
 pub(crate) fn intersects(first: &Solid, second: &Solid) -> bool {

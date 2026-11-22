@@ -225,11 +225,11 @@ fn a_hinge_motor_drives_its_coordinate_into_its_limit() {
 }
 
 #[test]
-fn a_spherical_joint_swings_inside_its_cone() {
-    let mut world = world();
-    let anchor = node(&mut world, Vec3::new(0.0, 3.0, 0.0));
-    let body = ball(&mut world, Vec3::new(2.0, 3.0, 0.0));
-    world.insert(
+fn a_spherical_joint_holds_its_swing_and_twist_inside_their_limits() {
+    let mut coned = world();
+    let anchor = node(&mut coned, Vec3::new(0.0, 3.0, 0.0));
+    let body = ball(&mut coned, Vec3::new(2.0, 3.0, 0.0));
+    coned.insert(
         anchor,
         Joint::spherical(
             body,
@@ -241,23 +241,20 @@ fn a_spherical_joint_swings_inside_its_cone() {
         )
         .with_cone(0.3),
     );
-    settle(&mut world, 240);
-    let joint = *world
+    settle(&mut coned, 240);
+    let swing = coned
         .get::<Joint>(anchor)
-        .expect("the anchor holds its joint");
-    let swing = joint.value(Coordinate::Swing);
+        .expect("the anchor holds its joint")
+        .value(Coordinate::Swing);
     assert!(
         (swing - 0.3).abs() < 0.05,
         "a spherical joint holds a swing of {swing}",
     );
-}
 
-#[test]
-fn a_spherical_joint_twists_inside_its_limit() {
-    let mut world = world();
-    let anchor = node(&mut world, Vec3::new(0.0, 3.0, 0.0));
-    let body = ball(&mut world, Vec3::new(2.0, 3.0, 0.0));
-    world.insert(
+    let mut twisted = world();
+    let anchor = node(&mut twisted, Vec3::new(0.0, 3.0, 0.0));
+    let body = ball(&mut twisted, Vec3::new(2.0, 3.0, 0.0));
+    twisted.insert(
         anchor,
         Joint::spherical(
             body,
@@ -269,11 +266,11 @@ fn a_spherical_joint_twists_inside_its_limit() {
         )
         .with_limit(-0.3, 0.3),
     );
-    settle(&mut world, 240);
-    let joint = *world
+    settle(&mut twisted, 240);
+    let twist = twisted
         .get::<Joint>(anchor)
-        .expect("the anchor holds its joint");
-    let twist = joint.value(Coordinate::Twist);
+        .expect("the anchor holds its joint")
+        .value(Coordinate::Twist);
     assert!(
         (twist + 0.3).abs() < 0.05,
         "a spherical joint holds a twist of {twist}",

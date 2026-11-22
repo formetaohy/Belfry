@@ -13,170 +13,212 @@ use crate::skin::SkinEntry;
 use crate::sound::SoundEntry;
 use belfry_render::Vertex;
 use belfry_toml::Toml;
+use std::path::Path;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Presentation {
+    Authored,
+    Observed,
+}
+
+impl Scene {
+    pub fn observe(&self) -> Toml {
+        document(self, Presentation::Observed)
+    }
+}
 
 pub(crate) fn write(scene: &Scene) -> String {
+    document(scene, Presentation::Authored).write()
+}
+
+fn document(scene: &Scene, presentation: Presentation) -> Toml {
     let format = if scene.is_prefab() {
         crate::prefab::FORMAT
     } else {
         FORMAT
     };
-    let document = Toml::object([
+    Toml::object([
         ("format", Toml::string(format)),
         (
             "models",
-            Toml::array(
-                scene
-                    .models
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Model, &entry.id))
-                    .map(model)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Model,
+                presentation,
+                &scene.models,
+                |entry| entry.id.as_str(),
+                model,
             ),
         ),
         (
             "images",
-            Toml::array(
-                scene
-                    .images
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Image, &entry.id))
-                    .map(image)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Image,
+                presentation,
+                &scene.images,
+                |entry| entry.id.as_str(),
+                image,
             ),
         ),
         (
             "sounds",
-            Toml::array(
-                scene
-                    .sounds
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Sound, &entry.id))
-                    .map(sound)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Sound,
+                presentation,
+                &scene.sounds,
+                |entry| entry.id.as_str(),
+                sound,
             ),
         ),
         (
             "environments",
-            Toml::array(
-                scene
-                    .environments
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Environment, &entry.id))
-                    .map(environment)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Environment,
+                presentation,
+                &scene.environments,
+                |entry| entry.id.as_str(),
+                environment,
             ),
         ),
         (
             "meshes",
-            Toml::array(
-                scene
-                    .meshes
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Mesh, &entry.id))
-                    .map(mesh)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Mesh,
+                presentation,
+                &scene.meshes,
+                |entry| entry.id.as_str(),
+                mesh,
             ),
         ),
         (
             "materials",
-            Toml::array(
-                scene
-                    .materials
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Material, &entry.id))
-                    .map(material)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Material,
+                presentation,
+                &scene.materials,
+                |entry| entry.id.as_str(),
+                material,
             ),
         ),
         (
             "skins",
-            Toml::array(
-                scene
-                    .skins
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Skin, &entry.id))
-                    .map(skin)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Skin,
+                presentation,
+                &scene.skins,
+                |entry| entry.id.as_str(),
+                skin,
             ),
         ),
         (
             "animations",
-            Toml::array(
-                scene
-                    .animations
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Animation, &entry.id))
-                    .map(animation)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Animation,
+                presentation,
+                &scene.animations,
+                |entry| entry.id.as_str(),
+                animation,
             ),
         ),
         (
             "graphs",
-            Toml::array(
-                scene
-                    .graphs
-                    .iter()
-                    .filter(|entry| !owned(scene, ReferenceKind::Graph, &entry.id))
-                    .map(graph)
-                    .collect(),
+            assets(
+                scene,
+                ReferenceKind::Graph,
+                presentation,
+                &scene.graphs,
+                |entry| entry.id.as_str(),
+                graph,
             ),
         ),
-        (
-            "nodes",
-            Toml::array(
-                scene
-                    .nodes
-                    .iter()
-                    .filter(|node| node.owner().is_none())
-                    .map(|node| self::node(node, scene.registry()))
-                    .collect(),
-            ),
+        ("nodes", nodes(scene, presentation)),
+    ])
+}
+
+fn assets<T>(
+    scene: &Scene,
+    kind: ReferenceKind,
+    presentation: Presentation,
+    entries: &[T],
+    id: impl Fn(&T) -> &str,
+    build: impl Fn(&T, Option<&Path>) -> Toml,
+) -> Toml {
+    Toml::array(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let owner = scene.asset_owner(kind, id(entry));
+                if owner.is_some() && presentation == Presentation::Authored {
+                    return None;
+                }
+                Some(build(entry, owner))
+            })
+            .collect(),
+    )
+}
+
+fn mark_prefab(fields: &mut Vec<(String, Toml)>, owner: Option<&Path>) {
+    let Some(owner) = owner else {
+        return;
+    };
+    fields.push((
+        String::from("prefab"),
+        Toml::string(
+            owner
+                .to_str()
+                .unwrap_or_else(|| panic!("a prefab path of {} holds no text", owner.display())),
         ),
-    ]);
-    document.write()
+    ));
 }
 
-fn owned(scene: &Scene, kind: ReferenceKind, id: &str) -> bool {
-    scene.asset_owner(kind, id).is_some()
-}
-
-fn model(entry: &ModelEntry) -> Toml {
-    Toml::object([
-        ("id", Toml::string(entry.id.as_str())),
+fn model(entry: &ModelEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = vec![
+        (String::from("id"), Toml::string(entry.id.as_str())),
         (
-            "path",
+            String::from("path"),
             Toml::string(entry.path.to_str().unwrap_or_else(|| {
                 panic!("a model path of {} holds no text", entry.path.display())
             })),
         ),
-    ])
+    ];
+    mark_prefab(&mut fields, owner);
+    Toml::object(fields)
 }
 
-fn sound(entry: &SoundEntry) -> Toml {
-    Toml::object([
-        ("id", Toml::string(entry.id.as_str())),
+fn sound(entry: &SoundEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = vec![
+        (String::from("id"), Toml::string(entry.id.as_str())),
         (
-            "path",
+            String::from("path"),
             Toml::string(entry.path.to_str().unwrap_or_else(|| {
                 panic!("a sound path of {} holds no text", entry.path.display())
             })),
         ),
-        ("stream", Toml::boolean(entry.stream)),
-    ])
+        (String::from("stream"), Toml::boolean(entry.stream)),
+    ];
+    mark_prefab(&mut fields, owner);
+    Toml::object(fields)
 }
 
-fn environment(entry: &EnvironmentEntry) -> Toml {
-    let mut fields = vec![("id", Toml::string(entry.id.as_str()))];
+fn environment(entry: &EnvironmentEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = vec![(String::from("id"), Toml::string(entry.id.as_str()))];
     match &entry.source {
         EnvironmentSource::Panorama(path) => fields.push((
-            "path",
+            String::from("path"),
             Toml::string(
                 path.to_str()
                     .unwrap_or_else(|| panic!("an environment path holds no text")),
             ),
         )),
         EnvironmentSource::Atmosphere(atmosphere) => fields.push((
-            "atmosphere",
+            String::from("atmosphere"),
             Toml::object([
                 ("sun_elevation", Toml::from(atmosphere.sun_elevation)),
                 ("sun_azimuth", Toml::from(atmosphere.sun_azimuth)),
@@ -189,12 +231,13 @@ fn environment(entry: &EnvironmentEntry) -> Toml {
                 ("altitude", Toml::from(atmosphere.altitude)),
             ]),
         )),
-        EnvironmentSource::Capture => fields.push(("capture", Toml::boolean(true))),
+        EnvironmentSource::Capture => fields.push((String::from("capture"), Toml::boolean(true))),
     }
+    mark_prefab(&mut fields, owner);
     Toml::object(fields)
 }
 
-fn image(entry: &ImageEntry) -> Toml {
+fn image(entry: &ImageEntry, owner: Option<&Path>) -> Toml {
     let mut fields = vec![(String::from("id"), Toml::string(entry.id.as_str()))];
     match &entry.source {
         ImageSource::Path(path) => fields.push((
@@ -228,10 +271,11 @@ fn image(entry: &ImageEntry) -> Toml {
         String::from("wrap_v"),
         Toml::string(address_name(entry.sampler.address_v)),
     ));
+    mark_prefab(&mut fields, owner);
     Toml::object(fields)
 }
 
-fn mesh(entry: &MeshEntry) -> Toml {
+fn mesh(entry: &MeshEntry, owner: Option<&Path>) -> Toml {
     let mut fields = vec![(String::from("id"), Toml::string(entry.id.as_str()))];
     match &entry.asset.geometry {
         Geometry::Shape(shape) => {
@@ -253,6 +297,7 @@ fn mesh(entry: &MeshEntry) -> Toml {
             fields.push((String::from("primitive"), Toml::from(*primitive)));
         }
     }
+    mark_prefab(&mut fields, owner);
     Toml::object(fields)
 }
 
@@ -268,7 +313,7 @@ fn vector<const N: usize>(values: [f32; N]) -> Toml {
     Toml::array(values.into_iter().map(Toml::from).collect())
 }
 
-fn material(entry: &MaterialEntry) -> Toml {
+fn material(entry: &MaterialEntry, owner: Option<&Path>) -> Toml {
     let asset = &entry.asset;
     let mut fields = vec![
         (String::from("id"), Toml::string(entry.id.as_str())),
@@ -302,16 +347,20 @@ fn material(entry: &MaterialEntry) -> Toml {
             fields.push((String::from(name), Toml::string(image.as_str())));
         }
     }
+    mark_prefab(&mut fields, owner);
     Toml::object(fields)
 }
 
-fn skin(entry: &SkinEntry) -> Toml {
-    Toml::object([
-        ("id", Toml::string(entry.id.as_str())),
-        ("model", Toml::string(entry.asset.model_of().as_str())),
-        ("skin", Toml::from(entry.asset.index())),
+fn skin(entry: &SkinEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = vec![
+        (String::from("id"), Toml::string(entry.id.as_str())),
         (
-            "joints",
+            String::from("model"),
+            Toml::string(entry.asset.model_of().as_str()),
+        ),
+        (String::from("skin"), Toml::from(entry.asset.index())),
+        (
+            String::from("joints"),
             Toml::array(
                 entry
                     .asset
@@ -321,20 +370,27 @@ fn skin(entry: &SkinEntry) -> Toml {
                     .collect(),
             ),
         ),
-    ])
+    ];
+    mark_prefab(&mut fields, owner);
+    Toml::object(fields)
 }
 
-fn graph(entry: &GraphEntry) -> Toml {
-    entry.authored()
+fn graph(entry: &GraphEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = entry.authored().object_fields("an authored graph");
+    mark_prefab(&mut fields, owner);
+    Toml::object(fields)
 }
 
-fn animation(entry: &AnimationEntry) -> Toml {
-    Toml::object([
-        ("id", Toml::string(entry.id.as_str())),
-        ("model", Toml::string(entry.asset.model_of().as_str())),
-        ("animation", Toml::from(entry.asset.index())),
+fn animation(entry: &AnimationEntry, owner: Option<&Path>) -> Toml {
+    let mut fields = vec![
+        (String::from("id"), Toml::string(entry.id.as_str())),
         (
-            "targets",
+            String::from("model"),
+            Toml::string(entry.asset.model_of().as_str()),
+        ),
+        (String::from("animation"), Toml::from(entry.asset.index())),
+        (
+            String::from("targets"),
             Toml::array(
                 entry
                     .asset
@@ -344,10 +400,23 @@ fn animation(entry: &AnimationEntry) -> Toml {
                     .collect(),
             ),
         ),
-    ])
+    ];
+    mark_prefab(&mut fields, owner);
+    Toml::object(fields)
 }
 
-fn node(node: &Node, registry: &Registry) -> Toml {
+fn nodes(scene: &Scene, presentation: Presentation) -> Toml {
+    Toml::array(
+        scene
+            .nodes
+            .iter()
+            .filter(|node| node.owner().is_none() || presentation == Presentation::Observed)
+            .map(|node| self::node(node, scene.registry(), presentation))
+            .collect(),
+    )
+}
+
+fn node(node: &Node, registry: &Registry, presentation: Presentation) -> Toml {
     let mut fields = vec![(String::from("id"), Toml::string(&node.id))];
     if let Some(parent) = &node.parent {
         fields.push((String::from("parent"), Toml::string(parent)));
@@ -361,6 +430,11 @@ fn node(node: &Node, registry: &Registry) -> Toml {
                 }),
             ),
         ));
+    }
+    if presentation == Presentation::Observed
+        && let Some(owner) = node.owner()
+    {
+        fields.push((String::from("owner"), Toml::string(owner)));
     }
     if !node.overrides().is_empty() {
         fields.push((
@@ -385,7 +459,7 @@ fn node(node: &Node, registry: &Registry) -> Toml {
             Toml::array(
                 node.additions()
                     .iter()
-                    .map(|addition| self::node(addition, registry))
+                    .map(|addition| self::node(addition, registry, presentation))
                     .collect(),
             ),
         ));
@@ -403,7 +477,11 @@ fn node(node: &Node, registry: &Registry) -> Toml {
     }
     for component in registry.components() {
         if let Some(held) = node.component_by_name(component.name) {
-            fields.push((String::from(component.name), held.authored()));
+            let value = match presentation {
+                Presentation::Authored => held.authored(),
+                Presentation::Observed => held.observed(),
+            };
+            fields.push((String::from(component.name), value));
         }
     }
     Toml::object(fields)

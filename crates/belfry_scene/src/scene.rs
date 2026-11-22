@@ -76,10 +76,12 @@ impl fmt::Debug for Scene {
 
 impl PartialEq for Scene {
     fn eq(&self, other: &Self) -> bool {
-        self.prefab == other.prefab
+        self.root == other.root
+            && self.prefab == other.prefab
             && shared(&self.owners, &other.owners)
             && shared(&self.instances, &other.instances)
             && shared(&self.images, &other.images)
+            && shared(&self.sounds, &other.sounds)
             && shared(&self.meshes, &other.meshes)
             && shared(&self.environments, &other.environments)
             && shared(&self.materials, &other.materials)
@@ -152,7 +154,7 @@ impl Scene {
 
     pub fn write(&self) -> String {
         self.validate("a written scene");
-        crate::write::write(self)
+        crate::document::write(self)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) {

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[test]
-fn an_imported_model_expands_into_scene_assets_and_nodes() {
+fn an_imported_model_expands_into_the_assets_and_nodes_it_holds() {
     let root = directory("import");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("a test opens its directory");
@@ -62,6 +62,53 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
         serde_json::to_vec(&document).expect("a test writes JSON"),
     )
     .expect("a test writes a model");
+    let rig = skinned_triangle();
+    fs::write(root.join("rig.bin"), &rig).expect("a test writes a buffer");
+    let document = json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0, 1] }],
+        "nodes": [
+            { "mesh": 0, "skin": 0 },
+            { "name": "joint" },
+        ],
+        "meshes": [{
+            "primitives": [{
+                "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 },
+            }],
+        }],
+        "skins": [{ "joints": [1], "inverseBindMatrices": 3 }],
+        "animations": [{
+            "name": "bend",
+            "channels": [{
+                "sampler": 0,
+                "target": { "node": 1, "path": "translation" },
+            }],
+            "samplers": [{ "input": 4, "output": 5, "interpolation": "LINEAR" }],
+        }],
+        "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" },
+            { "bufferView": 1, "componentType": 5123, "count": 3, "type": "VEC4" },
+            { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4" },
+            { "bufferView": 3, "componentType": 5126, "count": 1, "type": "MAT4" },
+            { "bufferView": 4, "componentType": 5126, "count": 2, "type": "SCALAR" },
+            { "bufferView": 5, "componentType": 5126, "count": 2, "type": "VEC3" },
+        ],
+        "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+            { "buffer": 0, "byteOffset": 36, "byteLength": 24 },
+            { "buffer": 0, "byteOffset": 60, "byteLength": 48 },
+            { "buffer": 0, "byteOffset": 108, "byteLength": 64 },
+            { "buffer": 0, "byteOffset": 172, "byteLength": 8 },
+            { "buffer": 0, "byteOffset": 180, "byteLength": 24 },
+        ],
+        "buffers": [{ "uri": "rig.bin", "byteLength": rig.len() }],
+    });
+    fs::write(
+        root.join("rig.gltf"),
+        serde_json::to_vec(&document).expect("a test writes JSON"),
+    )
+    .expect("a test writes a model");
 
     let mut scene = Scene::new(&root);
     let target = edit(&mut scene, |edit| {
@@ -69,11 +116,18 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
     })
     .expect("a scene imports a model");
     assert_eq!(target, Target::Node(String::from("box")));
-    assert_eq!(scene.models().len(), 1);
+    let target = edit(&mut scene, |edit| {
+        edit.import_model("rig", "rig.gltf", None)
+    })
+    .expect("a scene imports a skinned model");
+    assert_eq!(target, Target::Node(String::from("rig")));
+    assert_eq!(scene.models().len(), 2);
     assert_eq!(scene.images().len(), 1);
-    assert_eq!(scene.materials().len(), 1);
-    assert_eq!(scene.meshes().len(), 1);
-    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.materials().len(), 2);
+    assert_eq!(scene.meshes().len(), 2);
+    assert_eq!(scene.skins().len(), 1);
+    assert_eq!(scene.animations().len(), 1);
+    assert_eq!(scene.nodes().len(), 5);
     assert_eq!(scene.nodes()[0].id, "box");
     assert_eq!(scene.nodes()[1].id, "box_node0");
     assert_eq!(scene.materials()[0].asset.metallic, 0.1);
@@ -120,110 +174,6 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
             .map(|mesh| { (mesh.mesh.as_str(), mesh.material.as_str(), mesh.tint) }),
         Some(("box_mesh_0_0", "box_material_0", belfry_math::Vec3::ONE)),
     );
-    let written = scene.write();
-    let mut parsed = Scene::parse(&written, &root, "the written scene");
-    assert_eq!(parsed, scene);
-    assert!(
-        edit(&mut parsed, |edit| edit.import_model(
-            "box",
-            "model.gltf",
-            None
-        ))
-        .is_err()
-    );
-    assert!(
-        edit(&mut parsed, |edit| edit
-            .remove(&Target::Model(String::from("box"))))
-        .is_err()
-    );
-    let _ = fs::remove_dir_all(&root);
-}
-
-fn triangle() -> Vec<u8> {
-    let mut binary = Vec::new();
-    for value in [-1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0] {
-        binary.extend(value.to_le_bytes());
-    }
-    for value in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0] {
-        binary.extend(value.to_le_bytes());
-    }
-    for value in [0.0f32, 0.0, 1.0, 0.0, 0.5, 1.0] {
-        binary.extend(value.to_le_bytes());
-    }
-    for index in [0u16, 1, 2] {
-        binary.extend(index.to_le_bytes());
-    }
-    binary
-}
-
-fn directory(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("belfry_scene_{name}_{}", std::process::id()))
-}
-
-#[test]
-fn an_imported_skin_and_animation_expand_into_scene_assets() {
-    let root = directory("skinned_import");
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).expect("a test opens its directory");
-    let binary = skinned_triangle();
-    fs::write(root.join("model.bin"), &binary).expect("a test writes a buffer");
-    let document = json!({
-        "asset": { "version": "2.0" },
-        "scene": 0,
-        "scenes": [{ "nodes": [0, 1] }],
-        "nodes": [
-            { "mesh": 0, "skin": 0 },
-            { "name": "joint" },
-        ],
-        "meshes": [{
-            "primitives": [{
-                "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 },
-            }],
-        }],
-        "skins": [{ "joints": [1], "inverseBindMatrices": 3 }],
-        "animations": [{
-            "name": "bend",
-            "channels": [{
-                "sampler": 0,
-                "target": { "node": 1, "path": "translation" },
-            }],
-            "samplers": [{ "input": 4, "output": 5, "interpolation": "LINEAR" }],
-        }],
-        "accessors": [
-            { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" },
-            { "bufferView": 1, "componentType": 5123, "count": 3, "type": "VEC4" },
-            { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4" },
-            { "bufferView": 3, "componentType": 5126, "count": 1, "type": "MAT4" },
-            { "bufferView": 4, "componentType": 5126, "count": 2, "type": "SCALAR" },
-            { "bufferView": 5, "componentType": 5126, "count": 2, "type": "VEC3" },
-        ],
-        "bufferViews": [
-            { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
-            { "buffer": 0, "byteOffset": 36, "byteLength": 24 },
-            { "buffer": 0, "byteOffset": 60, "byteLength": 48 },
-            { "buffer": 0, "byteOffset": 108, "byteLength": 64 },
-            { "buffer": 0, "byteOffset": 172, "byteLength": 8 },
-            { "buffer": 0, "byteOffset": 180, "byteLength": 24 },
-        ],
-        "buffers": [{ "uri": "model.bin", "byteLength": binary.len() }],
-    });
-    fs::write(
-        root.join("model.gltf"),
-        serde_json::to_vec(&document).expect("a test writes JSON"),
-    )
-    .expect("a test writes a model");
-
-    let mut scene = Scene::new(&root);
-    let target = edit(&mut scene, |edit| {
-        edit.import_model("rig", "model.gltf", None)
-    })
-    .expect("a scene imports a skinned model");
-    assert_eq!(target, Target::Node(String::from("rig")));
-    assert_eq!(scene.nodes().len(), 3);
-    assert_eq!(scene.meshes().len(), 1);
-    assert_eq!(scene.materials().len(), 1);
-    assert_eq!(scene.skins().len(), 1);
-    assert_eq!(scene.animations().len(), 1);
     assert_eq!(scene.skins()[0].id, "rig_skin_0");
     assert_eq!(
         scene.skins()[0]
@@ -260,6 +210,19 @@ fn an_imported_skin_and_animation_expand_into_scene_assets() {
     let mut parsed = Scene::parse(&written, &root, "the written scene");
     assert_eq!(parsed, scene);
     assert!(
+        edit(&mut parsed, |edit| edit.import_model(
+            "box",
+            "model.gltf",
+            None
+        ))
+        .is_err()
+    );
+    assert!(
+        edit(&mut parsed, |edit| edit
+            .remove(&Target::Model(String::from("box"))))
+        .is_err()
+    );
+    assert!(
         edit(&mut parsed, |edit| edit
             .remove(&Target::Node(String::from("rig_joint"))))
         .is_err()
@@ -270,6 +233,23 @@ fn an_imported_skin_and_animation_expand_into_scene_assets() {
         .is_err()
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+fn triangle() -> Vec<u8> {
+    let mut binary = Vec::new();
+    for value in [-1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0] {
+        binary.extend(value.to_le_bytes());
+    }
+    for value in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0] {
+        binary.extend(value.to_le_bytes());
+    }
+    for value in [0.0f32, 0.0, 1.0, 0.0, 0.5, 1.0] {
+        binary.extend(value.to_le_bytes());
+    }
+    for index in [0u16, 1, 2] {
+        binary.extend(index.to_le_bytes());
+    }
+    binary
 }
 
 fn skinned_triangle() -> Vec<u8> {
@@ -300,6 +280,11 @@ fn skinned_triangle() -> Vec<u8> {
     }
     binary
 }
+
+fn directory(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("belfry_scene_{name}_{}", std::process::id()))
+}
+
 fn edit<T>(
     scene: &mut belfry_scene::Scene,
     change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,

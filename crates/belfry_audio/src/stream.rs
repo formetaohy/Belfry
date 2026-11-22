@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wave_stream_repeats_a_looping_file() {
+    fn a_looping_stream_restarts_the_file_it_plays() {
         let root = directory("loop");
         let path = root.join("ramp.wav");
         let samples = (0..64)
@@ -493,6 +493,24 @@ mod tests {
             assert_eq!(frames[64 + at], frames[at]);
         }
         let _ = fs::remove_dir_all(&root);
+
+        let stream = Stream::open(TONE).expect("a test opens its vorbis stream");
+        let mut track = stream.track(true, 0).expect("a test starts its track");
+        let bytes = fs::read(TONE).expect("a test reads its vorbis file");
+        let sound = Sound::decode(&bytes, "the tone");
+        let count = sound.frame_count();
+        let mut frames = Vec::new();
+        let begin = Instant::now();
+        while frames.len() < count * 2 + 64 {
+            while let Some(frame) = track.take() {
+                frames.push(frame);
+            }
+            assert!(begin.elapsed() < Duration::from_secs(20), "a loop restarts");
+            thread::sleep(Duration::from_millis(1));
+        }
+        for at in 0..32 {
+            assert_eq!(frames[count + at], frames[at]);
+        }
     }
 
     #[test]
@@ -514,27 +532,6 @@ mod tests {
         for (at, frame) in frames.iter().enumerate() {
             assert_eq!(frame[0], sound.samples()[at]);
             assert_eq!(frame[1], sound.samples()[at]);
-        }
-    }
-
-    #[test]
-    fn a_looping_vorbis_stream_restarts_its_frames() {
-        let stream = Stream::open(TONE).expect("a test opens its vorbis stream");
-        let mut track = stream.track(true, 0).expect("a test starts its track");
-        let bytes = fs::read(TONE).expect("a test reads its vorbis file");
-        let sound = Sound::decode(&bytes, "the tone");
-        let count = sound.frame_count();
-        let mut frames = Vec::new();
-        let begin = Instant::now();
-        while frames.len() < count * 2 + 64 {
-            while let Some(frame) = track.take() {
-                frames.push(frame);
-            }
-            assert!(begin.elapsed() < Duration::from_secs(20), "a loop restarts");
-            thread::sleep(Duration::from_millis(1));
-        }
-        for at in 0..32 {
-            assert_eq!(frames[count + at], frames[at]);
         }
     }
 

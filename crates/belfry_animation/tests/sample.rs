@@ -110,4 +110,90 @@ fn a_condition_transitions_and_blends_between_states() {
     );
     advance(&mut world, 0.5);
     assert!((target_of(&world, joint) - 110.0).abs() < 1e-3);
+
+    let refused = std::panic::catch_unwind(|| {
+        AnimationGraph::new(
+            "recursive",
+            vec![ParameterDesc {
+                name: String::from("speed"),
+                default: Parameter::Number(0.0),
+            }],
+            vec![state("idle", clip(0.0, joint), true)],
+            vec![TransitionDesc {
+                from: String::from("idle"),
+                to: String::from("idle"),
+                fade: 0.0,
+                exit: 0.0,
+                conditions: vec![ConditionDesc {
+                    parameter: String::from("speed"),
+                    comparison: Comparison::Above,
+                    value: Parameter::Number(0.0),
+                }],
+            }],
+            0,
+        )
+    });
+    let payload = refused
+        .err()
+        .expect("a graph refuses the state a transition leaves for itself");
+    let message = payload
+        .downcast_ref::<String>()
+        .expect("a refused transition names the state it leaves");
+    assert!(
+        message.contains("transitions from idle to itself"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_looping_state_exits_when_a_frame_crosses_its_exit_time() {
+    let mut frequent = World::new();
+    let machine = looping_machine(&mut frequent);
+    for _ in 0..6 {
+        advance(&mut frequent, 0.1);
+    }
+    assert_eq!(state_id(&frequent, machine), "walk");
+
+    let mut dropped = World::new();
+    let machine = looping_machine(&mut dropped);
+    advance(&mut dropped, 1.25);
+    assert_eq!(
+        state_id(&dropped, machine),
+        "walk",
+        "a frame that crosses the exit time still exits after the clip wraps",
+    );
+}
+
+fn looping_machine(world: &mut World) -> Entity {
+    let joint = world.spawn();
+    world.insert(joint, LocalTransform(Transform::IDENTITY));
+    let graph = Arc::new(AnimationGraph::new(
+        "looping",
+        Vec::new(),
+        vec![
+            state("idle", clip(0.0, joint), true),
+            state("walk", clip(100.0, joint), true),
+        ],
+        vec![TransitionDesc {
+            from: String::from("idle"),
+            to: String::from("walk"),
+            fade: 0.0,
+            exit: 0.5,
+            conditions: Vec::new(),
+        }],
+        0,
+    ));
+    let machine = world.spawn();
+    world.insert(machine, AnimationMachine::new(graph, true, 0.0));
+    machine
+}
+
+fn state_id(world: &World, machine: Entity) -> String {
+    String::from(
+        world
+            .get::<AnimationMachine>(machine)
+            .expect("a machine")
+            .state()
+            .id(),
+    )
 }

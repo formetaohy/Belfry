@@ -951,10 +951,13 @@ mod instanced {
         );
         let marker = select(0.0, 1.0, marked);
         let blended = entry.alpha_mode == 2u32;
+        if blended && coverage <= 0.0 {
+            discard();
+        }
         if blended {
             let setup = settings[0u32];
             let index = atomic_add(&counter[0u32], 1u32);
-            if index < setup.capacity && coverage > 0.0 {
+            if index < setup.capacity {
                 let width = setup.width as f32;
                 let height = setup.height as f32;
                 let pixel_x = min(max(floor(screen.x * width), 0.0), width - 1.0) as u32;

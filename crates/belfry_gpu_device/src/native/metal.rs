@@ -1,7 +1,7 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeFrame,
     NativeGraphicsPipeline, NativeGroup, NativePipeline, NativePresent, NativeTexture,
-    STAGING_BYTES, TIME_SLOTS, hang_deadline,
+    STAGING_BYTES, TIME_SLOTS, TRANSFER_ALIGNMENT, hang_deadline,
 };
 use crate::backend::Backend;
 use crate::buffer::GpuBuffer;
@@ -82,12 +82,20 @@ impl Frame {
         self.resources.clear();
     }
 
-    fn stage(&mut self, device: &Device, bytes: &[u8]) -> (Arc<BufferResource>, u64) {
+    fn stage(
+        &mut self,
+        device: &Device,
+        bytes: &[u8],
+        alignment: u64,
+    ) -> (Arc<BufferResource>, u64) {
         let size = bytes.len() as u64;
-        let (staging, offset) = if size <= STAGING_BYTES - self.cursor {
-            let offset = self.cursor;
-            self.cursor += size;
-            (self.staging.clone(), offset)
+        let aligned = self.cursor.next_multiple_of(alignment);
+        let (staging, offset) = if STAGING_BYTES
+            .checked_sub(aligned)
+            .is_some_and(|free| size <= free)
+        {
+            self.cursor = aligned + size;
+            (self.staging.clone(), aligned)
         } else {
             let staging = device.allocate(size, true);
             self.resources.push(staging.clone());
@@ -1047,7 +1055,7 @@ impl Device {
             .expect("a Metal compute command buffer exists");
         let mut presenting = None;
         for write in writes {
-            let (upload, offset) = frame.stage(self, &write.bytes);
+            let (upload, offset) = frame.stage(self, &write.bytes, TRANSFER_ALIGNMENT);
             let target = native_buffer(&write.buffer);
             let blit = self.blit(&command);
             unsafe {
@@ -1305,11 +1313,13 @@ impl Device {
                     let texture = native_texture(texture.native());
                     let width = (texture.width >> level).max(1);
                     let height = (texture.height >> level).max(1);
-                    let row_bytes = (u64::from(width)
-                        * u64::from(texture.format.bytes_per_texel()))
-                    .div_ceil(256)
-                        * 256;
-                    let (staging, offset) = frame.stage(self, bytes);
+                    let texel = u64::from(texture.format.bytes_per_texel());
+                    let row_bytes = (u64::from(width) * texel).div_ceil(256) * 256;
+                    let (staging, offset) = frame.stage(self, bytes, texel.max(TRANSFER_ALIGNMENT));
+                    assert!(
+                        offset.is_multiple_of(texel),
+                        "a texture copy reads the staging buffer at {offset}, which is no multiple of its {texel} byte texel block",
+                    );
                     let blit = self.blit(&command);
                     unsafe {
                         blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(

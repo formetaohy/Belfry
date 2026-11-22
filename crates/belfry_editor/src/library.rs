@@ -107,14 +107,12 @@ fn import<'a>(ctx: &BuildContext<'_, Message>, view: &View<'a>) -> Element<'a, M
     let theme = ctx.theme();
     let style = TextStyle::new(theme.font(belfry_ui::Level::Body), theme.palette.on_surface);
     let width = 150.0;
-    let import = widget::text_field(view.import, style, width, false)
-        .on_commit(|value| Message::Import(String::from(value)));
-    let button = widget::button(theme, "Import", Role::Tonal)
-        .press(Message::Import(String::from(view.import)));
-    let instance_field = widget::text_field(view.prefab, style, width, false)
-        .on_commit(|value| Message::Prefab(String::from(value)));
-    let instance = widget::button(theme, "Instance", Role::Tonal)
-        .press(Message::Prefab(String::from(view.prefab)));
+    let import = widget::text_field(view.import_path, style, width, false)
+        .on_commit(|value| Message::ImportPath(String::from(value)));
+    let button = widget::button(theme, "Import", Role::Tonal).press(Message::Import);
+    let instance_field = widget::text_field(view.prefab_path, style, width, false)
+        .on_commit(|value| Message::PrefabPath(String::from(value)));
+    let instance = widget::button(theme, "Instance", Role::Tonal).press(Message::Instance);
     Element::column().width(Length::Fill).gap(5.0).children([
         Element::row()
             .width(Length::Fill)

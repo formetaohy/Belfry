@@ -42,7 +42,9 @@ pub use element::{
 };
 pub use geometry::{Band, Corners, Edges, Rect};
 pub use icon::{Icon, IconStyle};
-pub use input::{Button, ButtonState, Cursor, Event, Input, Key as InputKey, KeyEvent, Modifiers};
+pub use input::{
+    Button, ButtonState, Cursor, Event, Input, Key as InputKey, KeyEvent, Modifiers, ScrollDelta,
+};
 pub use motion::{Animated, Motion, Spring};
 pub use paint::{Clip, Instance, Painter};
 pub use renderer::Renderer;

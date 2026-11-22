@@ -124,6 +124,36 @@ fade = 0.25
 "#;
 
 #[test]
+fn a_self_transition_is_refused_while_the_graph_is_authored() {
+    let mut scene = Scene::parse(SCENE, ".", "the graph scene");
+    let refused =
+        scene.edit(|edit| edit.add_graph_transition("rig_graph", "idle", "idle", 0.0, 0.5));
+    assert!(
+        refused.is_err(),
+        "a graph transitions between the states it holds",
+    );
+    assert_eq!(
+        scene
+            .graph("rig_graph")
+            .expect("the scene holds its graph")
+            .asset
+            .transitions()
+            .len(),
+        1,
+        "a refused transition leaves the graph as it stood",
+    );
+    let self_transition = SCENE.replace("to = \"walk\"", "to = \"idle\"");
+    let parsed = std::panic::catch_unwind(|| {
+        Scene::parse(&self_transition, ".", "the self transition scene")
+    });
+    let payload = parsed.expect_err("a self transition is refused while the graph parses");
+    let message = payload
+        .downcast_ref::<String>()
+        .expect("a refused transition names the state it leaves");
+    assert!(message.contains("leaves idle for itself"), "{message}");
+}
+
+#[test]
 fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
     let scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();

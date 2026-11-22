@@ -38,6 +38,7 @@ pub(crate) fn hang_deadline(
     }
 }
 pub const STAGING_BYTES: u64 = 1 << 20;
+pub(crate) const TRANSFER_ALIGNMENT: u64 = 4;
 pub(crate) const TIME_SLOTS: usize = 4096;
 
 pub(crate) enum DeviceFailure {

@@ -333,6 +333,10 @@ impl Body {
         self.rigid.kind != BodyKind::Static
     }
 
+    pub(crate) fn senses(&self) -> bool {
+        self.parts.iter().any(|part| part.collider.is_sensor())
+    }
+
     pub(crate) fn sleeping(&self) -> bool {
         self.rigid.sleeping
     }

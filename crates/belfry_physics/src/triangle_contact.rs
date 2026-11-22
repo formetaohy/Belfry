@@ -75,59 +75,6 @@ pub(crate) fn capsule(
     })
 }
 
-pub(crate) fn face_sphere(
-    triangle: [Vec3; 3],
-    center: Vec3,
-    radius: f32,
-    gap: f32,
-) -> Option<Manifold> {
-    let normal = face(triangle);
-    let offset = (center - triangle[0]).dot(normal);
-    let normal = if offset >= 0.0 { normal } else { -normal };
-    let separation = offset.abs() - radius;
-    let point = center - normal * (radius + separation * 0.5);
-    Manifold::new(normal, vec![(point, separation)], gap)
-}
-
-pub(crate) fn face_capsule(
-    triangle: [Vec3; 3],
-    start: Vec3,
-    end: Vec3,
-    radius: f32,
-    gap: f32,
-) -> Option<Manifold> {
-    let normal = face(triangle);
-    let first = (start - triangle[0]).dot(normal);
-    let second = (end - triangle[0]).dot(normal);
-    let normal = if first + second >= 0.0 {
-        normal
-    } else {
-        -normal
-    };
-    let mut points = Vec::new();
-    for endpoint in [start, end] {
-        let offset = (endpoint - triangle[0]).dot(normal);
-        if offset < 0.0 {
-            continue;
-        }
-        let held = offset - radius;
-        if held <= gap {
-            points.push((endpoint - normal * (radius + held * 0.5), held));
-        }
-    }
-    let axis = end - start;
-    if points.len() > 2 {
-        let direction = axis.normalize();
-        points.sort_by(|left, right| {
-            (left.0 - start)
-                .dot(direction)
-                .total_cmp(&(right.0 - start).dot(direction))
-        });
-        points = vec![points[0], *points.last().expect("a manifold holds a point")];
-    }
-    Manifold::new(normal, points, gap)
-}
-
 fn edge_mask(point: Vec3, triangle: [Vec3; 3]) -> u8 {
     let mut mask = 0;
     for edge in 0..3 {

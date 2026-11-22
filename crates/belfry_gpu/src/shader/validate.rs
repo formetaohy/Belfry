@@ -737,6 +737,16 @@ impl<'m> Checker<'m> {
                     "the device call to {} disagrees about its result",
                     callee.name
                 );
+                if let (Some(result), Some(expected)) = (result, callee.result) {
+                    assert_eq!(
+                        self.ty(*result),
+                        expected,
+                        "the device call to {} yields {} where {} stands",
+                        callee.name,
+                        element_name(self.module.ty(self.ty(*result))),
+                        element_name(self.module.ty(expected))
+                    );
+                }
             }
             Instruction::Atomic {
                 op,
@@ -963,9 +973,15 @@ impl<'m> Checker<'m> {
         match instruction {
             Instruction::Unary { value, .. } => Some(self.ty(*value)),
             Instruction::Derivative { value, .. } => Some(self.ty(*value)),
-            Instruction::Binary { op, left, .. } => {
+            Instruction::Binary {
+                op, left, right, ..
+            } => {
                 if op.comparison() {
                     Some(self.module.scalar_id(Scalar::Bool))
+                } else if *op == BinaryOp::Multiply
+                    && self.lanes(self.ty(*right)) > self.lanes(self.ty(*left))
+                {
+                    Some(self.ty(*right))
                 } else {
                     Some(self.ty(*left))
                 }

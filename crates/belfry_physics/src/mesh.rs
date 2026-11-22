@@ -12,7 +12,7 @@ type EdgeKey = ((u32, u32, u32), (u32, u32, u32));
 pub struct TriangleMesh {
     triangles: Vec<Triangle>,
     edges: Vec<[Vec3; 2]>,
-    internal: Vec<u8>,
+    features: Vec<[Option<Vec3>; 3]>,
     nodes: Vec<Node>,
     order: Vec<u32>,
     bounds: Aabb,
@@ -72,7 +72,7 @@ impl TriangleMesh {
             .map(|triangle| triangle.bounds)
             .reduce(Aabb::union)
             .expect("a triangle mesh holds a triangle");
-        let internal = internal_edges(&triangles);
+        let internal = feature_normals(&triangles);
         let edges = unique_edges(&triangles);
         let mut order = (0..triangles.len() as u32).collect::<Vec<_>>();
         let mut nodes = Vec::with_capacity(triangles.len() * 2);
@@ -80,7 +80,7 @@ impl TriangleMesh {
         Self {
             triangles,
             edges,
-            internal,
+            features: internal,
             nodes,
             order,
             bounds,
@@ -103,8 +103,17 @@ impl TriangleMesh {
         self.triangles[index as usize].vertices
     }
 
-    pub(crate) fn internal(&self, index: u32) -> u8 {
-        self.internal[index as usize]
+    pub(crate) fn feature(&self, index: u32, edges: u8) -> Option<Vec3> {
+        let held = &self.features[index as usize];
+        let mut sum = Vec3::ZERO;
+        for (edge, &normal) in held.iter().enumerate() {
+            if let Some(normal) = normal
+                && edges & (1 << edge) != 0
+            {
+                sum += normal;
+            }
+        }
+        (sum.length_squared() > 0.0).then(|| sum.normalize())
     }
 
     pub(crate) fn candidates(&self, bounds: Aabb) -> Vec<u32> {
@@ -182,15 +191,18 @@ impl TriangleMesh {
     }
 }
 
-fn internal_edges(triangles: &[Triangle]) -> Vec<u8> {
+fn feature_normals(triangles: &[Triangle]) -> Vec<[Option<Vec3>; 3]> {
     let mut shared = HashMap::<EdgeKey, (u32, Vec3)>::with_capacity(triangles.len() * 2);
     for triangle in triangles {
-        let normal = face(triangle.vertices);
+        let normal = area_normal(triangle.vertices);
         for edge in 0..3 {
             let key = edge_key(triangle.vertices[edge], triangle.vertices[(edge + 1) % 3]);
             shared
                 .entry(key)
-                .and_modify(|(count, _)| *count += 1)
+                .and_modify(|(count, held)| {
+                    *count += 1;
+                    *held += normal;
+                })
                 .or_insert((1, normal));
         }
     }
@@ -198,17 +210,11 @@ fn internal_edges(triangles: &[Triangle]) -> Vec<u8> {
         .iter()
         .map(|triangle| {
             let normal = face(triangle.vertices);
-            let mut internal = 0;
-            for edge in 0..3 {
+            std::array::from_fn(|edge| {
                 let key = edge_key(triangle.vertices[edge], triangle.vertices[(edge + 1) % 3]);
-                if let Some((count, held)) = shared.get(&key)
-                    && *count > 1
-                    && normal.dot(*held) > SMOOTH_EDGE
-                {
-                    internal |= 1 << edge;
-                }
-            }
-            internal
+                let (count, held) = shared[&key];
+                (count > 1 && normal.dot(held.normalize()) > SMOOTH_EDGE).then(|| held.normalize())
+            })
         })
         .collect()
 }
@@ -330,9 +336,11 @@ fn reached(bounds: Aabb, origin: Vec3, direction: Vec3, reach: f32) -> bool {
 }
 
 fn face(vertices: [Vec3; 3]) -> Vec3 {
-    (vertices[1] - vertices[0])
-        .cross(vertices[2] - vertices[0])
-        .normalize()
+    area_normal(vertices).normalize()
+}
+
+fn area_normal(vertices: [Vec3; 3]) -> Vec3 {
+    (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0])
 }
 
 fn cross(triangle: &Triangle, origin: Vec3, direction: Vec3, reach: f32) -> Option<f32> {

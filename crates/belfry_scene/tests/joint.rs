@@ -65,7 +65,7 @@ mask = 65535
 "#;
 
 #[test]
-fn a_scene_installs_and_steps_its_joint() {
+fn a_scene_installs_and_steps_the_joints_it_authors() {
     let scene = Scene::parse(SCENE, ".", "the joint scene");
     let written = scene.write();
     let reloaded = Scene::parse(&written, ".", "the written joint scene");
@@ -133,17 +133,14 @@ fn a_scene_installs_and_steps_its_joint() {
         driven.motor(Coordinate::Twist).map(|motor| motor.speed()),
         Some(0.0),
     );
-}
 
-#[test]
-fn a_scene_swings_a_spherical_joint_within_its_cone() {
-    let text = SCENE
+    let spherical = SCENE
         .replace("kind = \"hinge\"", "kind = \"spherical\"")
         .replace("axis = [0.0, 0.0, 1.0]", "axis = [1.0, 0.0, 0.0]")
         .replace("limit = true", "limit = false")
         .replace("motor = true", "motor = false")
         .replace("cone = 0.0", "cone = 0.5");
-    let scene = Scene::parse(&text, ".", "the spherical scene");
+    let scene = Scene::parse(&spherical, ".", "the spherical scene");
     let mut world = World::new();
     world.insert_resource(Gravity::default());
     let anchor = scene.install(&mut world, &Mock)[0];

@@ -188,7 +188,7 @@ impl ArtifactCache {
         if payload.is_empty() {
             self.fault();
             drop(file);
-            evict(state, &path);
+            discard(state, &path);
             return None;
         }
         state.loads.fetch_add(1, Ordering::Relaxed);
@@ -289,7 +289,7 @@ impl ArtifactCache {
         let Some(path) = self.path(key) else {
             return;
         };
-        evict(state, &path);
+        discard(state, &path);
     }
 
     pub fn file(&self, key: &str) -> Option<PathBuf> {
@@ -411,25 +411,36 @@ fn index(state: &State, path: &Path, bytes: u64) -> u64 {
 
 fn enforce(state: &State, keep: Option<&Path>, mut reclaim: u64) {
     while reclaim > 0 {
-        let mut held = state
-            .held
-            .lock()
-            .expect("a device artifact cache is never poisoned");
-        let victim = held
-            .entries
-            .iter()
-            .filter(|(path, _)| Some(path.as_path()) != keep)
-            .min_by_key(|(_, entry)| entry.used)
-            .map(|(path, entry)| (path.clone(), entry.bytes));
+        let victim = {
+            let held = state
+                .held
+                .lock()
+                .expect("a device artifact cache is never poisoned");
+            held.entries
+                .iter()
+                .filter(|(path, _)| Some(path.as_path()) != keep)
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(path, entry)| (path.clone(), entry.bytes))
+        };
         let Some((path, bytes)) = victim else {
             return;
         };
-        held.entries.remove(&path);
-        held.bytes -= bytes;
-        drop(held);
-        evict(state, &path);
+        discard(state, &path);
         reclaim = reclaim.saturating_sub(bytes);
     }
+}
+
+fn discard(state: &State, path: &Path) {
+    forget(state, path);
+    evict(state, path);
+}
+
+fn forget(state: &State, path: &Path) {
+    let mut held = state
+        .held
+        .lock()
+        .expect("a device artifact cache is never poisoned");
+    held.bytes -= held.entries.remove(path).map_or(0, |entry| entry.bytes);
 }
 
 fn evict(state: &State, path: &Path) {

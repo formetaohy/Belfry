@@ -13,6 +13,12 @@ pub enum Cursor {
     Text,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollDelta {
+    pub down: f32,
+    pub right: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Button {
     Primary,
@@ -65,7 +71,7 @@ pub enum Event {
     Up(Button),
     Cancel,
     Leave,
-    Wheel(Vec2),
+    Scroll(ScrollDelta),
     Modifiers(Modifiers),
     Key {
         key: Key,
@@ -94,7 +100,7 @@ pub struct Input {
     position: Vec2,
     inside: bool,
     delta: Vec2,
-    wheel: Vec2,
+    scroll: ScrollDelta,
     buttons: [ButtonState; 3],
     press: [Option<Vec2>; 3],
     release: [Option<Vec2>; 3],
@@ -116,7 +122,7 @@ impl Input {
             position: Vec2::ZERO,
             inside: false,
             delta: Vec2::ZERO,
-            wheel: Vec2::ZERO,
+            scroll: ScrollDelta::default(),
             buttons: [ButtonState::default(); 3],
             press: [None; 3],
             release: [None; 3],
@@ -148,7 +154,7 @@ impl Input {
         self.time = time;
         self.elapsed = elapsed;
         self.delta = Vec2::ZERO;
-        self.wheel = Vec2::ZERO;
+        self.scroll = ScrollDelta::default();
         self.cancelled = false;
         self.keys.clear();
         self.texts.clear();
@@ -185,7 +191,10 @@ impl Input {
                     }
                 }
                 Event::Leave => self.inside = false,
-                Event::Wheel(delta) => self.wheel += delta,
+                Event::Scroll(delta) => {
+                    self.scroll.down += delta.down;
+                    self.scroll.right += delta.right;
+                }
                 Event::Modifiers(modifiers) => self.modifiers = modifiers,
                 Event::Key {
                     key,
@@ -215,8 +224,8 @@ impl Input {
         self.delta
     }
 
-    pub fn wheel(&self) -> Vec2 {
-        self.wheel
+    pub fn scroll(&self) -> ScrollDelta {
+        self.scroll
     }
 
     pub fn cancelled(&self) -> bool {

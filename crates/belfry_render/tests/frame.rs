@@ -637,13 +637,13 @@ fn assert_yellow(backend: Backend, pixels: &[[u8; 4]], width: u32, x: u32, y: u3
 }
 
 #[test]
-fn a_transparent_frame_blends_its_layers_and_masks_alpha_cutouts() {
+fn a_transparent_frame_blends_its_layers_masks_cutouts_and_orders_crossing_fragments() {
     for backend in belfry_gpu_device::PREFERENCE {
-        transparent(*backend);
+        blend(*backend);
     }
 }
 
-fn transparent(backend: Backend) {
+fn blend(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
         backend: Some(backend),
         ..Default::default()
@@ -689,7 +689,26 @@ fn transparent(backend: Backend) {
             address_v: AddressMode::ClampToEdge,
         },
     );
-    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    layers(
+        backend,
+        &context,
+        &target,
+        white.clone(),
+        masked,
+        sampler.clone(),
+    );
+    crossing(backend, &context, &target, white, sampler);
+}
+
+fn layers(
+    backend: Backend,
+    context: &GpuContext,
+    target: &Texture,
+    white: Texture,
+    masked: Texture,
+    sampler: Sampler,
+) {
+    let mut renderer = Renderer::new(context, TextureFormat::Rgba8Unorm);
     let opaque = renderer.material(
         MaterialDesc::new(RED).base_color_image(MaterialImage::new(white.clone(), sampler.clone())),
     );
@@ -767,8 +786,8 @@ fn transparent(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
-    let pixels = read(&context, &target);
+    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    let pixels = read(context, target);
     let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     assert!(
         center[2] > 32 && center[2] > center[1] + 16 && center[2] > center[0] + 16,
@@ -788,8 +807,8 @@ fn transparent(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
-    let pixels = read(&context, &target);
+    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    let pixels = read(context, target);
     assert_red(
         backend,
         &pixels,
@@ -808,50 +827,14 @@ fn transparent(backend: Backend) {
     );
 }
 
-#[test]
-fn a_crossing_transparent_frame_blends_each_pixel_in_its_own_order() {
-    for backend in belfry_gpu_device::PREFERENCE {
-        crossing(*backend);
-    }
-}
-
-fn crossing(backend: Backend) {
-    let context = GpuContext::open(&GpuRequest {
-        backend: Some(backend),
-        ..Default::default()
-    })
-    .unwrap_or_else(|error| panic!("no {backend:?} device orders crossing fragments: {error}"));
-    let device = context.device();
-    let target = Texture::new(
-        device,
-        "crossing frame",
-        SIDE,
-        SIDE,
-        1,
-        TextureFormat::Rgba8Unorm,
-        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-    );
-    let white = Texture::new(
-        device,
-        "crossing white",
-        1,
-        1,
-        1,
-        TextureFormat::Rgba8UnormSrgb,
-        TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-    );
-    white.write(context.queue(), &[255, 255, 255, 255]);
-    let sampler = Sampler::new(
-        device,
-        SamplerDesc {
-            min_filter: Filter::Nearest,
-            mag_filter: Filter::Nearest,
-            mip_filter: Filter::Nearest,
-            address_u: AddressMode::ClampToEdge,
-            address_v: AddressMode::ClampToEdge,
-        },
-    );
-    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+fn crossing(
+    backend: Backend,
+    context: &GpuContext,
+    target: &Texture,
+    white: Texture,
+    sampler: Sampler,
+) {
+    let mut renderer = Renderer::new(context, TextureFormat::Rgba8Unorm);
     let red = renderer.material(
         MaterialDesc::new(RED)
             .alpha(0.5)
@@ -921,8 +904,8 @@ fn crossing(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
-    let pixels = read(&context, &target);
+    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+    let pixels = read(context, target);
     let left = pixels[(SIDE as usize / 2) * SIDE as usize + 20];
     let right = pixels[(SIDE as usize / 2) * SIDE as usize + 44];
     assert!(
@@ -1705,13 +1688,13 @@ fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
 }
 
 #[test]
-fn a_temporal_frame_accumulates_subpixel_edge_coverage() {
+fn a_temporal_frame_accumulates_subpixel_coverage_and_rejects_the_history_of_a_moved_instance() {
     for backend in belfry_gpu_device::PREFERENCE {
-        accumulation(*backend);
+        temporal(*backend);
     }
 }
 
-fn accumulation(backend: Backend) {
+fn temporal(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
         backend: Some(backend),
         ..Default::default()
@@ -1719,14 +1702,19 @@ fn accumulation(backend: Backend) {
     .unwrap_or_else(|error| panic!("no {backend:?} device renders a frame: {error}"));
     let target = Texture::new(
         context.device(),
-        "temporal edge",
+        "temporal frame",
         SIDE,
         SIDE,
         1,
         TextureFormat::Rgba8Unorm,
         TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
     );
-    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    accumulation(backend, &context, &target);
+    movement(backend, &context, &target);
+}
+
+fn accumulation(backend: Backend, context: &GpuContext, target: &Texture) {
+    let mut renderer = Renderer::new(context, TextureFormat::Rgba8Unorm);
     let quad = renderer.mesh(&QUAD);
     let material = renderer.material(MaterialDesc::new(WHITE).emissive(WHITE));
     let mut world = World::new();
@@ -1758,9 +1746,9 @@ fn accumulation(backend: Backend) {
         },
     );
     for _ in 0..8 {
-        renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+        renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
     }
-    let pixels = read(&context, &target);
+    let pixels = read(context, target);
     let held = pixels[(SIDE * 32 + 32) as usize];
     assert!(
         held[0] > 200,
@@ -1776,29 +1764,8 @@ fn accumulation(backend: Backend) {
     );
 }
 
-#[test]
-fn a_temporal_frame_rejects_the_history_a_moved_instance_leaves_behind() {
-    for backend in belfry_gpu_device::PREFERENCE {
-        movement(*backend);
-    }
-}
-
-fn movement(backend: Backend) {
-    let context = GpuContext::open(&GpuRequest {
-        backend: Some(backend),
-        ..Default::default()
-    })
-    .unwrap_or_else(|error| panic!("no {backend:?} device renders a frame: {error}"));
-    let target = Texture::new(
-        context.device(),
-        "temporal movement",
-        SIDE,
-        SIDE,
-        1,
-        TextureFormat::Rgba8Unorm,
-        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-    );
-    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+fn movement(backend: Backend, context: &GpuContext, target: &Texture) {
+    let mut renderer = Renderer::new(context, TextureFormat::Rgba8Unorm);
     let quad = renderer.mesh(&QUAD);
     let material = renderer.material(MaterialDesc::new(WHITE).emissive(WHITE));
     let mut world = World::new();
@@ -1829,7 +1796,7 @@ fn movement(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
     world.insert(
         mover,
         Transform {
@@ -1838,8 +1805,8 @@ fn movement(backend: Backend) {
             scale: Vec3::splat(0.3),
         },
     );
-    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
-    let pixels = read(&context, &target);
+    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+    let pixels = read(context, target);
     let held = pixels[(SIDE * 32 + 37) as usize];
     assert!(
         held[0] > 200,

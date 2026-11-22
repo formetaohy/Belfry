@@ -52,36 +52,16 @@ fn position(world: &World, entity: Entity) -> Vec3 {
 }
 
 #[test]
-fn a_sphere_settles_on_a_cuboid() {
+fn a_convex_shape_settles_on_a_cuboid() {
     let mut world = world();
     floor(&mut world);
     let sphere = spawn(
         &mut world,
-        Vec3::new(0.0, 4.0, 0.0),
+        Vec3::new(-3.0, 4.0, 0.0),
         Quat::IDENTITY,
         Shape::sphere(0.5),
         BodyKind::Dynamic,
     );
-    settle(&mut world, 240);
-    let held = position(&world, sphere);
-    assert!(
-        (held.y - 0.5).abs() < 0.05,
-        "a sphere of radius 0.5 rests at {}",
-        held.y,
-    );
-    assert!(
-        world
-            .get::<RigidBody>(sphere)
-            .expect("the sphere holds a body")
-            .is_sleeping(),
-        "a resting sphere falls asleep",
-    );
-}
-
-#[test]
-fn a_cuboid_settles_flat_on_a_cuboid() {
-    let mut world = world();
-    floor(&mut world);
     let cube = spawn(
         &mut world,
         Vec3::new(0.0, 3.0, 0.0),
@@ -89,7 +69,20 @@ fn a_cuboid_settles_flat_on_a_cuboid() {
         Shape::cuboid(Vec3::splat(0.5)),
         BodyKind::Dynamic,
     );
+    let capsule = spawn(
+        &mut world,
+        Vec3::new(3.0, 3.0, 0.0),
+        Quat::IDENTITY,
+        Shape::capsule(0.25, 0.5),
+        BodyKind::Dynamic,
+    );
     settle(&mut world, 300);
+    let held = position(&world, sphere);
+    assert!(
+        (held.y - 0.5).abs() < 0.05,
+        "a sphere of radius 0.5 rests at {}",
+        held.y,
+    );
     let held = position(&world, cube);
     assert!(
         (held.y - 0.5).abs() < 0.05,
@@ -103,6 +96,19 @@ fn a_cuboid_settles_flat_on_a_cuboid() {
     assert!(
         rotation.to_yaw_pitch_roll().length() < 0.1,
         "a falling cube lies flat at {rotation:?}",
+    );
+    let held = position(&world, capsule);
+    assert!(
+        (held.y - 0.75).abs() < 0.06,
+        "a capsule of bottom 0.75 rests at {}",
+        held.y,
+    );
+    assert!(
+        world
+            .get::<RigidBody>(sphere)
+            .expect("the sphere holds a body")
+            .is_sleeping(),
+        "a resting sphere falls asleep",
     );
 }
 
@@ -120,36 +126,71 @@ fn two_cuboids_stack() {
     let upper = spawn(
         &mut world,
         Vec3::new(0.0, 1.6, 0.0),
-        Quat::IDENTITY,
+        Quat::from_rotation_y(0.6),
         Shape::cuboid(Vec3::splat(0.5)),
         BodyKind::Dynamic,
     );
     settle(&mut world, 600);
     let lower = position(&world, lower).y;
-    let upper = position(&world, upper).y;
+    let held = world
+        .get::<Transform>(upper)
+        .expect("the upper cube holds its world transform");
     assert!(
-        (lower - 0.5).abs() < 0.06 && (upper - 1.5).abs() < 0.08,
-        "a stack of two cubes rests at {lower} and {upper}",
+        (lower - 0.5).abs() < 0.06 && (held.translation.y - 1.5).abs() < 0.08,
+        "a stack of two cubes rests at {lower} and {}",
+        held.translation.y,
+    );
+    assert!(
+        held.translation.x.abs() + held.translation.z.abs() < 0.01,
+        "a twisted cube stays over the cube below it at {:?}",
+        held.translation,
+    );
+    assert!(
+        (held.rotation.to_yaw_pitch_roll().x - 0.6).abs() < 0.01,
+        "a twisted cube keeps the yaw it was placed with at {:?}",
+        held.rotation.to_yaw_pitch_roll(),
+    );
+    assert!(
+        world
+            .get::<RigidBody>(upper)
+            .expect("the upper cube holds a body")
+            .is_sleeping(),
+        "a twisted cube settles instead of creeping",
     );
 }
 
 #[test]
-fn a_capsule_settles_on_a_cuboid() {
+fn a_resting_body_wakes_when_its_support_leaves() {
     let mut world = world();
     floor(&mut world);
-    let capsule = spawn(
+    let support = spawn(
         &mut world,
-        Vec3::new(0.0, 3.0, 0.0),
+        Vec3::new(0.0, 0.5, 0.0),
         Quat::IDENTITY,
-        Shape::capsule(0.25, 0.5),
+        Shape::cuboid(Vec3::splat(0.5)),
         BodyKind::Dynamic,
     );
-    settle(&mut world, 300);
-    let held = position(&world, capsule);
+    let resting = spawn(
+        &mut world,
+        Vec3::new(0.0, 1.5, 0.0),
+        Quat::IDENTITY,
+        Shape::cuboid(Vec3::splat(0.5)),
+        BodyKind::Dynamic,
+    );
+    settle(&mut world, 600);
     assert!(
-        (held.y - 0.75).abs() < 0.06,
-        "a capsule of bottom 0.75 rests at {}",
-        held.y,
+        world
+            .get::<RigidBody>(resting)
+            .expect("the resting cube holds a body")
+            .is_sleeping(),
+        "a cube resting on another falls asleep",
+    );
+    world.despawn(support);
+    settle(&mut world, 300);
+    let held = position(&world, resting).y;
+    assert!(
+        (held - 0.5).abs() < 0.05,
+        "a cube whose support leaves falls to the floor below instead of hanging at {held}",
     );
 }
 

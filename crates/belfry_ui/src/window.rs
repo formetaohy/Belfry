@@ -1,6 +1,8 @@
-use crate::input::{Button, Event, Input, Key, Modifiers};
+use crate::input::{Button, Event, Input, Key, Modifiers, ScrollDelta};
 use belfry_math::Vec2;
 use belfry_window::{Event as WindowEvent, KeyCode, MouseButton};
+
+const LINE_STEP: f32 = 40.0;
 
 impl Input {
     pub fn window(&mut self, event: &WindowEvent, scale: f32) {
@@ -20,12 +22,12 @@ impl Input {
                 }
             }
             WindowEvent::Wheel { lines, pixels } => {
-                let delta = if pixels[1] != 0.0 {
-                    -pixels[1] / scale
+                let (right, down) = if *pixels != [0.0; 2] {
+                    (pixels[0] / scale, -pixels[1] / scale)
                 } else {
-                    -lines[1] * 40.0
+                    (lines[0] * LINE_STEP, -lines[1] * LINE_STEP)
                 };
-                self.push(Event::Wheel(Vec2::new(0.0, delta)));
+                self.push(Event::Scroll(ScrollDelta { down, right }));
             }
             WindowEvent::Key {
                 code,

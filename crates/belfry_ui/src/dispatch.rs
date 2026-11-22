@@ -3,7 +3,7 @@ use belfry_math::Vec2;
 use crate::edit::{Edit, Outcome};
 use crate::element::{Axis, Content, Interaction, Phase, Pointer};
 use crate::hit;
-use crate::input::{Button, Key as InputKey};
+use crate::input::{Button, Key as InputKey, ScrollDelta};
 use crate::node::NodeId;
 use crate::ui::Ui;
 
@@ -172,8 +172,8 @@ impl<A: Clone> Ui<A> {
     }
 
     fn wheel(&mut self) {
-        let wheel = self.input.wheel();
-        if wheel == Vec2::ZERO {
+        let step = self.input.scroll();
+        if step == ScrollDelta::default() {
             return;
         }
         let pointer = self.pointer;
@@ -185,15 +185,12 @@ impl<A: Clone> Ui<A> {
         {
             return;
         }
-        let amount = match self.tree.nodes[node].scroll_axis() {
-            Axis::Column => -wheel.y,
-            Axis::Row => -wheel.x - wheel.y,
-        };
+        let amount = content_shift(self.tree.nodes[node].scroll_axis(), step);
         if amount == 0.0 {
             return;
         }
         if let Some(scroll) = self.tree.nodes[node].scroll.as_mut() {
-            scroll.scroll_by(amount * 42.0);
+            scroll.scroll_by(amount);
         }
         self.tree.nodes[node].paint_dirty = true;
         self.tree.invalidate_arrange(node);
@@ -979,6 +976,13 @@ impl<A: Clone> Ui<A> {
     }
 }
 
+fn content_shift(axis: Axis, step: ScrollDelta) -> f32 {
+    match axis {
+        Axis::Column => step.down,
+        Axis::Row => step.right + step.down,
+    }
+}
+
 fn traverses(content: &Content) -> bool {
     matches!(
         content,
@@ -1012,4 +1016,27 @@ pub(crate) fn is_inside<A>(tree: &crate::tree::Tree<A>, root: NodeId, node: Node
         current = tree.nodes[id].parent;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_shift;
+    use crate::element::Axis;
+    use crate::input::ScrollDelta;
+
+    #[test]
+    fn a_scroll_step_moves_its_axis_towards_its_sign() {
+        let down = ScrollDelta {
+            down: 40.0,
+            right: 0.0,
+        };
+        let right = ScrollDelta {
+            down: 0.0,
+            right: 30.0,
+        };
+        assert_eq!(content_shift(Axis::Column, down), 40.0);
+        assert_eq!(content_shift(Axis::Column, right), 0.0);
+        assert_eq!(content_shift(Axis::Row, right), 30.0);
+        assert_eq!(content_shift(Axis::Row, down), 40.0);
+    }
 }

@@ -298,6 +298,27 @@ fn an_authored_audio_source_installs_and_edits() {
     });
     assert!(removed.is_err());
 }
+
+#[test]
+fn a_scene_that_differs_only_in_sound_is_not_equal() {
+    let scene = Scene::parse(SCENE, ".", "the audio scene");
+    let streamed = SCENE.replace(
+        "sounds = [{ id = \"tone\", path = \"tone.wav\" }]",
+        "sounds = [{ id = \"tone\", path = \"tone.wav\", stream = true }]",
+    );
+    let other = Scene::parse(&streamed, ".", "the streamed audio scene");
+    assert!(!scene.sounds()[0].stream);
+    assert!(other.sounds()[0].stream);
+    assert_ne!(
+        other, scene,
+        "a scene differs from the scene of another sound alone",
+    );
+    assert_eq!(
+        Scene::parse(SCENE, ".", "the same audio scene"),
+        scene,
+        "a scene equals the scene of its own sounds",
+    );
+}
 fn edit<T>(
     scene: &mut belfry_scene::Scene,
     change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,

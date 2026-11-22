@@ -16,8 +16,15 @@ pub(crate) struct CachedPoint {
 }
 
 impl ContactCache {
-    pub(crate) fn take_rebound(&mut self, first: Entity, second: Entity) -> f32 {
-        self.rebounds.remove(&key(first, second)).unwrap_or(0.0)
+    pub(crate) fn rebound(&self, first: Entity, second: Entity) -> f32 {
+        self.rebounds
+            .get(&key(first, second))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn pairs(&self) -> impl Iterator<Item = (Entity, Entity)> + '_ {
+        self.pairs.keys().map(|held| (held.0, held.1))
     }
 
     pub(crate) fn insert_rebound(&mut self, first: Entity, second: Entity, rebound: f32) {

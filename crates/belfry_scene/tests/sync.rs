@@ -1,5 +1,6 @@
-use belfry_ecs::{LocalTransform, World};
+use belfry_ecs::{LocalTransform, Parent, World};
 use belfry_math::{Transform, Vec3};
+use belfry_render::SceneRevision;
 use belfry_scene::{Assets, Scene, SceneSync, SkinData, Target};
 use std::sync::Arc;
 
@@ -50,43 +51,7 @@ scale = [1.0, 1.0, 1.0]
 "#;
 
 #[test]
-fn a_scene_index_follows_structure_edits() {
-    let mut scene = Scene::parse(SCENE, ".", "the test scene");
-    edit(&mut scene, |edit| {
-        edit.insert_node(belfry_scene::Node::new("c"))
-    })
-    .expect("the scene adds the node c");
-    let b = scene.node_index("b").expect("the scene holds b");
-    let c = scene.node_index("c").expect("the scene holds c");
-    edit(&mut scene, |edit| {
-        edit.reparent(b, Some(c));
-        Ok(())
-    })
-    .expect("the scene reparents the node b");
-    assert_eq!(scene.children(c).collect::<Vec<_>>(), [b]);
-    assert_eq!(scene.subtree(c), [b, c]);
-    edit(&mut scene, |edit| {
-        edit.remove(&Target::Node(String::from("a")))
-    })
-    .expect("the scene removes the node a");
-    for (at, node) in scene.nodes().iter().enumerate() {
-        assert_eq!(
-            scene.node_index(&node.id),
-            Some(at),
-            "the index names the slot of {}",
-            node.id,
-        );
-    }
-    assert_eq!(
-        scene
-            .children(scene.node_index("c").expect("the scene holds c"))
-            .collect::<Vec<_>>(),
-        [0],
-    );
-}
-
-#[test]
-fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
+fn a_scene_sync_follows_the_structure_it_edits() {
     let mut scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();
     let mut sync = SceneSync::new();
@@ -104,17 +69,27 @@ fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
         edit.insert_node(belfry_scene::Node::new("c"))
     })
     .expect("the scene adds a node");
+    let b_at = scene.node_index("b").expect("the scene holds b");
+    let c_at = scene.node_index("c").expect("the scene holds c");
     edit(&mut scene, |edit| {
-        edit.remove(&Target::Node(String::from("b")))
+        edit.reparent(b_at, Some(c_at));
+        Ok(())
     })
-    .expect("the scene removes a node");
-    assert_eq!(
-        scene.transform(0),
-        Transform::from_translation(Vec3::new(2.0, 0.0, 0.0))
-    );
-    sync.sync(&scene, &mut world, &NoAssets, false);
+    .expect("the scene reparents the node b");
+    for (at, node) in scene.nodes().iter().enumerate() {
+        assert_eq!(
+            scene.node_index(&node.id),
+            Some(at),
+            "the index names the slot of {}",
+            node.id,
+        );
+    }
+    assert_eq!(scene.children(c_at).collect::<Vec<_>>(), [b_at]);
+    assert_eq!(scene.subtree(c_at), [b_at, c_at]);
 
+    sync.sync(&scene, &mut world, &NoAssets, false);
     assert_eq!(sync.id("a"), Some(a));
+    assert_eq!(sync.id("b"), Some(b));
     assert_eq!(world.get::<Ticks>(a), Some(&Ticks(7)));
     assert_eq!(
         world.get::<LocalTransform>(a),
@@ -124,7 +99,37 @@ fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
     );
     let c = sync.id("c").expect("the sync spawns the added node");
     assert!(world.is_alive(c));
+    assert_eq!(world.get::<Parent>(b), Some(&Parent(c)));
+
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("b")))
+    })
+    .expect("the scene removes the node b");
+    sync.sync(&scene, &mut world, &NoAssets, false);
     assert!(!world.is_alive(b));
+
+    let a_at = scene.node_index("a").expect("the scene holds a");
+    edit(&mut scene, |edit| {
+        edit.set_transform(a_at, Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)))
+    })
+    .expect("the scene moves the node a again");
+    let revision = world
+        .resource::<SceneRevision>()
+        .copied()
+        .expect("a synced scene carries its revision");
+    sync.apply(&scene, &mut world, &NoAssets, a_at);
+    assert_eq!(
+        world.resource::<SceneRevision>().copied(),
+        Some(SceneRevision(revision.0 + 1)),
+        "an applied node advances the revision the probes rebake on",
+    );
+    assert_eq!(
+        world.get::<LocalTransform>(a),
+        Some(&LocalTransform(Transform::from_translation(Vec3::new(
+            3.0, 0.0, 0.0
+        )))),
+        "an applied node installs the component its scene changed",
+    );
 }
 fn edit<T>(
     scene: &mut belfry_scene::Scene,

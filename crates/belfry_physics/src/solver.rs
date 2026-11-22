@@ -105,7 +105,7 @@ pub(crate) fn contact(
         friction,
         restitution,
         points,
-        rebound: cache.take_rebound(held.entity, other.entity),
+        rebound: cache.rebound(held.entity, other.entity),
     }
 }
 
@@ -156,6 +156,9 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
 
 pub(crate) fn warm_start(bodies: &mut [Body], contacts: &[Contact]) {
     for contact in contacts {
+        if resting(bodies, contact) {
+            continue;
+        }
         for point in &contact.points {
             if !point.active || point.separation > 0.0 {
                 continue;
@@ -177,6 +180,9 @@ pub(crate) fn warm_start(bodies: &mut [Body], contacts: &[Contact]) {
 
 pub(crate) fn solve_velocity(bodies: &mut [Body], contacts: &mut [Contact]) {
     for contact in contacts.iter_mut() {
+        if resting(bodies, contact) {
+            continue;
+        }
         let normal = contact.normal;
         let friction = contact.friction;
         for point in &mut contact.points {
@@ -214,6 +220,9 @@ pub(crate) fn solve_velocity(bodies: &mut [Body], contacts: &mut [Contact]) {
 
 pub(crate) fn solve_position(bodies: &mut [Body], contacts: &[Contact]) {
     for contact in contacts {
+        if resting(bodies, contact) {
+            continue;
+        }
         for point in &contact.points {
             if !point.active {
                 continue;
@@ -316,6 +325,10 @@ fn take_match(points: &mut [Option<CachedPoint>], local: Vec3) -> Option<CachedP
             .take()
             .expect("a matched contact point waits in its cache")
     })
+}
+
+fn resting(bodies: &[Body], contact: &Contact) -> bool {
+    !bodies[contact.first].active() && !bodies[contact.second].active()
 }
 
 pub(crate) fn pair_mut<T>(items: &mut [T], first: usize, second: usize) -> (&mut T, &mut T) {

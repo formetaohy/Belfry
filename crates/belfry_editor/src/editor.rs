@@ -56,6 +56,12 @@ struct DragState {
     delta: Option<Delta>,
 }
 
+struct PropertyState {
+    target: Target,
+    path: String,
+    delta: Option<Delta>,
+}
+
 pub struct Editor {
     scene: Scene,
     path: PathBuf,
@@ -73,11 +79,13 @@ pub struct Editor {
     session: Option<Session>,
     history: History,
     drag: Option<DragState>,
+    property: Option<PropertyState>,
     camera_drag: Option<MouseButton>,
+    primary: bool,
     viewport: Rect,
     pointer: Vec2,
-    import: String,
-    prefab: String,
+    import_path: String,
+    prefab_path: String,
     watch: Watch,
     modifiers: ModifiersState,
     origin: Instant,
@@ -123,11 +131,13 @@ impl Editor {
             session: None,
             history: History::default(),
             drag: None,
+            property: None,
             camera_drag: None,
+            primary: false,
             viewport: Rect::ZERO,
             pointer: Vec2::ZERO,
-            import: String::new(),
-            prefab: String::new(),
+            import_path: String::new(),
+            prefab_path: String::new(),
             watch,
             modifiers: ModifiersState::default(),
             origin: Instant::now(),
@@ -202,6 +212,7 @@ impl Editor {
             Ok(scene) => {
                 self.scene = scene;
                 self.drag = None;
+                self.property = None;
                 self.history.reset();
                 self.dirty = false;
                 self.status = format!("Reloaded {}", self.path.display());
@@ -226,6 +237,7 @@ impl Editor {
             {
                 self.scene = scene;
                 self.drag = None;
+                self.property = None;
                 self.history.reset();
                 self.dirty = false;
                 self.status = String::from("Reloaded from disk");
@@ -289,6 +301,7 @@ impl Editor {
 
     fn undo(&mut self) {
         self.finish_drag();
+        self.finish_property();
         if self.history.undo(&mut self.scene) {
             self.dirty = true;
             self.status = String::from("Undo");
@@ -299,6 +312,7 @@ impl Editor {
 
     fn redo(&mut self) {
         self.finish_drag();
+        self.finish_property();
         if self.history.redo(&mut self.scene) {
             self.dirty = true;
             self.status = String::from("Redo");
@@ -313,6 +327,53 @@ impl Editor {
         {
             self.record(delta);
         }
+    }
+
+    fn finish_property(&mut self) {
+        if let Some(state) = self.property.take()
+            && let Some(delta) = state.delta
+        {
+            self.record(delta);
+        }
+    }
+
+    fn property_edit(&mut self, target: Target, path: String, value: Value) {
+        let continued = self
+            .property
+            .as_ref()
+            .is_some_and(|held| held.target == target && held.path == path);
+        if !continued {
+            self.finish_property();
+        }
+        if let Some(previous) = self.property.as_mut().and_then(|held| held.delta.take()) {
+            previous.revert(&mut self.scene);
+        }
+        match self
+            .scene
+            .edit(|edit| edit.set_property(&target, &path, &value))
+        {
+            Ok((_, delta)) => {
+                self.property = Some(PropertyState {
+                    target: target.clone(),
+                    path,
+                    delta: Some(delta),
+                });
+                self.dirty = true;
+                self.apply_edit(&target);
+            }
+            Err(error) => {
+                self.property = None;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn interrupt(&mut self) {
+        self.finish_drag();
+        self.finish_property();
+        self.camera_drag = None;
+        self.primary = false;
+        self.hover = None;
     }
 
     fn play(&mut self) {
@@ -411,7 +472,7 @@ impl Editor {
     }
 
     fn add_asset(&mut self, kind: &str) {
-        let import = self.import.clone();
+        let import = self.import_path.clone();
         let created = self.scene.edit(|edit| match kind {
             "mesh" => {
                 let id = unique_asset(edit, "mesh", "mesh");
@@ -450,7 +511,7 @@ impl Editor {
         }
     }
 
-    fn import(&mut self, path: &str) {
+    fn import_model(&mut self, path: &str) {
         if path.is_empty() {
             self.error = Some(String::from("the editor imports no path"));
             return;
@@ -467,7 +528,7 @@ impl Editor {
         }
     }
 
-    fn prefab(&mut self, path: &str) {
+    fn add_instance(&mut self, path: &str) {
         if path.is_empty() {
             self.error = Some(String::from("the editor instantiates no path"));
             return;
@@ -509,6 +570,7 @@ impl Editor {
 
     fn remove(&mut self) {
         self.finish_drag();
+        self.finish_property();
         let Some(target) = self.selected.clone() else {
             return;
         };
@@ -587,18 +649,17 @@ impl Editor {
                 target,
                 path,
                 value,
-            } => match self
-                .scene
-                .edit(|edit| edit.set_property(&target, &path, &value))
-            {
-                Ok((_, delta)) => {
-                    self.record(delta);
-                    self.apply_edit(&target);
-                }
-                Err(error) => self.error = Some(error),
-            },
-            Message::Import(path) => self.import(&path),
-            Message::Prefab(path) => self.prefab(&path),
+            } => self.property_edit(target, path, value),
+            Message::ImportPath(path) => self.import_path = path,
+            Message::Import => {
+                let path = self.import_path.clone();
+                self.import_model(&path);
+            }
+            Message::PrefabPath(path) => self.prefab_path = path,
+            Message::Instance => {
+                let path = self.prefab_path.clone();
+                self.add_instance(&path);
+            }
             Message::Pane(pane) => self.panels.toggle(pane),
             Message::Debug(enabled) => {
                 self.debug = enabled;
@@ -612,6 +673,15 @@ impl Editor {
             Message::Collapse(id) => {
                 self.collapsed.insert(id);
             }
+        }
+    }
+
+    fn apply_messages(&mut self, messages: impl IntoIterator<Item = Message>) {
+        for message in messages {
+            self.apply(message);
+        }
+        if !self.primary {
+            self.finish_property();
         }
     }
 
@@ -634,9 +704,7 @@ impl Editor {
             session.preview.advance(real);
             session.ui.update(logical, scale, time)
         };
-        for message in messages {
-            self.apply(message);
-        }
+        self.apply_messages(messages);
         let camera = self.orbit.view();
         let origin = self.selection_origin();
         let index = self.selected_node();
@@ -653,8 +721,8 @@ impl Editor {
             space: self.space,
             panels: self.panels,
             debug: self.debug,
-            import: &self.import,
-            prefab: &self.prefab,
+            import_path: &self.import_path,
+            prefab_path: &self.prefab_path,
             collapsed: &self.collapsed,
             camera,
             origin,
@@ -746,9 +814,8 @@ impl Editor {
         self.hover = gizmo::hit(&handles, self.pointer);
     }
 
-    fn pointer_viewport(&self, x: f32, y: f32, scale: f32) -> Option<Vec2> {
-        let point = Vec2::new(x / scale, y / scale);
-        self.viewport.contains(point).then_some(point)
+    fn pointer_viewport(&self) -> Option<Vec2> {
+        self.viewport.contains(self.pointer).then_some(self.pointer)
     }
 
     fn gizmo_point(&mut self, point: Vec2) {
@@ -776,7 +843,7 @@ impl Editor {
     }
 
     fn press(&mut self, button: MouseButton, scale: f32) {
-        let Some(point) = self.pointer_viewport(self.pointer.x, self.pointer.y, scale) else {
+        let Some(point) = self.pointer_viewport() else {
             return;
         };
         match button {
@@ -840,8 +907,8 @@ impl Editor {
         }
     }
 
-    fn moved(&mut self, delta: Vec2, scale: f32) {
-        let Some(point) = self.pointer_viewport(self.pointer.x, self.pointer.y, scale) else {
+    fn moved(&mut self, delta: Vec2) {
+        let Some(point) = self.pointer_viewport() else {
             return;
         };
         if let Some(button) = self.camera_drag {
@@ -856,16 +923,25 @@ impl Editor {
         }
     }
 
-    fn wheel(&mut self, delta: f32, scale: f32) {
-        if self
-            .pointer_viewport(self.pointer.x, self.pointer.y, scale)
-            .is_some()
-        {
+    fn wheel(&mut self, delta: f32) {
+        if self.pointer_viewport().is_some() {
             self.orbit.zoom(delta);
         }
     }
 
-    fn shortcut(&mut self, key: Key, scale: f32) -> bool {
+    fn key(&mut self, key: Key, repeat: bool) {
+        if repeat
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.ui.claims_key(key))
+        {
+            return;
+        }
+        self.shortcut(key);
+    }
+
+    fn shortcut(&mut self, key: Key) {
         let command = self.modifiers.control_key() || self.modifiers.super_key();
         match key {
             Key::Character('s') if command => self.apply(Message::Save),
@@ -890,12 +966,56 @@ impl Editor {
             Key::Character('q') => self.apply(Message::ToggleSpace),
             Key::Character('f') => self.apply(Message::Focus),
             Key::Delete => self.apply(Message::Remove),
-            _ => {
-                let _ = scale;
-                return false;
-            }
+            _ => {}
         }
-        true
+    }
+
+    fn handle(&mut self, event: &Event, scale: f32, size: (u32, u32)) {
+        match event {
+            Event::Modifiers(state) => self.modifiers = *state,
+            Event::Resized { .. } | Event::ScaleFactorChanged { .. } => {
+                if let Some(session) = &mut self.session {
+                    session.surface.resize(size.0, size.1);
+                }
+            }
+            Event::Key {
+                code,
+                pressed: true,
+                repeat,
+                ..
+            } => {
+                if let Some(key) = shortcut_key(*code) {
+                    self.key(key, *repeat);
+                }
+            }
+            Event::Key { pressed: false, .. } => {}
+            Event::CursorMoved { x, y } => {
+                let point = Vec2::new(*x / scale, *y / scale);
+                let delta = point - self.pointer;
+                self.pointer = point;
+                self.moved(delta);
+            }
+            Event::Button { button, pressed } => {
+                if *button == MouseButton::Left {
+                    self.primary = *pressed;
+                }
+                if *pressed {
+                    self.press(*button, scale);
+                } else {
+                    self.release(*button);
+                }
+            }
+            Event::Wheel { lines, pixels } => {
+                let delta = if *pixels != [0.0; 2] {
+                    -pixels[1] / scale
+                } else {
+                    -lines[1] * 40.0
+                };
+                self.wheel(delta);
+            }
+            Event::Focused(false) | Event::CursorLeft => self.interrupt(),
+            Event::Focused(true) => {}
+        }
     }
 }
 
@@ -926,51 +1046,7 @@ impl Handler for Editor {
 
     fn event(&mut self, window: &Window, event: Event) {
         let scale = window.scale_factor() as f32;
-        match &event {
-            Event::Modifiers(state) => self.modifiers = *state,
-            Event::Resized { .. } | Event::ScaleFactorChanged { .. } => {
-                let (width, height) = window.size();
-                if let Some(session) = &mut self.session {
-                    session.surface.resize(width, height);
-                }
-            }
-            Event::Key {
-                code,
-                pressed: true,
-                ..
-            } => {
-                if let Some(key) = shortcut_key(*code)
-                    && !self
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.ui.claims_key(key))
-                {
-                    self.shortcut(key, scale);
-                }
-            }
-            Event::CursorMoved { x, y } => {
-                let point = Vec2::new(*x / scale, *y / scale);
-                let delta = point - self.pointer;
-                self.pointer = point;
-                self.moved(delta, scale);
-            }
-            Event::Button { button, pressed } => {
-                if *pressed {
-                    self.press(*button, scale);
-                } else {
-                    self.release(*button);
-                }
-            }
-            Event::Wheel { lines, pixels } => {
-                let delta = if pixels[1] != 0.0 {
-                    -pixels[1] / scale
-                } else {
-                    -lines[1] * 40.0
-                };
-                self.wheel(delta, scale);
-            }
-            _ => {}
-        }
+        self.handle(&event, scale, window.size());
         if let Some(session) = &mut self.session {
             session.ui.input_mut().window(&event, scale);
         }
@@ -1052,5 +1128,190 @@ fn unique_asset(scene: &Scene, kind: &str, name: &str) -> String {
             return candidate;
         }
         index += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIZE: (u32, u32) = (800, 600);
+
+    fn editor() -> Editor {
+        Editor::new(EditorConfig {
+            scene: PathBuf::from("belfry-editor-test-scene-that-does-not-exist.toml"),
+            ..EditorConfig::default()
+        })
+    }
+
+    fn key(code: KeyCode, repeat: bool) -> Event {
+        Event::Key {
+            code,
+            character: None,
+            pressed: true,
+            repeat,
+            text: None,
+        }
+    }
+
+    fn button(pressed: bool) -> Event {
+        Event::Button {
+            button: MouseButton::Left,
+            pressed,
+        }
+    }
+
+    fn cursor(position: Vec2, scale: f32) -> Event {
+        Event::CursorMoved {
+            x: position.x * scale,
+            y: position.y * scale,
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_press_removes_one_node() {
+        let mut editor = editor();
+        let parent = editor
+            .scene
+            .nodes()
+            .first()
+            .map(|node| node.id.clone())
+            .expect("the editor builds a scene");
+        let child = editor.scene.child_id(&parent, "child");
+        editor
+            .scene
+            .edit(|edit| edit.insert_child(&parent, Node::new(child.clone())))
+            .expect("the scene gains a child");
+        editor.selected = Some(Target::Node(child.clone()));
+        let held = editor.scene.nodes().len();
+
+        editor.handle(&key(KeyCode::Delete, false), 1.0, SIZE);
+        assert!(
+            editor.scene.node_index(&child).is_none(),
+            "a delete removes the selected node once",
+        );
+        assert_eq!(editor.selected, Some(Target::Node(parent.clone())));
+
+        editor.handle(&key(KeyCode::Delete, true), 1.0, SIZE);
+        editor.handle(&key(KeyCode::Delete, true), 1.0, SIZE);
+        assert_eq!(
+            editor.scene.nodes().len(),
+            held - 1,
+            "a held key removes no second node",
+        );
+        assert!(editor.scene.node_index(&parent).is_some());
+        assert_eq!(editor.selected, Some(Target::Node(parent)));
+    }
+
+    #[test]
+    fn a_gizmo_drag_follows_the_logical_pointer_and_ends_when_focus_leaves() {
+        let mut editor = editor();
+        editor.viewport = Rect::from_min_size(Vec2::ZERO, Vec2::new(800.0, 600.0));
+        let index = editor.selected_node().expect("the editor starts on a node");
+        let before = editor.scene.world_transform(index).translation;
+        let target = editor.target();
+        let handles = target.handles(before, editor.basis(index), editor.mode);
+        let grip = Grip::Axis(gizmo::Axis::X);
+        let grab = (0..600u32)
+            .flat_map(|y| (0..800u32).map(move |x| Vec2::new(x as f32 + 0.5, y as f32 + 0.5)))
+            .find(|point| gizmo::hit(&handles, *point) == Some(grip))
+            .expect("the translate gizmo draws a grabbable x axis");
+        let handle = handles
+            .iter()
+            .find(|handle| handle.grip == grip)
+            .expect("the gizmo holds the handle it draws");
+        let local = editor.scene.transform(index);
+        let parent = editor
+            .scene
+            .parent_index(index)
+            .map_or(Transform::IDENTITY, |at| editor.scene.world_transform(at));
+        let reference = gizmo::begin(target, handle, editor.mode, local, parent, grab);
+        let step = Vec2::new(36.0, -18.0);
+        let expected = reference.transform(grab + step).translation;
+
+        editor.handle(&cursor(grab, 2.0), 2.0, SIZE);
+        editor.handle(&button(true), 2.0, SIZE);
+        assert!(
+            editor.drag.is_some(),
+            "a hi-dpi press grabs the handle under the pointer",
+        );
+        editor.handle(&cursor(grab + step, 2.0), 2.0, SIZE);
+        let dragged = editor.scene.world_transform(index).translation;
+        assert!(
+            (dragged - expected).length() < 1.0e-4,
+            "the drag travels the logical pointer distance",
+        );
+
+        editor.handle(&Event::Focused(false), 2.0, SIZE);
+        assert!(editor.drag.is_none(), "a lost focus ends the drag");
+        assert!(editor.camera_drag.is_none());
+        editor.handle(&cursor(grab + step + step, 2.0), 2.0, SIZE);
+        assert_eq!(
+            editor.scene.world_transform(index).translation,
+            dragged,
+            "a drag without a held button moves nothing",
+        );
+
+        editor.undo();
+        assert_eq!(
+            editor.scene.world_transform(index).translation,
+            before,
+            "the interrupted drag keeps its delta in the history",
+        );
+        editor.undo();
+        assert_eq!(
+            editor.scene.world_transform(index).translation,
+            before,
+            "the interrupted drag records a single step",
+        );
+    }
+
+    #[test]
+    fn a_property_drag_records_one_history_step() {
+        let mut editor = editor();
+        let target = editor.selected.clone().expect("the editor starts selected");
+        let index = editor.selected_node().expect("the editor starts on a node");
+        let before = editor.scene.transform(index).translation;
+
+        editor.handle(&button(true), 1.0, SIZE);
+        editor.apply_messages((1..=4).map(|step| Message::Property {
+            target: target.clone(),
+            path: String::from("transform.translation.x"),
+            value: Value::Number(step as f32),
+        }));
+        editor.handle(&button(false), 1.0, SIZE);
+        editor.apply_messages(Vec::new());
+        assert_eq!(editor.scene.transform(index).translation.x, 4.0);
+
+        editor.undo();
+        assert_eq!(
+            editor.scene.transform(index).translation,
+            before,
+            "a property drag lands in the history as one step",
+        );
+        editor.undo();
+        assert_eq!(editor.scene.transform(index).translation, before);
+    }
+
+    #[test]
+    fn the_library_keeps_the_paths_its_actions_run() {
+        let mut editor = editor();
+        editor.apply(Message::ImportPath(String::from("models/missing.glb")));
+        assert_eq!(editor.import_path, "models/missing.glb");
+        editor.apply(Message::Import);
+        assert_eq!(
+            editor.import_path, "models/missing.glb",
+            "an import keeps the path it runs",
+        );
+        assert!(editor.error.is_some());
+
+        editor.apply(Message::PrefabPath(String::from("prefabs/missing.toml")));
+        assert_eq!(editor.prefab_path, "prefabs/missing.toml");
+        editor.apply(Message::Instance);
+        assert_eq!(
+            editor.prefab_path, "prefabs/missing.toml",
+            "an instance keeps the path it runs",
+        );
+        assert!(editor.error.is_some());
     }
 }

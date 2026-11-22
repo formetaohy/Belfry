@@ -257,7 +257,7 @@ fn a_headless_run_steps_its_fixed_schedule() {
 }
 
 #[test]
-fn a_headless_run_reloads_a_changed_prefab() {
+fn a_headless_run_follows_a_changed_prefab_and_keeps_the_last_good_scene() {
     let root = directory("watch");
     let scene = root.join("scene.toml");
     let prefab = root.join("prop.toml");
@@ -271,55 +271,21 @@ fn a_headless_run_reloads_a_changed_prefab() {
         audio: false,
         ..Default::default()
     });
-    let mut written = false;
+    let mut frame = 0;
     app.add_system(move |_: &mut World| {
-        if !written {
-            written = true;
+        frame += 1;
+        if frame == 1 {
             fs::write(&prefab, WATCH_PREFAB_EXTENDED)
-                .expect("a headless system rewrites the prefab");
+                .expect("a headless system extends the prefab");
         }
-    });
-    app.run_headless(HeadlessConfig {
-        width: 32,
-        height: 32,
-        frames: Some(6),
-        realtime: false,
-        screenshot: false,
-    });
-
-    let ids = node_ids(app.world());
-    assert!(ids.iter().any(|id| id == "prop_body"));
-    assert!(ids.iter().any(|id| id == "prop_extra"));
-    assert!(app.reload_error().is_none());
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn a_headless_run_keeps_its_scene_when_a_prefab_breaks() {
-    let root = directory("watch-broken");
-    let scene = root.join("scene.toml");
-    let prefab = root.join("prop.toml");
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).expect("a headless test opens its directory");
-    fs::write(&scene, WATCH_SCENE).expect("a headless test writes its scene");
-    fs::write(&prefab, WATCH_PREFAB).expect("a headless test writes its prefab");
-
-    let mut app = App::with_config(AppConfig {
-        scene: Some(scene),
-        audio: false,
-        ..Default::default()
-    });
-    let mut written = false;
-    app.add_system(move |_: &mut World| {
-        if !written {
-            written = true;
+        if frame == 3 {
             fs::write(&prefab, WATCH_BROKEN).expect("a headless system breaks the prefab");
         }
     });
     app.run_headless(HeadlessConfig {
         width: 32,
         height: 32,
-        frames: Some(6),
+        frames: Some(8),
         realtime: false,
         screenshot: false,
     });
@@ -327,9 +293,17 @@ fn a_headless_run_keeps_its_scene_when_a_prefab_breaks() {
     let ids = node_ids(app.world());
     assert!(ids.iter().any(|id| id == "prop_body"));
     assert!(
+        ids.iter().any(|id| id == "prop_extra"),
+        "a reload follows the prefab it changed",
+    );
+    assert!(
         app.reload_error()
             .is_some_and(|error| error.starts_with("reload: ")),
         "a broken prefab reports its reload error",
+    );
+    assert!(
+        ids.iter().any(|id| id == "prop_body") && ids.iter().any(|id| id == "prop_extra"),
+        "a broken prefab keeps the scene it last installed",
     );
     let _ = fs::remove_dir_all(&root);
 }

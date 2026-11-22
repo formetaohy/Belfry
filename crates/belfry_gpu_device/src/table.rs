@@ -63,6 +63,7 @@ impl TextureTable {
         for index in self.indices().collect::<Vec<_>>() {
             self.fill(index, fallback);
         }
+        self.occupied.fill(false);
         self.free.clear();
         self.grown = 0;
         self.filled = 0;
@@ -227,6 +228,7 @@ impl SamplerTable {
         for index in self.indices().collect::<Vec<_>>() {
             self.fill(index, fallback);
         }
+        self.occupied.fill(false);
         self.free.clear();
         self.grown = 0;
         self.filled = 0;

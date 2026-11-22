@@ -745,6 +745,8 @@ pub fn measure_leaf(
             let width = match layout.size.width {
                 Length::Fixed(value) => value,
                 Length::Fill => available.x,
+                Length::Auto if bounded => span,
+                Length::Auto => text_layout.size.x,
                 _ => {
                     if matches!(style.align, Align::Start | Align::Baseline) || available.x <= 0.0 {
                         text_layout.size.x
@@ -764,5 +766,54 @@ pub fn measure_leaf(
             None,
         ),
         other => crate::widget::measure(other, layout, available, text, theme),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::content::TextContent;
+    use crate::element::{Layout, Size};
+    use crate::text::TextStyle;
+    use crate::theme::{Level, Theme};
+
+    #[test]
+    fn a_wrapped_label_measures_the_width_it_paints() {
+        let mut text = Text::new();
+        let theme = Theme::dark();
+        let style = TextStyle::new(theme.font(Level::Body), Color::WHITE).wrapping();
+        let label = "hi supercalifragilisticexpialidocious and more words here";
+        let available = Vec2::new(100.0, 400.0);
+        let content = Content::Text(TextContent {
+            text: String::from(label),
+            style,
+        });
+        let (size, _) = measure_leaf(
+            &content,
+            Layout {
+                size: Size::AUTO,
+                ..Layout::row()
+            },
+            available,
+            &mut text,
+            &theme,
+        );
+        let painted = text.layout(
+            label,
+            style.font,
+            size.x,
+            style.wrap,
+            style.truncate,
+            style.align,
+        );
+        assert_eq!(
+            painted.size.y, size.y,
+            "the label paints the layout that measured it",
+        );
+        assert!(
+            size.y > theme.font(Level::Body).leading,
+            "the label wraps across the width it measures",
+        );
     }
 }

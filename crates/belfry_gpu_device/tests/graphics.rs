@@ -10,8 +10,10 @@ mod quad {
     #[vertex]
     fn vertex(vertex: u32, vertices: Read<f32>, position: Out<Position>, uv: Out<Fvec2>) {
         let base = vertex * 5u32;
+        let corner = fvec4(vertices[base + 3u32], vertices[base + 4u32], 0.0, 0.0);
+        let scaled = 2.0 * corner * 0.5;
         position = fvec4(vertices[base], vertices[base + 1u32], 0.0, 1.0);
-        uv = fvec2(vertices[base + 3u32], vertices[base + 4u32]);
+        uv = fvec2(scaled.x, scaled.y);
     }
 
     #[fragment]

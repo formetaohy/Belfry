@@ -268,21 +268,25 @@ impl FunctionLower<'_> {
         expr: &ast::Expression,
         hint: Option<TypeId>,
     ) -> Typed {
+        let value = self.value_of(expr, hint);
+        if let Some(ty) = hint {
+            assert_eq!(value.ty, ty, "device operand has a different type");
+        }
+        value
+    }
+
+    fn value_of(&mut self, expr: &ast::Expression, hint: Option<TypeId>) -> Typed {
         use crate::ast::Expression as E;
         if matches!(expr, E::Name(_) | E::Field { .. } | E::Index { .. })
             && let Some(place) = self.place(expr)
         {
             let ty = self.compiler.module().loaded_ty(place.ty);
-            let loaded = self.emit(ty, |result| DeviceInstruction::Load {
+            return self.emit(ty, |result| DeviceInstruction::Load {
                 pointer: place.value,
                 result,
             });
-            if let Some(ty) = hint {
-                assert_eq!(loaded.ty, ty, "device operand has a different type");
-            }
-            return loaded;
         }
-        let value = match expr {
+        match expr {
             E::Integer { value, ty } => self.literal(*value, *ty, hint),
             E::Float(value) => {
                 let ty = self.compiler.scalar("f32");
@@ -354,11 +358,7 @@ impl FunctionLower<'_> {
                 })
             }
             E::Reference(_) => panic!("a device reference is only passed to an atomic store"),
-        };
-        if let Some(ty) = hint {
-            assert_eq!(value.ty, ty, "device operand has a different type");
         }
-        value
     }
 
     pub(super) fn scalar_of(&self, ty: TypeId) -> Scalar {
@@ -367,6 +367,20 @@ impl FunctionLower<'_> {
             .ty(ty)
             .scalar()
             .unwrap_or_else(|| panic!("a device operand is not a scalar"))
+    }
+
+    fn lanes(&self, ty: TypeId) -> u32 {
+        match self.compiler.module().ty(ty) {
+            Type::Vector { length, .. } => *length,
+            _ => 1,
+        }
+    }
+
+    fn vector_element(&self, ty: TypeId) -> Option<TypeId> {
+        match self.compiler.module().ty(ty) {
+            Type::Vector { scalar, .. } => self.compiler.module().scalar_type(*scalar),
+            _ => None,
+        }
     }
 
     pub(super) fn evaluate_u32(&self, expr: &ast::Expression) -> Option<u32> {
@@ -463,10 +477,8 @@ impl FunctionLower<'_> {
             });
         }
         let left = self.value(left);
-        let right = if op == BinaryOp::Multiply
-            && matches!(self.compiler.module().ty(left.ty), Type::Vector { .. })
-        {
-            self.value(right)
+        let right = if op == BinaryOp::Multiply {
+            self.factor(right, left.ty)
         } else if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
             self.value_with_hint(right, Some(self.compiler.scalar("u32")))
         } else {
@@ -474,6 +486,8 @@ impl FunctionLower<'_> {
         };
         let ty = if op.comparison() {
             self.compiler.scalar("bool")
+        } else if op == BinaryOp::Multiply && self.lanes(right.ty) > self.lanes(left.ty) {
+            right.ty
         } else {
             left.ty
         };
@@ -483,6 +497,20 @@ impl FunctionLower<'_> {
             right: right.value,
             result,
         })
+    }
+
+    fn factor(&mut self, expr: &ast::Expression, left: TypeId) -> Typed {
+        if self.lanes(left) > 1 {
+            return self.value(expr);
+        }
+        let factor = self.value_of(expr, Some(left));
+        assert!(
+            factor.ty == left || self.vector_element(factor.ty) == Some(left),
+            "a device product scales a {} by a {}",
+            crate::shader::element_name(self.compiler.module().ty(left)),
+            crate::shader::element_name(self.compiler.module().ty(factor.ty)),
+        );
+        factor
     }
 
     pub(super) fn reference(&mut self, argument: &ast::Expression, subject: &str) -> Typed {

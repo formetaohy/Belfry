@@ -51,7 +51,7 @@ scale = [1.0, 1.0, 1.0]
 "#;
 
 #[test]
-fn a_reverted_edit_returns_the_scene_it_edited() {
+fn an_edit_transaction_returns_the_scene_it_edited() {
     let root = directory("edit_revert");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("a test opens its directory");
@@ -96,13 +96,7 @@ fn a_reverted_edit_returns_the_scene_it_edited() {
     );
     delta.revert(&mut scene);
     assert_eq!(scene.write(), before);
-    let _ = fs::remove_dir_all(&root);
-}
 
-#[test]
-fn an_edit_that_fails_returns_the_scene_it_edited() {
-    let mut scene = Scene::parse(INSTANCE_PLAIN, ".", "a plain scene");
-    let before = scene.write();
     let failed = scene.edit(|edit| {
         edit.add_mesh("extra", Shape::Cube)?;
         edit.add_node("holder")?;
@@ -124,9 +118,14 @@ fn an_edit_that_fails_returns_the_scene_it_edited() {
     let (_, delta) = scene
         .edit(|edit| edit.add_mesh("extra", Shape::Cube))
         .expect("a mesh joins the scene");
-    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(
+        scene.meshes().len(),
+        2,
+        "the scene holds the mesh of its prefab and the mesh it added",
+    );
     delta.revert(&mut scene);
-    assert!(scene.meshes().is_empty(), "an undone mesh leaves the scene");
+    assert_eq!(scene.meshes().len(), 1, "an undone mesh leaves the scene");
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -169,26 +168,45 @@ fn an_unpacked_instance_keeps_the_nodes_and_assets_it_materialized() {
         "no instance survives unpacking"
     );
     assert_eq!(
-        Scene::parse(&written, ".", "the unpacked scene"),
+        Scene::parse(&written, &root, "the unpacked scene"),
         scene,
         "the unpacked scene stands on its own",
     );
     let _ = fs::remove_dir_all(&root);
 }
 
-const INSTANCE_PLAIN: &str = r#"format = "belfry_scene"
+const OVERRIDING: &str = r#"format = "belfry_scene"
 images = []
 meshes = []
 materials = []
 
 [[nodes]]
-id = "root"
+id = "prop"
+prefab = "prop.toml"
 
 [nodes.transform]
 translation = [0.0, 0.0, 0.0]
 rotation = [0.0, 0.0, 0.0, 1.0]
 scale = [1.0, 1.0, 1.0]
+
+[[nodes.overrides]]
+node = "ghost"
+path = "transform.translation"
+value = [1.0, 2.0, 3.0]
 "#;
+
+#[test]
+#[should_panic(
+    expected = "the prefab instance prop overrides transform.translation of ghost, which it does not hold"
+)]
+fn an_override_of_a_node_the_instance_lacks_is_refused() {
+    let root = directory("edit_override");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("a test opens its directory");
+    fs::write(root.join("prop.toml"), PROP).expect("a test writes its prefab");
+    fs::write(root.join("scene.toml"), OVERRIDING).expect("a test writes its scene");
+    Scene::load(root.join("scene.toml"));
+}
 
 fn directory(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("belfry_scene_{name}_{}", std::process::id()))

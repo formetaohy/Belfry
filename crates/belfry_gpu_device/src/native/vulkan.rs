@@ -1,7 +1,7 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeFrame,
     NativeGraphicsPipeline, NativeGroup, NativePipeline, NativePresent, NativeTexture,
-    STAGING_BYTES, TIME_SLOTS, hang_deadline,
+    STAGING_BYTES, TIME_SLOTS, TRANSFER_ALIGNMENT, hang_deadline,
 };
 use crate::backend::Backend;
 use crate::buffer::GpuBuffer;
@@ -593,12 +593,15 @@ impl Frame {
         self.resources.clear();
     }
 
-    fn stage(&mut self, device: &Device, bytes: &[u8]) -> (vk::Buffer, u64) {
+    fn stage(&mut self, device: &Device, bytes: &[u8], alignment: u64) -> (vk::Buffer, u64) {
         let size = bytes.len() as u64;
-        let (staging, offset) = if size <= STAGING_BYTES - self.cursor {
-            let offset = self.cursor;
-            self.cursor += size;
-            (self.staging.clone(), offset)
+        let aligned = self.cursor.next_multiple_of(alignment);
+        let (staging, offset) = if STAGING_BYTES
+            .checked_sub(aligned)
+            .is_some_and(|free| size <= free)
+        {
+            self.cursor = aligned + size;
+            (self.staging.clone(), aligned)
         } else {
             let staging = device.allocate(size, vk::BufferUsageFlags::TRANSFER_SRC, true);
             self.resources.push(staging.clone());
@@ -2511,7 +2514,7 @@ impl Device {
                 ),
             );
             pending.flush(&self.raw, command);
-            let (staging, offset) = frame.stage(self, &write.bytes);
+            let (staging, offset) = frame.stage(self, &write.bytes, TRANSFER_ALIGNMENT);
             let region = [vk::BufferCopy::default()
                 .src_offset(offset)
                 .dst_offset(write.offset)
@@ -2754,7 +2757,12 @@ impl Device {
                     bytes,
                 } => {
                     let texture = native_texture(texture.native());
-                    let (staging, offset) = frame.stage(self, bytes);
+                    let texel = u64::from(texture.format.bytes_per_texel());
+                    let (staging, offset) = frame.stage(self, bytes, texel.max(TRANSFER_ALIGNMENT));
+                    assert!(
+                        offset.is_multiple_of(texel),
+                        "a texture copy reads the staging buffer at {offset}, which is no multiple of its {texel} byte texel block",
+                    );
                     pending.transition(
                         accesses,
                         texture,
@@ -2765,7 +2773,6 @@ impl Device {
                     pending.flush(&self.raw, command);
                     let width = (texture.width >> level).max(1);
                     let height = (texture.height >> level).max(1);
-                    let texel = u64::from(texture.format.bytes_per_texel());
                     let row = u64::from(width) * texel;
                     let stride = row.div_ceil(256) * 256;
                     let regions = [vk::BufferImageCopy::default()

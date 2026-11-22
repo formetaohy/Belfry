@@ -268,6 +268,12 @@ impl AnimationGraph {
             )
         });
         assert!(
+            from != to,
+            "the animation graph {} transitions from {} to itself",
+            self.name,
+            transition.from,
+        );
+        assert!(
             transition.fade.is_finite() && transition.fade >= 0.0,
             "the animation transition {} to {} fades over {}",
             transition.from,

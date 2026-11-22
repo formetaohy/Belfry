@@ -287,12 +287,14 @@ pub(crate) fn apply_overrides(edit: &mut Edit<'_>, candidates: impl IntoIterator
     for (_, marker) in markers {
         let marker_id = edit.nodes()[marker].id.clone();
         let overrides = edit.nodes()[marker].overrides().to_vec();
-        let mut applied = Vec::new();
         for entry in overrides {
             let id = format!("{marker_id}_{}", entry.node);
-            let Some(index) = edit.node_index(&id) else {
-                continue;
-            };
+            let index = edit.node_index(&id).unwrap_or_else(|| {
+                panic!(
+                    "the prefab instance {marker_id} overrides {} of {}, which it does not hold",
+                    entry.path, entry.node,
+                )
+            });
             edit.apply_override(index, &entry.path, &entry.value)
                 .unwrap_or_else(|error| {
                     panic!(
@@ -300,13 +302,7 @@ pub(crate) fn apply_overrides(edit: &mut Edit<'_>, candidates: impl IntoIterator
                         entry.path, entry.node,
                     )
                 });
-            applied.push(entry);
         }
-        edit.change_node(marker, |node, _| {
-            node.overrides = applied;
-            Ok(())
-        })
-        .expect("a prefab instance keeps the overrides it applies");
     }
 }
 

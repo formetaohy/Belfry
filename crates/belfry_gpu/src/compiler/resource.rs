@@ -154,6 +154,14 @@ impl Mul<f32> for Fvec4 {
     }
 }
 
+impl Mul<Fvec4> for f32 {
+    type Output = Fvec4;
+
+    fn mul(self, _vector: Fvec4) -> Fvec4 {
+        unreachable!("a device vector exists only on the device")
+    }
+}
+
 impl Mul for Fvec4 {
     type Output = Self;
 

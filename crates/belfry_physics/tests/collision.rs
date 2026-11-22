@@ -183,6 +183,42 @@ fn a_sensor_ignores_a_layer_outside_its_mask() {
     );
 }
 
+#[test]
+fn a_sensor_reports_a_kinematic_body_it_meets() {
+    let mut world = world();
+    let trigger = spawn(
+        &mut world,
+        Vec3::new(0.0, 1.0, 0.0),
+        Shape::cuboid(Vec3::splat(1.0)),
+        BodyKind::Static,
+    );
+    world
+        .get_mut::<Collider>(trigger)
+        .expect("the trigger holds a collider")
+        .set_sensor(true);
+    let gate = spawn(
+        &mut world,
+        Vec3::new(4.0, 1.0, 0.0),
+        Shape::cuboid(Vec3::splat(0.5)),
+        BodyKind::Kinematic,
+    );
+    world
+        .get_mut::<RigidBody>(gate)
+        .expect("the gate holds a body")
+        .set_linear_velocity(Vec3::new(-4.0, 0.0, 0.0));
+    let mut begun = false;
+    for _ in 0..120 {
+        step(&mut world, DELTA);
+        begun |= events(&world)
+            .iter()
+            .any(|event| event.sensor && event.phase == CollisionPhase::Begin);
+    }
+    assert!(
+        begun,
+        "a sensor reports the kinematic gate that passes through it",
+    );
+}
+
 fn set_filter(world: &mut World, entity: Entity, filter: CollisionFilter) {
     let mut collider = world
         .get::<Collider>(entity)
