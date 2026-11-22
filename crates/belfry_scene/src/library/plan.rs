@@ -20,12 +20,11 @@ pub(super) fn plan(job: Job) -> Prepared {
         fingerprints,
         textures: cached_textures,
         sources,
-        models,
         environment_cache,
     } = job;
     let mut errors = Vec::new();
     let mut files = BTreeSet::new();
-    let mut prepare = Prepare::new(&scene, sources, models);
+    let mut prepare = Prepare::new(&scene, sources);
     let collided = collided_meshes(&scene);
 
     let mut effective_images = HashMap::new();
@@ -396,7 +395,6 @@ pub(super) fn plan(job: Job) -> Prepared {
         || !environments.is_empty();
     let applied = !errors.iter().any(|error| error.fatal);
 
-    prepare.models.retain();
     let mut prepared = Prepared {
         applied,
         changed: applied && changed,
@@ -412,7 +410,6 @@ pub(super) fn plan(job: Job) -> Prepared {
         changed_images: HashSet::new(),
         removed: Removed::default(),
         sources: prepare.sources,
-        models: prepare.models.take_cache(),
         files,
     };
     if !applied {

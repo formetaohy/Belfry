@@ -6,6 +6,7 @@ use crate::material::{MaterialAsset, MaterialEntry};
 use crate::mesh::{MeshAsset, MeshEntry};
 use crate::model::ModelEntry;
 use crate::node::{InstanceOverride, Node};
+use crate::nodes::Nodes;
 use crate::reference::{ImageId, ModelId, NodeId};
 use crate::registry::Registry;
 use crate::scene::{FORMAT, Scene};
@@ -82,7 +83,7 @@ pub(crate) fn document(text: &str, root: PathBuf, what: &str, registry: Arc<Regi
         skins,
         animations,
         graphs,
-        nodes,
+        nodes: Nodes::from(nodes),
     }
 }
 

@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ModelSources {
     pub buffers: Vec<PathBuf>,
     pub images: Vec<PathBuf>,
@@ -65,59 +65,46 @@ impl Model {
         Self::parse(&bytes, path)
     }
 
-    pub fn sources(path: impl AsRef<Path>) -> ModelSources {
+    pub fn sources(path: impl AsRef<Path>) -> Result<ModelSources, String> {
         let path = path.as_ref();
         let what = format!("the model {}", path.display());
-        let empty = || ModelSources {
-            buffers: Vec::new(),
-            images: Vec::new(),
-        };
-        let Ok(bytes) = fs::read(path) else {
-            return empty();
-        };
-        let parsed = std::panic::catch_unwind(|| {
-            let container = Container::read(&bytes, &what);
-            let document: Document = serde_json::from_slice(&container.json)
-                .unwrap_or_else(|error| panic!("{what} holds no glTF text: {error}"));
-            let base = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            let mut buffers = Vec::new();
-            for buffer in &document.buffers {
-                if let Some(uri) = &buffer.uri
-                    && let Some(source) = uri::path(uri, base, &what)
-                {
-                    buffers.push(source);
-                }
+        let bytes = fs::read(path).map_err(|error| format!("{what} reads no bytes: {error}"))?;
+        let container = Container::open(&bytes).map_err(|error| format!("{what} {error}"))?;
+        let document: Document = serde_json::from_slice(&container.json)
+            .map_err(|error| format!("{what} holds no glTF text: {error}"))?;
+        let base = base_of(path);
+        let mut buffers = Vec::new();
+        for buffer in &document.buffers {
+            if let Some(uri) = &buffer.uri
+                && let Some(source) =
+                    uri::path(uri, base).map_err(|error| format!("{what} {error}"))?
+            {
+                buffers.push(source);
             }
-            let mut images = Vec::new();
-            for image in &document.images {
-                if let Some(uri) = &image.uri
-                    && let Some(source) = uri::path(uri, base, &what)
-                {
-                    images.push(source);
-                }
+        }
+        let mut images = Vec::new();
+        for image in &document.images {
+            if let Some(uri) = &image.uri
+                && let Some(source) =
+                    uri::path(uri, base).map_err(|error| format!("{what} {error}"))?
+            {
+                images.push(source);
             }
-            buffers.sort();
-            buffers.dedup();
-            images.sort();
-            images.dedup();
-            ModelSources { buffers, images }
-        });
-        parsed.unwrap_or_else(|_| empty())
+        }
+        buffers.sort();
+        buffers.dedup();
+        images.sort();
+        images.dedup();
+        Ok(ModelSources { buffers, images })
     }
 
     pub fn parse(bytes: &[u8], path: &Path) -> Self {
         let what = format!("the model {}", path.display());
-        let container = Container::read(bytes, &what);
+        let container = Container::open(bytes).unwrap_or_else(|error| panic!("{what} {error}"));
         let document: Document = serde_json::from_slice(&container.json)
             .unwrap_or_else(|error| panic!("{what} holds no glTF text: {error}"));
         check_version(&document, &what);
-        let base = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        let base = base_of(path);
         let store = Store::new(&document, base, container.binary, &what);
         let samplers = crate::sampler::image_samplers(&document, &what);
         let images = images(&document, &store, base, &what, &samplers);
@@ -139,6 +126,12 @@ impl Model {
             roots,
         }
     }
+}
+
+fn base_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn check_version(document: &Document, what: &str) {

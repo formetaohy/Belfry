@@ -50,6 +50,34 @@ scale = [1.0, 1.0, 1.0]
 "#;
 
 #[test]
+fn a_scene_index_follows_structure_edits() {
+    let mut scene = Scene::parse(SCENE, ".", "the test scene");
+    scene.nodes_mut().push(belfry_scene::Node::new("c"));
+    let b = scene.node_index("b").expect("the scene holds b");
+    let c = scene.node_index("c").expect("the scene holds c");
+    scene.reparent(b, Some(c));
+    assert_eq!(scene.children(c).collect::<Vec<_>>(), [b]);
+    assert_eq!(scene.subtree(c), [b, c]);
+    scene
+        .remove(&Target::Node(String::from("a")))
+        .expect("the scene removes the node a");
+    for (at, node) in scene.nodes().iter().enumerate() {
+        assert_eq!(
+            scene.node_index(&node.id),
+            Some(at),
+            "the index names the slot of {}",
+            node.id,
+        );
+    }
+    assert_eq!(
+        scene
+            .children(scene.node_index("c").expect("the scene holds c"))
+            .collect::<Vec<_>>(),
+        [0],
+    );
+}
+
+#[test]
 fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
     let mut scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();

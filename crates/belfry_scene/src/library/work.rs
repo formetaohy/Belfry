@@ -1,4 +1,4 @@
-use super::prepare::{CachedModel, panic_message};
+use super::prepare::panic_message;
 use super::{AssetError, TextureKey};
 use crate::digest::Digest;
 use crate::environment::EnvironmentEntry;
@@ -27,7 +27,6 @@ pub(super) struct Job {
     pub(super) fingerprints: Fingerprints,
     pub(super) textures: HashSet<TextureKey>,
     pub(super) sources: Sources,
-    pub(super) models: HashMap<String, CachedModel>,
     pub(super) environment_cache: ArtifactCache,
 }
 
@@ -62,7 +61,6 @@ pub(super) struct Prepared {
     pub(super) changed_images: HashSet<String>,
     pub(super) removed: Removed,
     pub(super) sources: Sources,
-    pub(super) models: HashMap<String, CachedModel>,
     pub(super) files: BTreeSet<PathBuf>,
 }
 

@@ -193,11 +193,11 @@ impl Scene {
                 let created = self.registry.create(self, component)?;
                 created.validate(self, &id)?;
                 let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-                self.nodes[index].insert_component_box(created);
+                self.nodes.at_mut(index).insert_component_box(created);
                 if let Some(before) = before
                     && let Err(error) = self.check_audio_buses()
                 {
-                    self.nodes[index] = before;
+                    *self.nodes.at_mut(index) = before;
                     return Err(error);
                 }
             } else {
@@ -219,11 +219,11 @@ impl Scene {
                     }
                 }
                 let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-                self.nodes[index].remove_component(component);
+                self.nodes.at_mut(index).remove_component(component);
                 if let Some(before) = before
                     && let Err(error) = self.check_audio_buses()
                 {
-                    self.nodes[index] = before;
+                    *self.nodes.at_mut(index) = before;
                     return Err(error);
                 }
             }
@@ -237,11 +237,11 @@ impl Scene {
         let effect = next.write(field, axis, value)?;
         next.validate(self, &id)?;
         let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-        self.nodes[index].insert_component_box(next);
+        self.nodes.at_mut(index).insert_component_box(next);
         if let Some(before) = before
             && let Err(error) = self.check_audio_buses()
         {
-            self.nodes[index] = before;
+            *self.nodes.at_mut(index) = before;
             return Err(error);
         }
         Ok(effect)

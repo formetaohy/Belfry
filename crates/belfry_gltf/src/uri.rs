@@ -5,21 +5,22 @@ pub(crate) fn read(uri: &str, base: &Path, what: &str) -> Vec<u8> {
     if uri.starts_with("data:") {
         return data(uri, what);
     }
-    let path = path(uri, base, what).expect("a file URI holds a path");
+    let path = path(uri, base)
+        .unwrap_or_else(|error| panic!("{what} {error}"))
+        .expect("a file URI holds a path");
     fs::read(&path).unwrap_or_else(|error| panic!("{what} reads {}: {error}", path.display()))
 }
 
-pub(crate) fn path(uri: &str, base: &Path, what: &str) -> Option<PathBuf> {
+pub(crate) fn path(uri: &str, base: &Path) -> Result<Option<PathBuf>, String> {
     if uri.starts_with("data:") {
-        return None;
+        return Ok(None);
     }
-    let path = percent(uri, what);
-    let path = Path::new(&path);
-    assert!(
-        path.is_relative(),
-        "{what} names the absolute resource {uri}"
-    );
-    Some(base.join(path))
+    let held = percent(uri)?;
+    let path = Path::new(&held);
+    if !path.is_relative() {
+        return Err(format!("names the absolute resource {uri}"));
+    }
+    Ok(Some(base.join(path)))
 }
 
 fn data(uri: &str, what: &str) -> Vec<u8> {
@@ -58,7 +59,7 @@ fn base64(text: &str, what: &str) -> Vec<u8> {
     bytes
 }
 
-fn percent(uri: &str, what: &str) -> String {
+fn percent(uri: &str) -> Result<String, String> {
     let bytes = uri.as_bytes();
     let mut text = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -70,21 +71,21 @@ fn percent(uri: &str, what: &str) -> String {
         }
         let held = bytes
             .get(at + 1..at + 3)
-            .unwrap_or_else(|| panic!("{what} ends inside the escape of {uri}"));
-        let high = digit(held[0], what);
-        let low = digit(held[1], what);
+            .ok_or_else(|| format!("ends inside the escape of {uri}"))?;
+        let high = digit(held[0])?;
+        let low = digit(held[1])?;
         text.push(high << 4 | low);
         at += 3;
     }
-    String::from_utf8(text).unwrap_or_else(|error| panic!("{what} names no text path: {error}"))
+    String::from_utf8(text).map_err(|error| format!("names no text path: {error}"))
 }
 
-fn digit(byte: u8, what: &str) -> u8 {
+fn digit(byte: u8) -> Result<u8, String> {
     match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => panic!("{what} holds the escape digit {byte}"),
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("holds the escape digit {byte}")),
     }
 }
 

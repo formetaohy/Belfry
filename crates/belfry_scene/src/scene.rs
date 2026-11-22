@@ -9,6 +9,7 @@ use crate::material::{MaterialAsset, MaterialEntry};
 use crate::mesh::{MeshAsset, MeshEntry};
 use crate::model::ModelEntry;
 use crate::node::Node;
+use crate::nodes::Nodes;
 use crate::registry::{Assets, AudioBusRef, Registry};
 use crate::schema::ReferenceKind;
 use crate::shape::Shape;
@@ -44,7 +45,7 @@ pub struct Scene {
     pub(crate) skins: Vec<SkinEntry>,
     pub(crate) animations: Vec<AnimationEntry>,
     pub(crate) graphs: Vec<GraphEntry>,
-    pub(crate) nodes: Vec<Node>,
+    pub(crate) nodes: Nodes,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,7 +116,7 @@ impl Scene {
             skins: Vec::new(),
             animations: Vec::new(),
             graphs: Vec::new(),
-            nodes: Vec::new(),
+            nodes: Nodes::new(),
         }
     }
 
@@ -335,12 +336,12 @@ impl Scene {
         &mut self.graphs
     }
 
-    pub fn nodes_mut(&mut self) -> &mut Vec<Node> {
-        &mut self.nodes
+    pub fn nodes_mut(&mut self) -> impl std::ops::DerefMut<Target = Vec<Node>> + '_ {
+        self.nodes.mutable()
     }
 
     pub fn node_index(&self, id: &str) -> Option<usize> {
-        self.nodes.iter().position(|node| node.id == id)
+        self.nodes.index_of(id)
     }
 
     pub fn mesh_index(&self, id: &str) -> Option<usize> {
@@ -1017,16 +1018,12 @@ impl Scene {
                 self.nodes[parent].id,
             );
         }
-        self.nodes[index].parent = parent.map(|at| self.nodes[at].id.clone());
+        let id = parent.map(|at| self.nodes[at].id.clone());
+        self.nodes.reparent(index, id);
     }
 
     pub fn children(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
-        let parent = self.nodes[index].id.as_str();
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter(move |(_, node)| node.parent.as_deref() == Some(parent))
-            .map(|(at, _)| at)
+        self.nodes.children_of(index).iter().copied()
     }
 
     pub fn roots(&self) -> impl Iterator<Item = usize> + '_ {
@@ -1059,7 +1056,7 @@ impl Scene {
     pub fn set_transform(&mut self, index: usize, transform: Transform) {
         assert!(index < self.nodes.len(), "a transformed node exists");
         if self.nodes[index].owner.is_none() {
-            self.nodes[index].insert_component(transform);
+            self.nodes.at_mut(index).insert_component(transform);
             return;
         }
         let current = self.transform(index);

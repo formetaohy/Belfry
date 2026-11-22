@@ -110,6 +110,7 @@ struct LiveScene {
     assets: Library,
     sync: SceneSync,
     watch: Watch,
+    messages: Vec<String>,
     wanted: Option<Scene>,
     requested: Option<Scene>,
     renew: bool,
@@ -151,6 +152,7 @@ impl LiveScene {
             assets,
             sync,
             watch,
+            messages: Vec::new(),
             wanted,
             requested,
             renew: false,
@@ -172,18 +174,19 @@ impl LiveScene {
                 })) {
                     Ok(scene) => {
                         self.watch.renew(&scene);
+                        self.messages.extend(self.watch.errors().map(String::from));
                         self.wanted = Some(scene);
                     }
                     Err(payload) => {
-                        return Some(Reload {
-                            renew: std::mem::take(&mut self.renew),
-                            error: Some(format!("reload: {}", panic_text(payload))),
-                        });
+                        self.messages
+                            .push(format!("reload: {}", panic_text(payload)));
+                        return Some(self.reloaded());
                     }
                 }
             } else {
                 if change.model {
                     self.watch.renew(&self.scene);
+                    self.messages.extend(self.watch.errors().map(String::from));
                 }
                 self.wanted = Some(self.scene.clone());
             }
@@ -214,17 +217,17 @@ impl LiveScene {
             if self.wanted.as_ref() == failed.as_ref() {
                 self.wanted = None;
             }
-            return Some(Reload {
-                renew: std::mem::take(&mut self.renew),
-                error: Some(refresh.message()),
-            });
+            self.messages.push(refresh.message());
+            return Some(self.reloaded());
         }
         let requested = failed?;
         if self.wanted.as_ref() != Some(&requested) {
             return None;
         }
         self.wanted = None;
-        let error = (!refresh.errors.is_empty()).then(|| refresh.message());
+        if !refresh.errors.is_empty() {
+            self.messages.push(refresh.message());
+        }
         let changed = self.sync.applied().is_none() || requested != self.scene || refresh.changed;
         if changed {
             self.sync
@@ -232,15 +235,24 @@ impl LiveScene {
             self.scene = requested;
         }
         self.assets.release(renderer);
-        Some(Reload {
+        Some(self.reloaded())
+    }
+
+    fn reloaded(&mut self) -> Reload {
+        Reload {
             renew: std::mem::take(&mut self.renew),
-            error,
-        })
+            error: joined(&std::mem::take(&mut self.messages)),
+        }
     }
 
     fn rewatch(&mut self) {
         self.watch.renew(&self.scene);
+        self.messages.extend(self.watch.errors().map(String::from));
     }
+}
+
+fn joined(messages: &[String]) -> Option<String> {
+    (!messages.is_empty()).then(|| messages.join("; "))
 }
 
 fn panic_text(payload: Box<dyn Any + Send>) -> String {

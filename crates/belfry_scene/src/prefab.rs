@@ -5,6 +5,7 @@ use crate::material::MaterialEntry;
 use crate::mesh::MeshEntry;
 use crate::model::ModelEntry;
 use crate::node::Node;
+use crate::nodes::Nodes;
 use crate::registry::Registry;
 use crate::scene::{Owned, Scene};
 use crate::schema::{FieldKind, ReferenceKind};
@@ -94,7 +95,7 @@ impl Loader {
             ids,
             nodes: Vec::with_capacity(scene.nodes.len()),
         };
-        for node in std::mem::take(&mut scene.nodes) {
+        for node in scene.nodes.take() {
             let prefab = node.prefab.clone();
             materialization.nodes.push(node.clone());
             let Some(path) = prefab else {
@@ -120,7 +121,7 @@ impl Loader {
             materialization.structure(self, scene, &node);
             apply_removals(scene, &node, &mut materialization.nodes, what);
         }
-        scene.nodes = materialization.nodes;
+        scene.nodes = Nodes::from(materialization.nodes);
         apply_overrides(scene);
     }
 }
@@ -284,7 +285,7 @@ pub(crate) fn apply_overrides(scene: &mut Scene) {
                 });
             applied.push(entry);
         }
-        scene.nodes[marker].overrides = applied;
+        scene.nodes.at_mut(marker).overrides = applied;
     }
 }
 

@@ -82,7 +82,7 @@ pub struct Editor {
     pointer: Vec2,
     import: String,
     prefab: String,
-    watch: Option<Watch>,
+    watch: Watch,
     modifiers: ModifiersState,
     origin: Instant,
     hover: Option<Grip>,
@@ -132,7 +132,7 @@ impl Editor {
             pointer: Vec2::ZERO,
             import: String::new(),
             prefab: String::new(),
-            watch: Some(watch),
+            watch,
             modifiers: ModifiersState::default(),
             origin: Instant::now(),
             hover: None,
@@ -194,7 +194,7 @@ impl Editor {
 
     fn save(&mut self) {
         self.scene.save(&self.path);
-        self.watch = Some(Watch::new(&self.path, &self.scene));
+        self.rewatch();
         self.dirty = false;
         self.status = format!("Saved {}", self.path.display());
     }
@@ -208,7 +208,7 @@ impl Editor {
                 self.history.reset();
                 self.dirty = false;
                 self.status = format!("Reloaded {}", self.path.display());
-                self.watch = Some(Watch::new(&self.path, &self.scene));
+                self.rewatch();
                 self.clamp();
                 self.refresh_preview();
             }
@@ -219,10 +219,7 @@ impl Editor {
     }
 
     fn reload_if_changed(&mut self) {
-        let Some(watch) = &mut self.watch else {
-            return;
-        };
-        let Some(change) = watch.changed() else {
+        let Some(change) = self.watch.changed() else {
             return;
         };
         if change.scene {
@@ -240,7 +237,15 @@ impl Editor {
         } else if change.model {
             self.refresh_preview();
         }
-        self.watch = Some(Watch::new(&self.path, &self.scene));
+        self.rewatch();
+    }
+
+    fn rewatch(&mut self) {
+        self.watch.renew(&self.scene);
+        let errors = self.watch.errors().collect::<Vec<_>>();
+        if !errors.is_empty() {
+            self.error = Some(errors.join("; "));
+        }
     }
 
     fn clamp(&mut self) {

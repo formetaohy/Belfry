@@ -1,4 +1,5 @@
 use crate::digest::Digest;
+use belfry_gltf::{Model, ModelSources};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,43 +11,36 @@ struct Stamp {
     modified: Option<SystemTime>,
 }
 
-#[derive(Clone)]
-struct Held {
-    stamp: Option<Stamp>,
-    state: Result<Digest, String>,
+#[derive(Clone, Default)]
+pub struct Dependencies {
+    attempted: Option<Digest>,
+    sources: ModelSources,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
+struct Held {
+    stamp: Option<Stamp>,
+    digest: Result<Digest, String>,
+    dependencies: Dependencies,
+}
+
+#[derive(Clone, Default)]
 pub struct Sources {
     files: BTreeMap<PathBuf, Held>,
 }
 
 impl Sources {
     pub fn new() -> Self {
-        Self {
-            files: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn digest(&mut self, path: &Path) -> Result<Digest, String> {
-        let stamp = stamp_of(path);
-        if let Some(held) = self.files.get(path)
-            && held.stamp == stamp
-        {
-            return held.state.clone();
-        }
-        let state = read_digest(path);
-        self.files.insert(
-            path.to_path_buf(),
-            Held {
-                stamp,
-                state: state.clone(),
-            },
-        );
-        state
+        self.current(path).digest.clone()
     }
 
     pub fn read(&mut self, path: &Path) -> Result<(Digest, Vec<u8>), String> {
+        let stamp = stamp_of(path);
         let bytes = fs::read(path).map_err(|error| {
             format!(
                 "the asset source {} reads no bytes: {error}",
@@ -54,24 +48,91 @@ impl Sources {
             )
         })?;
         let digest = Digest::of(&bytes);
+        let dependencies = self.dependencies_of(path);
         self.files.insert(
             path.to_path_buf(),
             Held {
-                stamp: stamp_of(path),
-                state: Ok(digest),
+                stamp,
+                digest: Ok(digest),
+                dependencies,
             },
         );
         Ok((digest, bytes))
     }
 
+    pub fn dependencies(&mut self, path: &Path) -> Dependencies {
+        let digest = match self.digest(path) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let held = self
+                    .files
+                    .get_mut(path)
+                    .expect("a digested source holds its file");
+                held.dependencies.error = Some(error);
+                return held.dependencies.clone();
+            }
+        };
+        let held = self
+            .files
+            .get_mut(path)
+            .expect("a digested source holds its file");
+        if held.dependencies.attempted == Some(digest) {
+            return held.dependencies.clone();
+        }
+        match Model::sources(path) {
+            Ok(sources) => {
+                held.dependencies = Dependencies {
+                    attempted: Some(digest),
+                    sources,
+                    error: None,
+                }
+            }
+            Err(error) => {
+                held.dependencies.attempted = Some(digest);
+                held.dependencies.error = Some(error);
+            }
+        }
+        held.dependencies.clone()
+    }
+
     pub fn retain(&mut self, used: &BTreeSet<PathBuf>) {
         self.files.retain(|path, _| used.contains(path));
     }
+
+    fn current(&mut self, path: &Path) -> &Held {
+        let stamp = stamp_of(path);
+        let fresh = self.files.get(path).is_some_and(|held| held.stamp == stamp);
+        if !fresh {
+            let dependencies = self.dependencies_of(path);
+            self.files.insert(
+                path.to_path_buf(),
+                Held {
+                    stamp,
+                    digest: read_digest(path),
+                    dependencies,
+                },
+            );
+        }
+        self.files
+            .get(path)
+            .expect("a refreshed source holds its file")
+    }
+
+    fn dependencies_of(&self, path: &Path) -> Dependencies {
+        self.files
+            .get(path)
+            .map(|held| held.dependencies.clone())
+            .unwrap_or_default()
+    }
 }
 
-impl Default for Sources {
-    fn default() -> Self {
-        Self::new()
+impl Dependencies {
+    pub fn sources(&self) -> &ModelSources {
+        &self.sources
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 }
 
@@ -96,30 +157,68 @@ fn stamp_of(path: &Path) -> Option<Stamp> {
 #[cfg(test)]
 mod tests {
     use super::Sources;
+    use std::collections::BTreeSet;
     use std::fs;
-    use std::path::PathBuf;
+
+    const MODEL: &[u8] =
+        br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh.bin","byteLength":4}]}"#;
+    const REPAIRED: &[u8] = br#"{"asset":{"version":"2.0"}}"#;
 
     #[test]
-    fn a_source_reports_the_bytes_it_rehashes() {
-        let path =
-            std::env::temp_dir().join(format!("belfry_scene_source_{}.bin", std::process::id()));
-        fs::write(&path, b"first").expect("a test source writes its file");
+    fn a_broken_model_keeps_the_dependencies_it_discovered() {
+        let root = std::env::temp_dir().join(format!("belfry_scene_source_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("a source test opens its directory");
+        let model = root.join("mesh.gltf");
+        let buffer = root.join("mesh.bin");
+        fs::write(&buffer, b"four").expect("a source test writes its buffer");
+        fs::write(&model, MODEL).expect("a source test writes its model");
+
         let mut sources = Sources::new();
-        let first = sources.digest(&path).expect("a test source reads its file");
+        let (digest, bytes) = sources.read(&model).expect("a source test reads its model");
+        assert_eq!(bytes, MODEL);
         assert_eq!(
-            sources.read(&path).expect("a test source reads its file"),
-            (first, b"first".to_vec())
-        );
-        fs::write(&path, b"second").expect("a test source rewrites its file");
-        let second = sources.digest(&path).expect("a test source reads its file");
-        assert_ne!(first, second);
-        sources.retain(&std::collections::BTreeSet::from([PathBuf::from(&path)]));
-        assert_eq!(
+            digest,
             sources
-                .digest(&path)
-                .expect("a retained source reads its file"),
-            second
+                .digest(&model)
+                .expect("a source test hashes its model"),
         );
-        let _ = fs::remove_file(path);
+        let held = sources.dependencies(&model);
+        assert_eq!(
+            held.sources().buffers.as_slice(),
+            [buffer.as_path()].as_slice()
+        );
+        assert!(held.error().is_none());
+
+        fs::write(&model, b"half a model").expect("a source test breaks its model");
+        assert_ne!(
+            digest,
+            sources
+                .digest(&model)
+                .expect("a source test hashes its model"),
+        );
+        let held = sources.dependencies(&model);
+        assert_eq!(
+            held.sources().buffers.as_slice(),
+            [buffer.as_path()].as_slice(),
+            "a model that breaks keeps the dependencies it discovered",
+        );
+        assert!(
+            held.error()
+                .is_some_and(|error| error.contains("glTF text")),
+            "a model that breaks reports the reason it holds no dependency",
+        );
+
+        fs::write(&model, REPAIRED).expect("a source test repairs its model");
+        let held = sources.dependencies(&model);
+        assert!(held.sources().buffers.is_empty());
+        assert!(held.error().is_none());
+
+        sources.retain(&BTreeSet::from([model.clone()]));
+        assert!(
+            sources.digest(&model).is_ok(),
+            "a retained source still hashes its model",
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

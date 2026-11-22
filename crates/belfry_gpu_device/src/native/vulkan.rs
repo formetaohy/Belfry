@@ -22,6 +22,7 @@ use ash::{Entry, Instance, vk};
 use belfry_gpu::shader::{ComputeProgram, GraphicsProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
@@ -228,6 +229,293 @@ fn create_window_surface(
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Access {
+    stage: vk::PipelineStageFlags,
+    access: vk::AccessFlags,
+    written: bool,
+}
+
+impl Access {
+    fn read(stage: vk::PipelineStageFlags, access: vk::AccessFlags) -> Self {
+        Self {
+            stage,
+            access,
+            written: false,
+        }
+    }
+
+    fn write(stage: vk::PipelineStageFlags, access: vk::AccessFlags) -> Self {
+        Self {
+            stage,
+            access,
+            written: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Resource {
+    Buffer(vk::Buffer),
+    Image(vk::Image),
+}
+
+#[derive(Default)]
+struct Accesses {
+    known: HashMap<Resource, Access>,
+}
+
+impl Accesses {
+    fn held(&self, resource: Resource) -> Access {
+        self.known.get(&resource).copied().unwrap_or_default()
+    }
+
+    fn write(&mut self, resource: Resource, access: Access) {
+        self.known.insert(resource, access);
+    }
+}
+
+#[derive(Default)]
+struct Pending {
+    src_stage: vk::PipelineStageFlags,
+    src_access: vk::AccessFlags,
+    dst_stage: vk::PipelineStageFlags,
+    dst_access: vk::AccessFlags,
+    images: Vec<vk::ImageMemoryBarrier<'static>>,
+    touched: bool,
+}
+
+impl Pending {
+    fn touch(&mut self, accesses: &mut Accesses, resource: Resource, next: Access) {
+        let held = accesses.held(resource);
+        if held.written || next.written {
+            self.src_stage |= held.stage;
+            self.src_access |= held.access;
+            self.dst_stage |= next.stage;
+            self.dst_access |= next.access;
+            self.touched = true;
+        }
+        accesses.write(resource, next);
+    }
+
+    fn transition(
+        &mut self,
+        accesses: &mut Accesses,
+        texture: &TextureResource,
+        next: vk::ImageLayout,
+        stage: vk::PipelineStageFlags,
+        access: vk::AccessFlags,
+    ) {
+        let resource = Resource::Image(texture.image);
+        let mut layout = texture
+            .layout
+            .lock()
+            .expect("a Vulkan texture layout is never poisoned");
+        if *layout == next {
+            drop(layout);
+            self.touch(accesses, resource, Access::read(stage, access));
+            return;
+        }
+        let held = accesses.held(resource);
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(*layout)
+            .new_layout(next)
+            .image(texture.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(texture.mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .src_access_mask(held.access)
+            .dst_access_mask(access);
+        self.images.push(barrier);
+        self.src_stage |= held.stage;
+        self.src_access |= held.access;
+        self.dst_stage |= stage;
+        self.dst_access |= access;
+        self.touched = true;
+        *layout = next;
+        drop(layout);
+        accesses.write(resource, Access::read(stage, access));
+    }
+
+    fn flush(&mut self, raw: &ash::Device, command: vk::CommandBuffer) {
+        if !self.touched {
+            return;
+        }
+        let src_stage = if self.src_stage.is_empty() {
+            vk::PipelineStageFlags::TOP_OF_PIPE
+        } else {
+            self.src_stage
+        };
+        let dst_stage = if self.dst_stage.is_empty() {
+            vk::PipelineStageFlags::ALL_COMMANDS
+        } else {
+            self.dst_stage
+        };
+
+        let memory = [vk::MemoryBarrier::default()
+            .src_access_mask(self.src_access)
+            .dst_access_mask(self.dst_access)];
+        unsafe {
+            raw.cmd_pipeline_barrier(
+                command,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &memory,
+                &[],
+                &self.images,
+            )
+        };
+        self.src_stage = vk::PipelineStageFlags::empty();
+        self.src_access = vk::AccessFlags::empty();
+        self.dst_stage = vk::PipelineStageFlags::empty();
+        self.dst_access = vk::AccessFlags::empty();
+        self.images.clear();
+        self.touched = false;
+    }
+}
+
+#[derive(Clone, Default)]
+struct Demand {
+    sets: u32,
+    sizes: Vec<(vk::DescriptorType, u32)>,
+}
+
+impl Demand {
+    fn record(&mut self, resources: &[BoundResource]) {
+        self.sets += 1;
+        for resource in resources {
+            let kind = descriptor_type(resource);
+            let count = match resource {
+                BoundResource::TextureTable(table) => table.capacity(),
+                BoundResource::SamplerTable(table) => table.capacity(),
+                _ => 1,
+            };
+            match self.sizes.iter_mut().find(|(held, _)| *held == kind) {
+                Some((_, held)) => *held += count,
+                None => self.sizes.push((kind, count)),
+            }
+        }
+    }
+
+    fn pool_sizes(&self) -> Vec<vk::DescriptorPoolSize> {
+        self.sizes
+            .iter()
+            .map(|(kind, count)| {
+                vk::DescriptorPoolSize::default()
+                    .ty(*kind)
+                    .descriptor_count(*count)
+            })
+            .collect()
+    }
+
+    fn scaled(&self) -> Self {
+        Self {
+            sets: self.sets * 2 + 8,
+            sizes: self
+                .sizes
+                .iter()
+                .map(|(kind, count)| (*kind, count * 2 + 32))
+                .collect(),
+        }
+    }
+
+    fn grown(&self) -> Self {
+        Self {
+            sets: (self.sets * 2).max(16),
+            sizes: self
+                .sizes
+                .iter()
+                .map(|(kind, count)| (*kind, (*count * 2).max(32)))
+                .collect(),
+        }
+    }
+}
+
+struct Arena {
+    raw: ash::Device,
+    pool: vk::DescriptorPool,
+}
+
+impl Arena {
+    fn new(raw: &ash::Device, demand: &Demand) -> Self {
+        let sizes = demand.pool_sizes();
+        let pool = unsafe {
+            raw.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(demand.sets)
+                    .pool_sizes(&sizes),
+                None,
+            )
+        }
+        .unwrap_or_else(|error| panic!("creating a Vulkan descriptor arena: {error:?}"));
+        Self {
+            raw: raw.clone(),
+            pool,
+        }
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        unsafe { self.raw.destroy_descriptor_pool(self.pool, None) };
+    }
+}
+
+struct Descriptors {
+    arenas: Vec<Arc<Arena>>,
+    active: usize,
+    demand: Demand,
+}
+
+impl Descriptors {
+    fn new() -> Self {
+        Self {
+            arenas: Vec::new(),
+            active: 0,
+            demand: Demand::default(),
+        }
+    }
+
+    fn set(
+        &mut self,
+        raw: &ash::Device,
+        layout: vk::DescriptorSetLayout,
+        resources: &[BoundResource],
+    ) -> vk::DescriptorSet {
+        self.demand.record(resources);
+        if self.arenas.is_empty() {
+            let demand = self.demand.scaled();
+            self.arenas.push(Arc::new(Arena::new(raw, &demand)));
+        }
+        loop {
+            let arena = &self.arenas[self.active];
+            let layouts = [layout];
+            match unsafe {
+                raw.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(arena.pool)
+                        .set_layouts(&layouts),
+                )
+            } {
+                Ok(sets) => return sets[0],
+                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
+                | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
+                    self.demand = self.demand.grown();
+                    let arena = Arc::new(Arena::new(raw, &self.demand));
+                    self.arenas.push(arena);
+                    self.active = self.arenas.len() - 1;
+                }
+                Err(error) => panic!("allocating Vulkan descriptors: {error:?}"),
+            }
+        }
+    }
+}
 struct Frame {
     index: u64,
     first_dispatch: bool,
@@ -266,7 +554,8 @@ impl Frame {
         }
     }
 
-    fn begin(&mut self, raw: &ash::Device) {
+    fn begin(&mut self, device: &Device) {
+        let raw = &device.raw;
         unsafe { raw.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty()) }
             .unwrap_or_else(|error| panic!("recycling a Vulkan compute command buffer: {error:?}"));
         unsafe { raw.reset_fences(&[self.fence]) }
@@ -314,6 +603,7 @@ struct QueueState {
     completed: u64,
     frames: Vec<Frame>,
     times: [Option<(u64, f64)>; TIME_SLOTS],
+    accesses: Accesses,
 }
 
 impl Default for QueueState {
@@ -323,6 +613,7 @@ impl Default for QueueState {
             completed: 0,
             frames: Vec::new(),
             times: [None; TIME_SLOTS],
+            accesses: Accesses::default(),
         }
     }
 }
@@ -336,6 +627,7 @@ pub(crate) struct Device {
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
     render_passes: Mutex<Vec<(TextureFormat, vk::RenderPass)>>,
+    descriptors: Mutex<Descriptors>,
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
@@ -486,6 +778,7 @@ struct PipelineResource {
     raw: ash::Device,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
+    free: Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>>,
     compiled: OnceLock<vk::Pipeline>,
 }
 
@@ -498,10 +791,9 @@ pub(crate) struct Group {
 }
 
 struct GroupResource {
-    raw: ash::Device,
-    pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-    _buffers: Vec<Arc<BufferResource>>,
+    free: Arc<Mutex<Vec<vk::DescriptorSet>>>,
+    buffers: Vec<Arc<BufferResource>>,
     textures: Vec<Arc<TextureResource>>,
     _samplers: Vec<crate::Sampler>,
     _pipeline: Arc<dyn Any + Send + Sync>,
@@ -571,6 +863,7 @@ struct GraphicsPipelineResource {
     raw: ash::Device,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
+    free: Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>>,
     render_pass: vk::RenderPass,
     format: TextureFormat,
     state: PipelineState,
@@ -609,6 +902,13 @@ fn native_sampler(native: &crate::NativeSampler) -> &Sampler {
     match native {
         crate::NativeSampler::Vulkan(sampler) => sampler,
     }
+}
+
+fn free_lists(groups: &[vk::DescriptorSetLayout]) -> Vec<Arc<Mutex<Vec<vk::DescriptorSet>>>> {
+    groups
+        .iter()
+        .map(|_| Arc::new(Mutex::new(Vec::new())))
+        .collect()
 }
 
 fn descriptor_type(kind: &BoundResource) -> vk::DescriptorType {
@@ -777,6 +1077,7 @@ impl Facts {
             pool: parts.pool,
             stamps: parts.stamps,
             render_passes: Mutex::new(Vec::new()),
+            descriptors: Mutex::new(Descriptors::new()),
             ticks: self.ticks,
             bits: self.bits,
             uuid: self.uuid,
@@ -1293,6 +1594,7 @@ impl Device {
             resource: Arc::new(PipelineResource {
                 raw: self.raw.clone(),
                 layout,
+                free: free_lists(&groups),
                 groups,
                 compiled: OnceLock::new(),
             }),
@@ -1362,6 +1664,7 @@ impl Device {
     ) -> Group {
         self.assemble_group(
             pipeline.resource.groups[group as usize],
+            Arc::clone(&pipeline.resource.free[group as usize]),
             resources,
             pipeline.resource.clone(),
         )
@@ -1375,6 +1678,7 @@ impl Device {
     ) -> Group {
         self.assemble_group(
             pipeline.resource.groups[group as usize],
+            Arc::clone(&pipeline.resource.free[group as usize]),
             resources,
             pipeline.resource.clone(),
         )
@@ -1383,50 +1687,22 @@ impl Device {
     fn assemble_group(
         &self,
         layout: vk::DescriptorSetLayout,
+        free: Arc<Mutex<Vec<vk::DescriptorSet>>>,
         resources: &[BoundResource],
         pipeline: Arc<dyn Any + Send + Sync>,
     ) -> Group {
-        let mut sizes = Vec::new();
-        for ty in [
-            vk::DescriptorType::STORAGE_BUFFER,
-            vk::DescriptorType::SAMPLED_IMAGE,
-            vk::DescriptorType::SAMPLER,
-        ] {
-            let count = resources
-                .iter()
-                .filter(|resource| descriptor_type(resource) == ty)
-                .map(|resource| match resource {
-                    BoundResource::TextureTable(table) => table.capacity(),
-                    BoundResource::SamplerTable(table) => table.capacity(),
-                    _ => 1,
-                })
-                .sum::<u32>();
-            if count > 0 {
-                sizes.push(
-                    vk::DescriptorPoolSize::default()
-                        .ty(ty)
-                        .descriptor_count(count),
-                );
-            }
-        }
-        let pool = unsafe {
-            self.raw.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(1)
-                    .pool_sizes(&sizes),
-                None,
-            )
-        }
-        .unwrap_or_else(|error| panic!("creating a Vulkan descriptor pool: {error:?}"));
-        let layouts = [layout];
-        let set = unsafe {
-            self.raw.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )
-        }
-        .unwrap_or_else(|error| panic!("allocating Vulkan descriptors: {error:?}"))[0];
+        let recycled = free
+            .lock()
+            .expect("a Vulkan descriptor free list is never poisoned")
+            .pop();
+        let set = match recycled {
+            Some(set) => set,
+            None => self
+                .descriptors
+                .lock()
+                .expect("the Vulkan descriptor arenas are never poisoned")
+                .set(&self.raw, layout, resources),
+        };
         let mut buffers = Vec::new();
         let mut textures = Vec::new();
         let mut samplers = Vec::new();
@@ -1520,10 +1796,9 @@ impl Device {
         unsafe { self.raw.update_descriptor_sets(&writes, &[]) };
         Group {
             resource: Arc::new(GroupResource {
-                raw: self.raw.clone(),
-                pool,
                 set,
-                _buffers: buffers,
+                free,
+                buffers,
                 textures,
                 _samplers: samplers,
                 _pipeline: pipeline,
@@ -1854,78 +2129,6 @@ impl Device {
         }
     }
 
-    fn transition_image(
-        &self,
-        command: vk::CommandBuffer,
-        texture: &TextureResource,
-        next: vk::ImageLayout,
-        next_stage: vk::PipelineStageFlags,
-    ) {
-        let mut layout = texture
-            .layout
-            .lock()
-            .expect("a Vulkan texture layout is never poisoned");
-        if *layout == next {
-            return;
-        }
-        let barriers = [vk::ImageMemoryBarrier::default()
-            .old_layout(*layout)
-            .new_layout(next)
-            .image(texture.image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(texture.mip_levels)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            )
-            .src_access_mask(
-                vk::AccessFlags::SHADER_READ
-                    | vk::AccessFlags::SHADER_WRITE
-                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                    | vk::AccessFlags::TRANSFER_READ
-                    | vk::AccessFlags::TRANSFER_WRITE,
-            )
-            .dst_access_mask(match next {
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => vk::AccessFlags::SHADER_READ,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags::TRANSFER_READ,
-                vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
-                _ => vk::AccessFlags::SHADER_READ,
-            })];
-        unsafe {
-            self.raw.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                next_stage,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &barriers,
-            )
-        };
-        *layout = next;
-    }
-
-    fn sample_textures(
-        &self,
-        command: vk::CommandBuffer,
-        groups: &[crate::pipeline::BindGroup],
-        stage: vk::PipelineStageFlags,
-    ) {
-        for group in groups {
-            for texture in &group_resource(&group.native).textures {
-                self.transition_image(
-                    command,
-                    texture,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    stage,
-                );
-            }
-        }
-    }
-
     fn attachment(
         &self,
         width: u32,
@@ -2014,6 +2217,7 @@ impl Device {
             resource: Arc::new(GraphicsPipelineResource {
                 raw: self.raw.clone(),
                 layout,
+                free: free_lists(&groups),
                 groups,
                 render_pass: self.render_pass(format),
                 format,
@@ -2187,23 +2391,6 @@ impl Device {
         });
     }
 
-    fn barrier(&self, command: vk::CommandBuffer) {
-        let memory = [vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)];
-        unsafe {
-            self.raw.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &memory,
-                &[],
-                &[],
-            );
-        }
-    }
-
     pub(crate) fn submit(
         &self,
         writes: &[Write],
@@ -2224,8 +2411,11 @@ impl Device {
             .checked_add(1)
             .expect("compute submission indices fit in u64");
         let index = state.next;
-        let frame = &mut state.frames[slot];
-        frame.begin(&self.raw);
+        let QueueState {
+            frames, accesses, ..
+        } = &mut *state;
+        let frame = &mut frames[slot];
+        frame.begin(self);
         frame.index = index;
         frame.first_dispatch = first_dispatch;
         let command = frame.command;
@@ -2239,26 +2429,28 @@ impl Device {
                 (slot * 2) as u32,
             );
         }
+        let mut pending = Pending::default();
         for write in writes {
+            let handle = native_buffer(&write.buffer).handle;
+            pending.touch(
+                accesses,
+                Resource::Buffer(handle),
+                Access::write(
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                ),
+            );
+            pending.flush(&self.raw, command);
             let (staging, offset) = frame.stage(self, &write.bytes);
-            self.barrier(command);
             let region = [vk::BufferCopy::default()
                 .src_offset(offset)
                 .dst_offset(write.offset)
                 .size(write.bytes.len() as u64)];
-            unsafe {
-                self.raw.cmd_copy_buffer(
-                    command,
-                    staging,
-                    native_buffer(&write.buffer).handle,
-                    &region,
-                )
-            };
+            unsafe { self.raw.cmd_copy_buffer(command, staging, handle, &region) };
             frame.resources.push(native_buffer(&write.buffer).clone());
         }
         let mut presenting = None;
         for operation in commands {
-            self.barrier(command);
             match operation {
                 Command::Copy {
                     source,
@@ -2267,6 +2459,23 @@ impl Device {
                     target_offset,
                     bytes,
                 } => {
+                    pending.touch(
+                        accesses,
+                        Resource::Buffer(buffer(source).handle),
+                        Access::read(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_READ,
+                        ),
+                    );
+                    pending.touch(
+                        accesses,
+                        Resource::Buffer(buffer(target).handle),
+                        Access::write(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                        ),
+                    );
+                    pending.flush(&self.raw, command);
                     let region = [vk::BufferCopy::default()
                         .src_offset(*source_offset)
                         .dst_offset(*target_offset)
@@ -2287,6 +2496,15 @@ impl Device {
                     offset,
                     bytes,
                 } => {
+                    pending.touch(
+                        accesses,
+                        Resource::Buffer(buffer(target).handle),
+                        Access::write(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                        ),
+                    );
+                    pending.flush(&self.raw, command);
                     unsafe {
                         self.raw
                             .cmd_fill_buffer(command, buffer(target).handle, *offset, *bytes, 0)
@@ -2327,12 +2545,50 @@ impl Device {
                         })
                         .clear_values(&clears);
                     for draw in draws {
-                        self.sample_textures(
-                            command,
-                            &draw.groups,
-                            vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        );
+                        for bindings in &draw.groups {
+                            let group = group_resource(&bindings.native);
+                            for held in &group.textures {
+                                pending.transition(
+                                    accesses,
+                                    held,
+                                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                    vk::AccessFlags::SHADER_READ,
+                                );
+                            }
+                            for held in &group.buffers {
+                                pending.touch(
+                                    accesses,
+                                    Resource::Buffer(held.handle),
+                                    Access::write(
+                                        vk::PipelineStageFlags::VERTEX_SHADER
+                                            | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                        vk::AccessFlags::SHADER_READ
+                                            | vk::AccessFlags::SHADER_WRITE,
+                                    ),
+                                );
+                            }
+                        }
+                        if let RecordedCount::Indirect { arguments, .. } = &draw.count {
+                            pending.touch(
+                                accesses,
+                                Resource::Buffer(native_buffer(arguments.native()).handle),
+                                Access::read(
+                                    vk::PipelineStageFlags::DRAW_INDIRECT,
+                                    vk::AccessFlags::INDIRECT_COMMAND_READ,
+                                ),
+                            );
+                        }
                     }
+                    pending.touch(
+                        accesses,
+                        Resource::Image(texture.image),
+                        Access::write(
+                            vk::PipelineStageFlags::ALL_COMMANDS,
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::MEMORY_WRITE,
+                        ),
+                    );
+                    pending.flush(&self.raw, command);
                     unsafe {
                         self.raw
                             .cmd_begin_render_pass(command, &info, vk::SubpassContents::INLINE);
@@ -2428,12 +2684,14 @@ impl Device {
                 } => {
                     let texture = native_texture(texture.native());
                     let (staging, offset) = frame.stage(self, bytes);
-                    self.transition_image(
-                        command,
+                    pending.transition(
+                        accesses,
                         texture,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         vk::PipelineStageFlags::TRANSFER,
+                        vk::AccessFlags::TRANSFER_WRITE,
                     );
+                    pending.flush(&self.raw, command);
                     let width = (texture.width >> level).max(1);
                     let height = (texture.height >> level).max(1);
                     let texel = u64::from(texture.format.bytes_per_texel());
@@ -2465,12 +2723,21 @@ impl Device {
                         )
                     };
                     if texture.usages.contains(TextureUsages::SAMPLED) {
-                        self.transition_image(
-                            command,
+                        accesses.write(
+                            Resource::Image(texture.image),
+                            Access::write(
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::AccessFlags::TRANSFER_WRITE,
+                            ),
+                        );
+                        pending.transition(
+                            accesses,
                             texture,
                             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                             vk::PipelineStageFlags::FRAGMENT_SHADER,
+                            vk::AccessFlags::SHADER_READ,
                         );
+                        pending.flush(&self.raw, command);
                     }
                     frame.resources.push(texture.clone());
                 }
@@ -2481,41 +2748,22 @@ impl Device {
                 } => {
                     let texture = native_texture(texture.native());
                     let target = buffer(target);
-                    let mut layout = texture
-                        .layout
-                        .lock()
-                        .expect("a Vulkan texture layout is never poisoned");
-                    if *layout != vk::ImageLayout::TRANSFER_SRC_OPTIMAL {
-                        let barriers = [vk::ImageMemoryBarrier::default()
-                            .old_layout(*layout)
-                            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                            .image(texture.image)
-                            .subresource_range(
-                                vk::ImageSubresourceRange::default()
-                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                    .base_mip_level(0)
-                                    .level_count(1)
-                                    .base_array_layer(0)
-                                    .layer_count(1),
-                            )
-                            .src_access_mask(
-                                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                                    | vk::AccessFlags::TRANSFER_WRITE,
-                            )
-                            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)];
-                        unsafe {
-                            self.raw.cmd_pipeline_barrier(
-                                command,
-                                vk::PipelineStageFlags::ALL_COMMANDS,
-                                vk::PipelineStageFlags::TRANSFER,
-                                vk::DependencyFlags::empty(),
-                                &[],
-                                &[],
-                                &barriers,
-                            )
-                        };
-                        *layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-                    }
+                    pending.transition(
+                        accesses,
+                        texture,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::AccessFlags::TRANSFER_READ,
+                    );
+                    pending.touch(
+                        accesses,
+                        Resource::Buffer(target.handle),
+                        Access::write(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                        ),
+                    );
+                    pending.flush(&self.raw, command);
                     let regions = [vk::BufferImageCopy::default()
                         .buffer_offset(*target_offset)
                         .buffer_row_length({
@@ -2554,12 +2802,14 @@ impl Device {
                         texture.present,
                         "a Vulkan submission presents a swapchain image"
                     );
-                    self.transition_image(
-                        command,
+                    pending.transition(
+                        accesses,
                         texture,
                         vk::ImageLayout::PRESENT_SRC_KHR,
                         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        vk::AccessFlags::empty(),
                     );
+                    pending.flush(&self.raw, command);
                     frame.resources.push(texture.clone());
                     presenting = Some(present);
                 }
@@ -2570,11 +2820,26 @@ impl Device {
                 } => {
                     let compiled = pipeline(&handle.slot.native);
                     let group = group_resource(&bindings.native).clone();
-                    self.sample_textures(
-                        command,
-                        std::slice::from_ref(bindings),
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                    );
+                    for texture in &group.textures {
+                        pending.transition(
+                            accesses,
+                            texture,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::AccessFlags::SHADER_READ,
+                        );
+                    }
+                    for held in &group.buffers {
+                        pending.touch(
+                            accesses,
+                            Resource::Buffer(held.handle),
+                            Access::write(
+                                vk::PipelineStageFlags::COMPUTE_SHADER,
+                                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                            ),
+                        );
+                    }
+                    pending.flush(&self.raw, command);
                     let pipeline_handle = *compiled
                         .compiled
                         .get()
@@ -3136,7 +3401,10 @@ impl Drop for PipelineResource {
 
 impl Drop for GroupResource {
     fn drop(&mut self) {
-        unsafe { self.raw.destroy_descriptor_pool(self.pool, None) };
+        self.free
+            .lock()
+            .expect("a Vulkan descriptor free list is never poisoned")
+            .push(self.set);
     }
 }
 
@@ -3162,6 +3430,11 @@ impl Drop for Device {
             {
                 self.raw.destroy_render_pass(pass, None);
             }
+            self.descriptors
+                .get_mut()
+                .expect("the Vulkan descriptor arenas are never poisoned")
+                .arenas
+                .clear();
             self.raw.destroy_query_pool(self.stamps, None);
             self.raw.destroy_command_pool(self.pool, None);
             if self.instance.is_some() {

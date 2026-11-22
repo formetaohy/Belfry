@@ -43,15 +43,6 @@ pub(super) struct Models<'a> {
     scene: &'a Scene,
     loaded: HashMap<String, Result<Model, String>>,
     digests: HashMap<(String, Scope), Result<Digest, String>>,
-    cache: HashMap<String, CachedModel>,
-}
-
-#[derive(Clone)]
-pub(super) struct CachedModel {
-    path: PathBuf,
-    file: Digest,
-    buffers: Vec<PathBuf>,
-    images: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,41 +60,22 @@ pub(super) struct Prepare<'scene> {
 pub(super) type ImageCache = HashMap<String, Arc<ImageBytes>>;
 
 impl<'scene> Prepare<'scene> {
-    pub(super) fn new(
-        scene: &'scene Scene,
-        sources: Sources,
-        cache: HashMap<String, CachedModel>,
-    ) -> Self {
+    pub(super) fn new(scene: &'scene Scene, sources: Sources) -> Self {
         Self {
             images: ImageCache::new(),
-            models: Models::new(scene, cache),
+            models: Models::new(scene),
             sources,
         }
     }
 }
 
 impl Models<'_> {
-    fn new(scene: &Scene, cache: HashMap<String, CachedModel>) -> Models<'_> {
+    fn new(scene: &Scene) -> Models<'_> {
         Models {
             scene,
             loaded: HashMap::new(),
             digests: HashMap::new(),
-            cache,
         }
-    }
-
-    pub(super) fn take_cache(&mut self) -> HashMap<String, CachedModel> {
-        std::mem::take(&mut self.cache)
-    }
-
-    pub(super) fn retain(&mut self) {
-        let held = self
-            .scene
-            .models()
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<HashSet<_>>();
-        self.cache.retain(|id, _| held.contains(id.as_str()));
     }
 
     pub(super) fn digest(
@@ -136,24 +108,7 @@ impl Models<'_> {
         let path = self.scene.root().join(&entry.path);
         files.insert(path.clone());
         let file = sources.digest(&path)?;
-        let external = match self.cache.get(id) {
-            Some(held) if held.path == path && held.file == file => {
-                (held.buffers.clone(), held.images.clone())
-            }
-            _ => {
-                let held = Model::sources(&path);
-                self.cache.insert(
-                    String::from(id),
-                    CachedModel {
-                        path: path.clone(),
-                        file,
-                        buffers: held.buffers.clone(),
-                        images: held.images.clone(),
-                    },
-                );
-                (held.buffers, held.images)
-            }
-        };
+        let external = sources.dependencies(&path);
         let mut digest = Digest::builder();
         digest
             .text("model")
@@ -164,14 +119,15 @@ impl Models<'_> {
             .text(id)
             .text(&path.to_string_lossy())
             .digest(file);
-        for source in external.0 {
+        let dependencies = external.sources();
+        for source in &dependencies.buffers {
             files.insert(source.clone());
-            digest.digest(sources.digest(&source)?);
+            digest.digest(sources.digest(source)?);
         }
         if scope == Scope::Image {
-            for source in external.1 {
+            for source in &dependencies.images {
                 files.insert(source.clone());
-                digest.digest(sources.digest(&source)?);
+                digest.digest(sources.digest(source)?);
             }
         }
         Ok(digest.finish())

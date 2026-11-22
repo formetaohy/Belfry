@@ -162,11 +162,11 @@ impl Scene {
             (placed, Vec::new())
         };
         scene.nodes.insert(anchor, placed);
-        scene.nodes.splice(anchor + 1..anchor + 1, generated);
+        scene.nodes.splice(anchor + 1, generated);
         let marker = scene
             .node_index(&top)
             .expect("a prefab instance names its marker");
-        scene.nodes[marker].additions.push(addition);
+        scene.nodes.at_mut(marker).additions.push(addition);
         crate::prefab::apply_overrides(&mut scene);
         scene.validate("an added instance node");
         *self = scene;
@@ -322,7 +322,7 @@ impl Scene {
         let marker = scene
             .node_index(&top)
             .expect("a prefab instance names its marker");
-        let node = &mut scene.nodes[marker];
+        let node = scene.nodes.at_mut(marker);
         node.additions
             .retain(|held| !removed.contains(&format!("{prefix}{}", held.id)));
         node.overrides
@@ -429,15 +429,16 @@ impl Scene {
                 }
             }
         }
-        for node in &mut scene.nodes {
+        for node in scene.nodes.mutable().iter_mut() {
             if node.owner.as_deref() == Some(marker) {
                 node.owner = owner.clone();
             }
         }
-        scene.nodes[index].prefab = None;
-        scene.nodes[index].overrides.clear();
-        scene.nodes[index].additions.clear();
-        scene.nodes[index].removals.clear();
+        let held = scene.nodes.at_mut(index);
+        held.prefab = None;
+        held.overrides.clear();
+        held.additions.clear();
+        held.removals.clear();
         for entry in overrides {
             let target = format!("{marker}_{}", entry.node);
             let target = scene.node_index(&target).unwrap_or_else(|| {
@@ -487,9 +488,9 @@ impl Scene {
             return Err(format!("the node {marker} holds no prefab"));
         }
         let mut document = self.clone();
-        document.nodes[index].overrides.clear();
-        document.nodes[index].additions.clear();
-        document.nodes[index].removals.clear();
+        document.nodes.at_mut(index).overrides.clear();
+        document.nodes.at_mut(index).additions.clear();
+        document.nodes.at_mut(index).removals.clear();
         let rebuilt = Scene::parse_with(
             &document.write(),
             self.root.clone(),
@@ -581,7 +582,7 @@ impl Scene {
             path: String::from(path),
             value: value.clone(),
         };
-        let overrides = &mut self.nodes[marker].overrides;
+        let overrides = &mut self.nodes.at_mut(marker).overrides;
         overrides.retain(|held| held.node != entry.node || held.path != entry.path);
         overrides.push(entry);
     }
@@ -628,14 +629,16 @@ impl Scene {
     }
 
     fn drop_override(&mut self, marker: usize, node: &str, path: &str) {
-        self.nodes[marker]
+        self.nodes
+            .at_mut(marker)
             .overrides
             .retain(|entry| entry.node != node || entry.path != path);
     }
 
     fn drop_component_overrides(&mut self, marker: usize, node: &str, component: &str) {
         let prefix = format!("{component}.");
-        self.nodes[marker]
+        self.nodes
+            .at_mut(marker)
             .overrides
             .retain(|entry| entry.node != node || !entry.path.starts_with(&prefix));
     }
@@ -677,7 +680,7 @@ impl Scene {
         let mut restored = component.clone_box();
         restored.remap(&format!("{}_", self.nodes[marker].id));
         restored.validate(self, &self.nodes[index].id)?;
-        self.nodes[index].insert_component_box(restored);
+        self.nodes.at_mut(index).insert_component_box(restored);
         Ok(true)
     }
 

@@ -18,7 +18,6 @@ use belfry_render::{
     Environment, Material, MaterialDesc, MaterialImage, Mesh, Renderer, Sampler, SamplerDesc,
     Texture, TextureFormat, TextureUsages,
 };
-use prepare::CachedModel;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -41,7 +40,6 @@ pub struct Library {
     textures: HashMap<TextureKey, Texture>,
     samplers: HashMap<SamplerDesc, Sampler>,
     sources: Sources,
-    models: HashMap<String, CachedModel>,
     worker: Worker,
     loading: bool,
     commit: Option<commit::Commit>,
@@ -160,7 +158,6 @@ impl Library {
             textures: HashMap::new(),
             samplers: HashMap::new(),
             sources: Sources::new(),
-            models: HashMap::new(),
             worker: Worker::new(),
             loading: false,
             commit: None,
@@ -180,7 +177,6 @@ impl Library {
             fingerprints: self.fingerprints(),
             textures: self.textures.keys().cloned().collect(),
             sources: self.sources.clone(),
-            models: self.models.clone(),
             environment_cache: self.environment_cache.clone(),
         });
         self.loading = true;

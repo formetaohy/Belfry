@@ -1,9 +1,8 @@
+use crate::digest::Digest;
 use crate::scene::Scene;
-use belfry_gltf::{Model, ModelSources};
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use crate::source::Sources;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Change {
@@ -13,27 +12,17 @@ pub struct Change {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Stamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Scene,
     Model,
     Asset,
 }
 
-struct WatchedModel {
-    stamp: Option<Stamp>,
-    sources: ModelSources,
-}
-
 pub struct Watch {
     path: PathBuf,
-    files: Vec<(PathBuf, Option<Stamp>, Kind)>,
-    models: HashMap<PathBuf, WatchedModel>,
+    sources: Sources,
+    files: Vec<(PathBuf, Kind, Option<Digest>)>,
+    errors: Vec<String>,
     pending: Option<Change>,
 }
 
@@ -41,8 +30,9 @@ impl Watch {
     pub fn new(scene: &Path, root: &Scene) -> Self {
         let mut watch = Self {
             path: scene.to_path_buf(),
+            sources: Sources::new(),
             files: Vec::new(),
-            models: HashMap::new(),
+            errors: Vec::new(),
             pending: None,
         };
         watch.renew(root);
@@ -50,6 +40,7 @@ impl Watch {
     }
 
     pub fn renew(&mut self, root: &Scene) {
+        self.errors.clear();
         let mut desired = BTreeMap::new();
         desired.insert(self.path.clone(), Kind::Scene);
         for owners in root.instances.values() {
@@ -70,51 +61,42 @@ impl Watch {
                 desired.insert(root.root().join(path), Kind::Asset);
             }
         }
-        let mut models = HashMap::new();
         for model in root.models() {
             let path = root.root().join(&model.path);
-            let stamp = stamp_of(&path);
-            let sources = match self.models.get(&path) {
-                Some(held) if held.stamp == stamp => held.sources.clone(),
-                _ => Model::sources(&path),
-            };
-            models.insert(
-                path.clone(),
-                WatchedModel {
-                    stamp,
-                    sources: sources.clone(),
-                },
-            );
-            desired.insert(path, Kind::Model);
-            for source in sources.buffers.into_iter().chain(sources.images) {
-                desired.insert(source, Kind::Asset);
+            desired.insert(path.clone(), Kind::Model);
+            let held = self.sources.dependencies(&path);
+            if let Some(error) = held.error() {
+                self.errors.push(String::from(error));
+            }
+            for dependency in held.sources().buffers.iter().chain(&held.sources().images) {
+                desired.insert(dependency.clone(), Kind::Asset);
             }
         }
-        self.models = models;
-
-        let mut previous = self
-            .files
-            .drain(..)
-            .map(|(path, stamp, kind)| (path, (stamp, kind)))
-            .collect::<BTreeMap<_, _>>();
-        self.files = desired
+        let previous = std::mem::take(&mut self.files)
             .into_iter()
-            .map(|(path, kind)| {
-                let stamp = previous
-                    .remove(&path)
-                    .and_then(|(stamp, held)| (held == kind).then_some(stamp))
-                    .unwrap_or_else(|| stamp_of(&path));
-                (path, stamp, kind)
-            })
-            .collect();
+            .map(|(path, kind, digest)| (path, (kind, digest)))
+            .collect::<BTreeMap<_, _>>();
+        let mut files = Vec::with_capacity(desired.len());
+        for (path, kind) in desired {
+            let held = match previous.get(&path) {
+                Some((held, digest)) if *held == kind => Some(*digest),
+                _ => None,
+            };
+            let digest = match held {
+                Some(digest) => digest,
+                None => self.sources.digest(&path).ok(),
+            };
+            files.push((path, kind, digest));
+        }
+        self.files = files;
     }
 
     pub fn changed(&mut self) -> Option<Change> {
         let mut changed = Change::default();
-        for (path, stamp, kind) in &mut self.files {
-            let current = stamp_of(path);
-            if *stamp != current {
-                *stamp = current;
+        for (path, kind, digest) in &mut self.files {
+            let current = self.sources.digest(path).ok();
+            if *digest != current {
+                *digest = current;
                 match kind {
                     Kind::Scene => changed.scene = true,
                     Kind::Model => changed.model = true,
@@ -131,12 +113,8 @@ impl Watch {
         }
         self.pending.take()
     }
-}
 
-fn stamp_of(path: &Path) -> Option<Stamp> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(Stamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
+    pub fn errors(&self) -> impl Iterator<Item = &str> + '_ {
+        self.errors.iter().map(String::as_str)
+    }
 }

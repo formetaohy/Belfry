@@ -18,6 +18,7 @@ mod material;
 mod mesh;
 mod model;
 mod node;
+mod nodes;
 mod observe;
 mod parse;
 mod prefab;

@@ -251,7 +251,6 @@ impl Library {
     fn adopt(&mut self, prepared: &mut Prepared) {
         self.sources = std::mem::take(&mut prepared.sources);
         self.sources.retain(&prepared.files);
-        self.models = std::mem::take(&mut prepared.models);
     }
 
     fn commit_image(&mut self, renderer: &Renderer, item: &PreparedImage) {
