@@ -48,8 +48,7 @@ struct DeviceModule {
 fn is_entry_marker(attr: &syn::Attribute) -> bool {
     let segments = &attr.path().segments;
     segments.last().is_some_and(|part| part.ident == "kernel")
-        && (segments.len() == 1
-            || segments.len() == 2 && segments[0].ident == "belfry_gpu_compiler")
+        && (segments.len() == 1 || segments.len() == 2 && segments[0].ident == "belfry_gpu")
 }
 
 fn shared_memory(item: syn::ItemMacro) -> syn::Result<Shared> {
@@ -232,9 +231,9 @@ fn shared_locals(source: &syn::ItemFn, shared: &[Shared]) -> Vec<syn::Stmt> {
             let element = &shared.element;
             let count = shared.count as usize;
             Some(if scan.written {
-                syn::parse_quote!(let mut #name = ::belfry_gpu_compiler::Workgroup::<#element, #count>::new();)
+                syn::parse_quote!(let mut #name = ::belfry_gpu::Workgroup::<#element, #count>::new();)
             } else {
-                syn::parse_quote!(let #name = ::belfry_gpu_compiler::Workgroup::<#element, #count>::new();)
+                syn::parse_quote!(let #name = ::belfry_gpu::Workgroup::<#element, #count>::new();)
             })
         })
         .collect()
@@ -312,8 +311,8 @@ fn expand_definitions(module: DeviceModule) -> syn::Result<Tokens> {
     Ok(quote! {
         #visibility mod #name {
             #entry
-            pub(crate) fn define(compiler: &mut ::belfry_gpu_compiler::Compiler) {
-                use ::belfry_gpu_compiler::ast as belfry_gpu_ast;
+            pub(crate) fn define(compiler: &mut ::belfry_gpu::Compiler) {
+                use ::belfry_gpu::ast as belfry_ast;
                 #uses_entry
                 #(#declarations)*
                 #(compiler.function(#definitions);)*
@@ -589,8 +588,8 @@ fn bindings(entry: &mut syn::ItemFn, stage: EntryStage) -> syn::Result<Bindings>
             let (element, position) = varying_element(&element, stage)?;
             let mut check = source;
             check.ty = Box::new(match element.as_str() {
-                "fvec4" => syn::parse_quote!(::belfry_gpu_compiler::Fvec4),
-                "fvec2" => syn::parse_quote!(::belfry_gpu_compiler::Fvec2),
+                "fvec4" => syn::parse_quote!(::belfry_gpu::Fvec4),
+                "fvec2" => syn::parse_quote!(::belfry_gpu::Fvec2),
                 "f32" => syn::parse_quote!(f32),
                 "u32" => syn::parse_quote!(u32),
                 _ => unreachable!("a varying element is a device scalar"),
@@ -661,15 +660,15 @@ fn bindings(entry: &mut syn::ItemFn, stage: EntryStage) -> syn::Result<Bindings>
         let mut check = source;
         if !record {
             let declared: syn::Type = if element == "AtomicU32" {
-                syn::parse_quote!(::belfry_gpu_compiler::AtomicU32)
+                syn::parse_quote!(::belfry_gpu::AtomicU32)
             } else {
                 let declared = syn::Ident::new(&element, proc_macro2::Span::call_site());
                 syn::parse_quote!(#declared)
             };
             let marker = if access == "ReadWrite" {
-                syn::parse_quote!(::belfry_gpu_compiler::ReadWrite<#declared>)
+                syn::parse_quote!(::belfry_gpu::ReadWrite<#declared>)
             } else {
-                syn::parse_quote!(::belfry_gpu_compiler::Read<#declared>)
+                syn::parse_quote!(::belfry_gpu::Read<#declared>)
             };
             check.ty = Box::new(marker);
         }
@@ -712,9 +711,9 @@ fn storage_declarations(storages: &[Storage], offset: u32) -> Vec<Tokens> {
                 .unwrap_or(&storage.element);
             let slot = offset + slot as u32;
             let spec = if storage.writable {
-                quote!(::belfry_gpu_compiler::BindingSpec::writable_storage(0, #slot))
+                quote!(::belfry_gpu::BindingSpec::writable_storage(0, #slot))
             } else {
-                quote!(::belfry_gpu_compiler::BindingSpec::storage(0, #slot))
+                quote!(::belfry_gpu::BindingSpec::storage(0, #slot))
             };
             quote!(compiler.storage_array(#name, #element, #spec);)
         })
@@ -723,26 +722,26 @@ fn storage_declarations(storages: &[Storage], offset: u32) -> Vec<Tokens> {
 
 fn resource_type(kind: ResourceKind) -> syn::Type {
     match kind {
-        ResourceKind::Texture => syn::parse_quote!(::belfry_gpu_compiler::Texture2D),
-        ResourceKind::Sampler => syn::parse_quote!(::belfry_gpu_compiler::Sampler),
-        ResourceKind::TextureTable => syn::parse_quote!(::belfry_gpu_compiler::TextureTable),
-        ResourceKind::SamplerTable => syn::parse_quote!(::belfry_gpu_compiler::SamplerTable),
+        ResourceKind::Texture => syn::parse_quote!(::belfry_gpu::Texture2D),
+        ResourceKind::Sampler => syn::parse_quote!(::belfry_gpu::Sampler),
+        ResourceKind::TextureTable => syn::parse_quote!(::belfry_gpu::TextureTable),
+        ResourceKind::SamplerTable => syn::parse_quote!(::belfry_gpu::SamplerTable),
     }
 }
 
 fn resource_declaration(name: &str, kind: ResourceKind, group: u32, slot: u32) -> Tokens {
     match kind {
         ResourceKind::Texture => {
-            quote!(compiler.texture(#name, ::belfry_gpu_compiler::BindingSpec::sampled_image(#group, #slot));)
+            quote!(compiler.texture(#name, ::belfry_gpu::BindingSpec::sampled_image(#group, #slot));)
         }
         ResourceKind::Sampler => {
-            quote!(compiler.sampler(#name, ::belfry_gpu_compiler::BindingSpec::sampler(#group, #slot));)
+            quote!(compiler.sampler(#name, ::belfry_gpu::BindingSpec::sampler(#group, #slot));)
         }
         ResourceKind::TextureTable => {
-            quote!(compiler.texture_table(#name, ::belfry_gpu_compiler::BindingSpec::sampled_image_table(#group, #slot, ::belfry_gpu_compiler::TEXTURE_TABLE_CAPACITY));)
+            quote!(compiler.texture_table(#name, ::belfry_gpu::BindingSpec::sampled_image_table(#group, #slot, ::belfry_gpu::TEXTURE_TABLE_CAPACITY));)
         }
         ResourceKind::SamplerTable => {
-            quote!(compiler.sampler_table(#name, ::belfry_gpu_compiler::BindingSpec::sampler_table(#group, #slot, ::belfry_gpu_compiler::SAMPLER_TABLE_CAPACITY));)
+            quote!(compiler.sampler_table(#name, ::belfry_gpu::BindingSpec::sampler_table(#group, #slot, ::belfry_gpu::SAMPLER_TABLE_CAPACITY));)
         }
     }
 }
@@ -795,17 +794,17 @@ fn varying_declarations(varyings: &[Varying]) -> Vec<Tokens> {
             let name = &varying.name;
             let element = &varying.element;
             let space = if varying.output {
-                quote!(::belfry_gpu_compiler::Space::Output)
+                quote!(::belfry_gpu::Space::Output)
             } else {
-                quote!(::belfry_gpu_compiler::Space::Input)
+                quote!(::belfry_gpu::Space::Input)
             };
             let interface = if varying.position {
-                quote!(::belfry_gpu_compiler::Interface::Position)
+                quote!(::belfry_gpu::Interface::Position)
             } else {
                 let direction = usize::from(varying.output);
                 let location = locations[direction];
                 locations[direction] += 1;
-                quote!(::belfry_gpu_compiler::Interface::Location(#location))
+                quote!(::belfry_gpu::Interface::Location(#location))
             };
             quote!(compiler.varying(#name, #element, #space, #interface);)
         })
@@ -870,7 +869,7 @@ fn record_declarations(records: impl Iterator<Item = syn::Ident>) -> Vec<Tokens>
     records
         .map(|record| {
             quote! {
-                compiler.record(<#record as ::belfry_gpu_compiler::layout::Record>::LAYOUT);
+                compiler.record(<#record as ::belfry_gpu::layout::Record>::LAYOUT);
             }
         })
         .collect()
@@ -898,12 +897,12 @@ fn expand_kernel_function(
     statements.extend(resource_declarations(&entry.resources));
     let size = options.size;
     Ok(quote! {
-        #visibility fn #name() -> ::belfry_gpu_compiler::ComputeProgram {
-            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu_compiler::ComputeProgram> =
+        #visibility fn #name() -> ::belfry_gpu::ComputeProgram {
+            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu::ComputeProgram> =
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
-                use ::belfry_gpu_compiler::ast as belfry_gpu_ast;
-                let mut compiler = ::belfry_gpu_compiler::Compiler::empty();
+                use ::belfry_gpu::ast as belfry_ast;
+                let mut compiler = ::belfry_gpu::Compiler::empty();
                 compiler.constant("WORKGROUP_SIZE", #size);
                 #(#records)*
                 #(#statements)*
@@ -912,7 +911,7 @@ fn expand_kernel_function(
             }).clone()
         }
         const _: () = {
-            use ::belfry_gpu_compiler::device::*;
+            use ::belfry_gpu::compiler::device::*;
             const WORKGROUP_SIZE: u32 = #size;
             #typecheck
             let _ = #name;
@@ -970,12 +969,12 @@ fn expand_kernel_module(options: KernelOptions, module: syn::ItemMod) -> syn::Re
     let names = module.functions.iter().map(|function| &function.sig.ident);
     let size = options.size;
     Ok(quote! {
-        #visibility fn #name() -> ::belfry_gpu_compiler::ComputeProgram {
-            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu_compiler::ComputeProgram> =
+        #visibility fn #name() -> ::belfry_gpu::ComputeProgram {
+            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu::ComputeProgram> =
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
-                use ::belfry_gpu_compiler::ast as belfry_gpu_ast;
-                let mut compiler = ::belfry_gpu_compiler::Compiler::empty();
+                use ::belfry_gpu::ast as belfry_ast;
+                let mut compiler = ::belfry_gpu::Compiler::empty();
                 compiler.constant("WORKGROUP_SIZE", #size);
                 #(#declarations)*
                 #(#records)*
@@ -985,7 +984,7 @@ fn expand_kernel_module(options: KernelOptions, module: syn::ItemMod) -> syn::Re
             }).clone()
         }
         const _: () = {
-            use ::belfry_gpu_compiler::device::*;
+            use ::belfry_gpu::compiler::device::*;
             const WORKGROUP_SIZE: u32 = #size;
             #(#checks)*
             #(let _ = #names;)*
@@ -997,8 +996,7 @@ fn expand_kernel_module(options: KernelOptions, module: syn::ItemMod) -> syn::Re
 fn is_stage_marker(attr: &syn::Attribute, stage: &str) -> bool {
     let segments = &attr.path().segments;
     segments.last().is_some_and(|part| part.ident == stage)
-        && (segments.len() == 1
-            || segments.len() == 2 && segments[0].ident == "belfry_gpu_compiler")
+        && (segments.len() == 1 || segments.len() == 2 && segments[0].ident == "belfry_gpu")
 }
 
 enum SharedBinding {
@@ -1196,9 +1194,9 @@ fn expand_graphics(module: GraphicsModule) -> syn::Result<Tokens> {
                     let element =
                         syn::Ident::new(&storage.element, proc_macro2::Span::call_site());
                     if storage.writable {
-                        quote!(let mut #name: ::belfry_gpu_compiler::ReadWrite<#element> = ::core::default::Default::default();)
+                        quote!(let mut #name: ::belfry_gpu::ReadWrite<#element> = ::core::default::Default::default();)
                     } else {
-                        quote!(let #name: ::belfry_gpu_compiler::Read<#element> = ::core::default::Default::default();)
+                        quote!(let #name: ::belfry_gpu::Read<#element> = ::core::default::Default::default();)
                     }
                 }
                 SharedBinding::Resource(resource) => {
@@ -1275,9 +1273,9 @@ fn expand_graphics(module: GraphicsModule) -> syn::Result<Tokens> {
                 let slot = shared_storage_slot;
                 shared_storage_slot += 1;
                 shared_storage_bindings.push(if storage.writable {
-                    quote!(compiler.storage_array(#name, #element, ::belfry_gpu_compiler::BindingSpec::writable_storage(0, #slot));)
+                    quote!(compiler.storage_array(#name, #element, ::belfry_gpu::BindingSpec::writable_storage(0, #slot));)
                 } else {
-                    quote!(compiler.storage_array(#name, #element, ::belfry_gpu_compiler::BindingSpec::storage(0, #slot));)
+                    quote!(compiler.storage_array(#name, #element, ::belfry_gpu::BindingSpec::storage(0, #slot));)
                 });
             }
             SharedBinding::Resource(resource) => {
@@ -1294,12 +1292,12 @@ fn expand_graphics(module: GraphicsModule) -> syn::Result<Tokens> {
     let fragment_varyings = varying_declarations(&fragment_varyings);
     let names = module.functions.iter().map(|function| &function.sig.ident);
     Ok(quote! {
-        #visibility fn #name() -> ::belfry_gpu_compiler::GraphicsProgram {
-            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu_compiler::GraphicsProgram> =
+        #visibility fn #name() -> ::belfry_gpu::GraphicsProgram {
+            static PROGRAM: ::std::sync::OnceLock<::belfry_gpu::GraphicsProgram> =
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
-                use ::belfry_gpu_compiler::ast as belfry_gpu_ast;
-                let mut compiler = ::belfry_gpu_compiler::Compiler::empty();
+                use ::belfry_gpu::ast as belfry_ast;
+                let mut compiler = ::belfry_gpu::Compiler::empty();
                 #(#records)*
                 #(#shared_storage_bindings)*
                 #(#storages)*
@@ -1315,7 +1313,7 @@ fn expand_graphics(module: GraphicsModule) -> syn::Result<Tokens> {
             }).clone()
         }
         const _: () = {
-            use ::belfry_gpu_compiler::device::*;
+            use ::belfry_gpu::compiler::device::*;
             #(#checks)*
             #(let _ = #names;)*
             let _ = #name;

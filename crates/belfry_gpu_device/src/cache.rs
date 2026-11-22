@@ -9,11 +9,8 @@ use std::time::{Duration, SystemTime};
 pub const DEFAULT_ARTIFACT_BYTES: u64 = 256 << 20;
 const PARTIAL_GRACE: Duration = Duration::from_secs(600);
 
-#[cfg(any(vulkan_backend, dx12_backend, metal_backend))]
 const FNV_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
-#[cfg(any(vulkan_backend, dx12_backend, metal_backend))]
 const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
-#[cfg(any(vulkan_backend, dx12_backend, metal_backend))]
 const SEPARATOR: u8 = 0xff;
 
 static PARTIAL: AtomicU64 = AtomicU64::new(1);
@@ -478,7 +475,6 @@ fn candidate_roots() -> Vec<PathBuf> {
     roots
 }
 
-#[cfg(any(vulkan_backend, dx12_backend, metal_backend))]
 pub(crate) fn fingerprint(parts: &[&[u8]]) -> String {
     let mut state = FNV_BASIS;
     for part in parts {

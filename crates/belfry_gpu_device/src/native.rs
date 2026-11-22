@@ -1,5 +1,3 @@
-#[cfg(dx12_backend)]
-pub(crate) mod dx12;
 #[cfg(metal_backend)]
 pub(crate) mod metal;
 #[cfg(vulkan_backend)]
@@ -18,7 +16,7 @@ use crate::sampler::SamplerDesc;
 use crate::submission::{Command, Write};
 use crate::surface::WindowHandle;
 use crate::texture::TextureFormat;
-use belfry_gpu_shader::{ComputeProgram, GraphicsProgram};
+use belfry_gpu::shader::{ComputeProgram, GraphicsProgram};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,8 +73,6 @@ impl From<String> for DeviceFailure {
 pub(crate) enum NativeDevice {
     #[cfg(vulkan_backend)]
     Vulkan(Arc<vulkan::Device>),
-    #[cfg(dx12_backend)]
-    Dx12(Arc<dx12::Device>),
     #[cfg(metal_backend)]
     Metal(Arc<metal::Device>),
 }
@@ -85,8 +81,6 @@ pub(crate) enum NativeDevice {
 pub(crate) enum NativeBuffer {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Buffer),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Buffer),
     #[cfg(metal_backend)]
     Metal(metal::Buffer),
 }
@@ -94,8 +88,6 @@ pub(crate) enum NativeBuffer {
 pub(crate) enum NativePipeline {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Pipeline),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Pipeline),
     #[cfg(metal_backend)]
     Metal(metal::Pipeline),
 }
@@ -103,8 +95,6 @@ pub(crate) enum NativePipeline {
 pub(crate) enum NativeTexture {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Texture),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Texture),
     #[cfg(metal_backend)]
     Metal(metal::Texture),
 }
@@ -112,8 +102,6 @@ pub(crate) enum NativeTexture {
 pub(crate) enum NativeSurface {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Surface),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Surface),
     #[cfg(metal_backend)]
     Metal(metal::Surface),
 }
@@ -122,8 +110,6 @@ pub(crate) enum NativeSurface {
 pub(crate) enum NativePresent {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Present),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Present),
     #[cfg(metal_backend)]
     Metal(metal::Present),
 }
@@ -133,17 +119,6 @@ impl NativePresent {
     pub(crate) fn vulkan(&self) -> &vulkan::Present {
         match self {
             Self::Vulkan(present) => present,
-            #[cfg(multiple_backends)]
-            _ => panic!("a Vulkan submission reads a Vulkan frame"),
-        }
-    }
-
-    #[cfg(dx12_backend)]
-    pub(crate) fn dx12(&self) -> &dx12::Present {
-        match self {
-            Self::Dx12(present) => present,
-            #[cfg(multiple_backends)]
-            _ => panic!("a D3D12 submission reads a D3D12 frame"),
         }
     }
 
@@ -151,8 +126,6 @@ impl NativePresent {
     pub(crate) fn metal(&self) -> &metal::Present {
         match self {
             Self::Metal(present) => present,
-            #[cfg(multiple_backends)]
-            _ => panic!("a Metal submission reads a Metal frame"),
         }
     }
 }
@@ -168,8 +141,6 @@ pub(crate) struct NativeFrame {
 pub(crate) enum NativeSampler {
     #[cfg(vulkan_backend)]
     Vulkan(Box<vulkan::Sampler>),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::Sampler),
     #[cfg(metal_backend)]
     Metal(metal::Sampler),
 }
@@ -177,8 +148,6 @@ pub(crate) enum NativeSampler {
 pub(crate) enum NativeTextureTable {
     #[cfg(vulkan_backend)]
     Vulkan,
-    #[cfg(dx12_backend)]
-    Dx12(dx12::TextureTable),
     #[cfg(metal_backend)]
     Metal(metal::TextureTable),
 }
@@ -186,8 +155,6 @@ pub(crate) enum NativeTextureTable {
 pub(crate) enum NativeSamplerTable {
     #[cfg(vulkan_backend)]
     Vulkan,
-    #[cfg(dx12_backend)]
-    Dx12(dx12::SamplerTable),
     #[cfg(metal_backend)]
     Metal(metal::SamplerTable),
 }
@@ -195,8 +162,6 @@ pub(crate) enum NativeSamplerTable {
 pub(crate) enum NativeGraphicsPipeline {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::GraphicsPipeline),
-    #[cfg(dx12_backend)]
-    Dx12(dx12::GraphicsPipeline),
     #[cfg(metal_backend)]
     Metal(metal::GraphicsPipeline),
 }
@@ -205,8 +170,6 @@ pub(crate) enum NativeGraphicsPipeline {
 pub(crate) enum NativeGroup {
     #[cfg(vulkan_backend)]
     Vulkan(Arc<vulkan::Group>),
-    #[cfg(dx12_backend)]
-    Dx12,
     #[cfg(metal_backend)]
     Metal,
 }
@@ -270,12 +233,6 @@ pub(crate) fn borrow(
     let advance = host.advance();
     let keep_alive = host.hold;
     let (native, info, limits, capability) = match host.kind {
-        #[cfg(dx12_backend)]
-        HostKind::Dx12(raw) => dx12::Device::borrow(raw, advance, keep_alive).map(
-            |(device, info, limits, capability)| {
-                (NativeDevice::Dx12(device), info, limits, capability)
-            },
-        ),
         #[cfg(metal_backend)]
         HostKind::Metal(raw) => metal::Device::borrow(raw, advance, keep_alive).map(
             |(device, info, limits, capability)| {
@@ -304,12 +261,6 @@ fn candidate(
     window: Option<WindowHandle>,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), DeviceFailure> {
     match backend {
-        #[cfg(dx12_backend)]
-        Backend::Dx12 => {
-            dx12::Device::open(policy, window).map(|(device, info, limits, capability)| {
-                (NativeDevice::Dx12(device), info, limits, capability)
-            })
-        }
         #[cfg(metal_backend)]
         Backend::Metal => {
             metal::Device::open(policy, window).map(|(device, info, limits, capability)| {
@@ -331,8 +282,6 @@ impl NativeSurface {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(surface) => surface.width(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(surface) => surface.width(),
             #[cfg(metal_backend)]
             Self::Metal(surface) => surface.width(),
         }
@@ -342,8 +291,6 @@ impl NativeSurface {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(surface) => surface.height(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(surface) => surface.height(),
             #[cfg(metal_backend)]
             Self::Metal(surface) => surface.height(),
         }
@@ -353,8 +300,6 @@ impl NativeSurface {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(surface) => surface.format(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(surface) => surface.format(),
             #[cfg(metal_backend)]
             Self::Metal(surface) => surface.format(),
         }
@@ -364,8 +309,6 @@ impl NativeSurface {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(surface) => surface.acquire(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(surface) => surface.acquire(),
             #[cfg(metal_backend)]
             Self::Metal(surface) => surface.acquire(),
         }
@@ -375,8 +318,6 @@ impl NativeSurface {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(surface) => surface.resize(width, height),
-            #[cfg(dx12_backend)]
-            Self::Dx12(surface) => surface.resize(width, height),
             #[cfg(metal_backend)]
             Self::Metal(surface) => surface.resize(width, height),
         }
@@ -388,8 +329,6 @@ impl NativeGraphicsPipeline {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(pipeline) => pipeline.is_compiled(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(pipeline) => pipeline.is_compiled(),
             #[cfg(metal_backend)]
             Self::Metal(pipeline) => pipeline.is_compiled(),
         }
@@ -401,8 +340,6 @@ impl NativePipeline {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(pipeline) => pipeline.is_compiled(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(pipeline) => pipeline.is_compiled(),
             #[cfg(metal_backend)]
             Self::Metal(pipeline) => pipeline.is_compiled(),
         }
@@ -421,16 +358,10 @@ impl NativeDevice {
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
                 device.compile(pipeline, program, artifacts)
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativePipeline::Dx12(pipeline)) => {
-                device.compile(pipeline, program, artifacts)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(device), NativePipeline::Metal(pipeline)) => {
                 device.compile(pipeline, program, artifacts)
             }
-            #[cfg(multiple_backends)]
-            _ => panic!("a pipeline belongs to another backend"),
         }
     }
 
@@ -438,8 +369,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => Arc::clone(&device.gate),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => Arc::clone(&device.gate),
             #[cfg(metal_backend)]
             Self::Metal(device) => Arc::clone(&device.gate),
         }
@@ -454,8 +383,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativeBuffer::Vulkan(device.create_buffer(label, size, usage)),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeBuffer::Dx12(device.create_buffer(label, size, usage)),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativeBuffer::Metal(device.create_buffer(label, size, usage)),
         }
@@ -465,8 +392,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativePipeline::Vulkan(device.create_pipeline(program)),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativePipeline::Dx12(device.create_pipeline(program)),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativePipeline::Metal(device.create_pipeline(program)),
         }
@@ -486,10 +411,6 @@ impl NativeDevice {
             Self::Vulkan(device) => NativeTexture::Vulkan(
                 device.create_texture(label, width, height, mip_levels, format, usages),
             ),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeTexture::Dx12(
-                device.create_texture(label, width, height, mip_levels, format, usages),
-            ),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativeTexture::Metal(
                 device.create_texture(label, width, height, mip_levels, format, usages),
@@ -501,8 +422,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativeSurface::Vulkan(device.create_surface(width, height)),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeSurface::Dx12(device.create_surface(width, height)),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativeSurface::Metal(device.create_surface(width, height)),
         }
@@ -512,8 +431,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.has_surface(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.has_surface(),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.has_surface(),
         }
@@ -523,8 +440,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.idle(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.idle(),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.idle(),
         }
@@ -536,8 +451,6 @@ impl NativeDevice {
             Self::Vulkan(device) => {
                 NativeSampler::Vulkan(Box::new(device.create_sampler(desc, anisotropy)))
             }
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeSampler::Dx12(device.create_sampler(desc, anisotropy)),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativeSampler::Metal(device.create_sampler(desc, anisotropy)),
         }
@@ -553,10 +466,6 @@ impl NativeDevice {
             Self::Vulkan(_) => {
                 let _ = (capacity, fallback);
                 NativeTextureTable::Vulkan
-            }
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => {
-                NativeTextureTable::Dx12(device.create_texture_table(capacity, fallback))
             }
             #[cfg(metal_backend)]
             Self::Metal(device) => {
@@ -576,14 +485,8 @@ impl NativeDevice {
             (Self::Vulkan(_), NativeTextureTable::Vulkan) => {
                 let _ = (index, texture);
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeTextureTable::Dx12(table)) => {
-                device.fill_texture_table(table, index, texture)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(_), NativeTextureTable::Metal(table)) => table.fill(index, texture),
-            #[cfg(multiple_backends)]
-            _ => panic!("a texture table belongs to another backend"),
         }
     }
 
@@ -597,10 +500,6 @@ impl NativeDevice {
             Self::Vulkan(_) => {
                 let _ = (capacity, fallback);
                 NativeSamplerTable::Vulkan
-            }
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => {
-                NativeSamplerTable::Dx12(device.create_sampler_table(capacity, fallback))
             }
             #[cfg(metal_backend)]
             Self::Metal(device) => {
@@ -620,14 +519,8 @@ impl NativeDevice {
             (Self::Vulkan(_), NativeSamplerTable::Vulkan) => {
                 let _ = (index, sampler);
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeSamplerTable::Dx12(table)) => {
-                device.fill_sampler_table(table, index, sampler)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(_), NativeSamplerTable::Metal(table)) => table.fill(index, sampler),
-            #[cfg(multiple_backends)]
-            _ => panic!("a sampler table belongs to another backend"),
         }
     }
 
@@ -640,10 +533,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativeGraphicsPipeline::Vulkan(
-                device.create_graphics_pipeline(program, format, state),
-            ),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeGraphicsPipeline::Dx12(
                 device.create_graphics_pipeline(program, format, state),
             ),
             #[cfg(metal_backend)]
@@ -664,16 +553,10 @@ impl NativeDevice {
             (Self::Vulkan(device), NativeGraphicsPipeline::Vulkan(pipeline)) => {
                 device.compile_graphics(pipeline, program, artifacts)
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeGraphicsPipeline::Dx12(pipeline)) => {
-                device.compile_graphics(pipeline, program, artifacts)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(device), NativeGraphicsPipeline::Metal(pipeline)) => {
                 device.compile_graphics(pipeline, program, artifacts)
             }
-            #[cfg(multiple_backends)]
-            _ => panic!("a graphics pipeline belongs to another backend"),
         }
     }
 
@@ -692,12 +575,8 @@ impl NativeDevice {
                     device.create_graphics_group(pipeline, group, resources),
                 ))
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(_), NativeGraphicsPipeline::Dx12(_)) => NativeGroup::Dx12,
             #[cfg(metal_backend)]
             (Self::Metal(_), NativeGraphicsPipeline::Metal(_)) => NativeGroup::Metal,
-            #[cfg(multiple_backends)]
-            _ => panic!("a graphics pipeline belongs to another backend"),
         }
     }
 
@@ -714,12 +593,8 @@ impl NativeDevice {
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
                 NativeGroup::Vulkan(Arc::new(device.create_group(pipeline, group, resources)))
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(_), NativePipeline::Dx12(_)) => NativeGroup::Dx12,
             #[cfg(metal_backend)]
             (Self::Metal(_), NativePipeline::Metal(_)) => NativeGroup::Metal,
-            #[cfg(multiple_backends)]
-            _ => panic!("a pipeline belongs to another backend"),
         }
     }
 
@@ -732,8 +607,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.submit(writes, commands, first_dispatch),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.submit(writes, commands, first_dispatch),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.submit(writes, commands, first_dispatch),
         }
@@ -743,8 +616,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.wait(index, timeout),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.wait(index, timeout),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.wait(index, timeout),
         }
@@ -754,8 +625,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.complete(index),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.complete(index),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.complete(index),
         }
@@ -765,8 +634,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.seconds(index),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.seconds(index),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.seconds(index),
         }
@@ -776,12 +643,8 @@ impl NativeDevice {
         match (self, buffer) {
             #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => device.read(buffer, bytes),
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => device.read(buffer, bytes),
             #[cfg(metal_backend)]
             (Self::Metal(device), NativeBuffer::Metal(buffer)) => device.read(buffer, bytes),
-            #[cfg(multiple_backends)]
-            _ => panic!("a buffer belongs to another backend"),
         }
     }
 
@@ -791,16 +654,10 @@ impl NativeDevice {
             (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => {
                 device.write_host(buffer, offset, bytes)
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => {
-                device.write_host(buffer, offset, bytes)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(device), NativeBuffer::Metal(buffer)) => {
                 device.write_host(buffer, offset, bytes)
             }
-            #[cfg(multiple_backends)]
-            _ => panic!("a buffer belongs to another backend"),
         }
     }
 
@@ -810,16 +667,10 @@ impl NativeDevice {
             (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => {
                 device.read_host(buffer, offset, bytes)
             }
-            #[cfg(dx12_backend)]
-            (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => {
-                device.read_host(buffer, offset, bytes)
-            }
             #[cfg(metal_backend)]
             (Self::Metal(device), NativeBuffer::Metal(buffer)) => {
                 device.read_host(buffer, offset, bytes)
             }
-            #[cfg(multiple_backends)]
-            _ => panic!("a buffer belongs to another backend"),
         }
     }
 
@@ -827,8 +678,6 @@ impl NativeDevice {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.assert_alive(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.assert_alive(),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.assert_alive(),
         }

@@ -17,6 +17,6 @@ belfry_animation = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jpeg-decoder = { workspace = true }
+belfry_image = { workspace = true }
 belfry_math = { workspace = true }
-belfry_png = { workspace = true }
 belfry_render = { workspace = true }

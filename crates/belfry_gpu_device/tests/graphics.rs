@@ -1,11 +1,11 @@
-use belfry_gpu_compiler::{Fvec2, Fvec4};
+use belfry_gpu::{Fvec2, Fvec4};
 use belfry_gpu_device::{
     AddressMode, Backend, Binding, BufferUsages, Draw, Filter, GpuBuffer, GpuContext, GpuRequest,
     GraphicsPipeline, PipelineState, Sampler, SamplerDesc, SamplerTable, Submission, Texture,
     TextureFormat, TextureTable, TextureUsages,
 };
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod quad {
     #[vertex]
     fn vertex(vertex: u32, vertices: Read<f32>, position: Out<Position>, uv: Out<Fvec2>) {
@@ -191,11 +191,9 @@ fn render(
         TextureUsages::SAMPLED | TextureUsages::COPY_DST,
     );
     white.write(queue, &[255, 255, 255, 255]);
-    let mut albedos =
-        TextureTable::new(device, belfry_gpu_compiler::TEXTURE_TABLE_CAPACITY, &white);
+    let mut albedos = TextureTable::new(device, belfry_gpu::TEXTURE_TABLE_CAPACITY, &white);
     albedos.add(albedo);
-    let mut palettes =
-        SamplerTable::new(device, belfry_gpu_compiler::SAMPLER_TABLE_CAPACITY, sampler);
+    let mut palettes = SamplerTable::new(device, belfry_gpu::SAMPLER_TABLE_CAPACITY, sampler);
     palettes.add(sampler);
     let material = pipeline.bind_group(
         1,

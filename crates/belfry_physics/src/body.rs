@@ -1,6 +1,5 @@
 use crate::part::Part;
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{Entity, LocalTransform, World};
 use belfry_math::{Aabb, Mat3, Quat, Transform, Vec3};
 
 const DEFAULT_MASS: f32 = 1.0;

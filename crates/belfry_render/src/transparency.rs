@@ -1,10 +1,10 @@
+use crate::abi::{TransparentRecord, TransparentSetupRecord};
 use crate::program;
 use belfry_gpu_device::{
     AddressMode, Binding, BufferBinding, BufferUsages, Device, Draw, Filter, GpuBuffer,
     GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
     TextureFormat,
 };
-use belfry_render_abi::{TransparentRecord, TransparentSetupRecord};
 use std::mem::size_of;
 
 const RECORD_BYTES: u64 = size_of::<TransparentRecord>() as u64;

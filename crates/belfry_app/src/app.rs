@@ -1,10 +1,9 @@
 use crate::time::Time;
 use belfry_audio::Audio;
-use belfry_ecs::{Entity, Schedule, System, World};
+use belfry_ecs::{Entity, Schedule, System, World, propagate};
 use belfry_gpu_device::{
     GpuContext, GpuRequest, Surface, Texture, TextureFormat, TextureUsages, WindowHandle,
 };
-use belfry_hierarchy::propagate;
 use belfry_math::{Transform, Vec3};
 use belfry_render::{Camera, Lines, Renderer, Target};
 use belfry_scene::{Library, Registry, Scene, SceneSync, Watch};
@@ -393,7 +392,7 @@ impl Session {
             self.renderer
                 .render(world, Target::Texture(shot), clear, None);
             let rgba = shot.read_rgba(self.context.queue());
-            Some(belfry_png::encode(width, height, &rgba))
+            Some(belfry_image::encode(width, height, &rgba))
         } else {
             None
         };

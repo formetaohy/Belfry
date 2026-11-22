@@ -1,5 +1,6 @@
+mod abi;
 mod camera;
-mod environment;
+pub mod environment;
 mod frame;
 mod growing;
 mod hidden;
@@ -20,10 +21,10 @@ mod span;
 mod transparency;
 mod view;
 
+pub use abi::{SkinVertexRecord, Vertex};
 pub use belfry_gpu_device::{
     AddressMode, Filter, Sampler, SamplerDesc, Texture, TextureFormat, TextureUsages,
 };
-pub use belfry_render_abi::{SkinVertexRecord, Vertex};
 pub use camera::Camera;
 pub use environment::Environment;
 pub use hidden::Hidden;

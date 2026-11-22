@@ -4,8 +4,7 @@ use crate::install::NodeMap;
 use crate::node::SceneNode;
 use crate::registry::Assets;
 use crate::scene::Scene;
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::{Parent, propagate};
+use belfry_ecs::{Entity, Parent, World, propagate};
 use std::collections::{HashMap, HashSet};
 
 pub struct SceneSync {

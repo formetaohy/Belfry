@@ -1,5 +1,5 @@
 use crate::reference::EnvironmentId;
-use belfry_environment::Atmosphere;
+use belfry_render::environment::Atmosphere;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]

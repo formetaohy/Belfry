@@ -2,7 +2,7 @@
 name = "belfry_window"
 version.workspace = true
 edition.workspace = true
-description = "Native windows, event loops and input for the Belfry engine"
+description = "Native windows, event loops and input"
 license.workspace = true
 repository.workspace = true
 

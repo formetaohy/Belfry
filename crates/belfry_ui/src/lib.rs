@@ -29,6 +29,7 @@ mod theme;
 mod tree;
 mod ui;
 pub mod widget;
+mod window;
 
 pub use belfry_math::Vec2;
 pub use belfry_text::Align;

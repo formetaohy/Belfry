@@ -2,7 +2,7 @@
 name = "belfry_render"
 version.workspace = true
 edition.workspace = true
-description = "The GPU-driven renderer a world of meshes and cameras renders through"
+description = "The GPU-driven renderer a world of meshes and cameras renders through, and the environment light it reflects"
 license.workspace = true
 repository.workspace = true
 
@@ -17,8 +17,6 @@ workspace = true
 bytemuck = { workspace = true }
 half = { workspace = true }
 belfry_ecs = { workspace = true }
-belfry_environment = { workspace = true }
-belfry_gpu_compiler = { workspace = true }
+belfry_gpu = { workspace = true }
 belfry_gpu_device = { workspace = true }
 belfry_math = { workspace = true }
-belfry_render_abi = { workspace = true }

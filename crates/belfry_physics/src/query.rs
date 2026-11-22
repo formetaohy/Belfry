@@ -1,7 +1,6 @@
 use crate::solid::Solid;
 use crate::{Collider, CollisionFilter, Shape};
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::{LocalTransform, Parent, world_transform};
+use belfry_ecs::{Entity, LocalTransform, Parent, World, world_transform};
 use belfry_math::{Quat, Transform, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq)]

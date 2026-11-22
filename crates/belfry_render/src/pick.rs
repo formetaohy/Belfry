@@ -1,3 +1,4 @@
+use crate::abi::{DrawRecord, VERTEX_FLOATS, ViewRecord};
 use crate::frame::record_of_view;
 use crate::mesh::{Mesh, MeshLibrary};
 use crate::program;
@@ -8,7 +9,6 @@ use belfry_gpu_device::{
     Queue, Submission, Texture, TextureFormat, TextureUsages,
 };
 use belfry_math::{Mat4, Vec2, Vec3, Vec4};
-use belfry_render_abi::{DrawRecord, VERTEX_FLOATS, ViewRecord};
 use std::mem::size_of;
 
 const VIEW_BYTES: u64 = size_of::<ViewRecord>() as u64;

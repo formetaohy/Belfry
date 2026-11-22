@@ -1,4 +1,4 @@
-use belfry_gpu_compiler::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
+use belfry_gpu::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
 use belfry_gpu_device::{
     AddressMode, Device, Filter, Queue, Sampler, SamplerDesc, SamplerTable, Texture, TextureFormat,
     TextureTable, TextureUsages,

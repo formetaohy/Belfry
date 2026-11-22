@@ -1,11 +1,10 @@
 use crate::camera;
 use crate::debug;
 use crate::message::Message;
-use belfry_ecs::{Entity, World};
+use belfry_ecs::{Entity, World, propagate};
 use belfry_gpu_device::{
     AddressMode, Filter, GpuContext, SamplerDesc, Texture, TextureFormat, TextureUsages,
 };
-use belfry_hierarchy::propagate;
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{Camera, DirectionalLight, PointLight, Renderer, Target};
 use belfry_scene::{Library, Refresh, Scene, SceneSync};

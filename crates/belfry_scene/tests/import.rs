@@ -9,7 +9,7 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
     let root = directory("import");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("a test opens its directory");
-    let texture = belfry_png::encode(1, 1, &[255, 0, 0, 255]);
+    let texture = belfry_image::encode(1, 1, &[255, 0, 0, 255]);
     fs::write(root.join("texture.png"), &texture).expect("a test writes a texture");
     let binary = triangle();
     fs::write(root.join("model.bin"), &binary).expect("a test writes a buffer");

@@ -1,6 +1,7 @@
 use super::AssetError;
 use crate::animation::AnimationEntry;
 use crate::collider::{ColliderRef, ShapeKind};
+use crate::digest::{Digest, DigestBuilder};
 use crate::environment::{EnvironmentEntry, EnvironmentSource};
 use crate::image::{ImageEntry, ImageSource};
 use crate::material::MaterialEntry;
@@ -8,15 +9,15 @@ use crate::mesh::{Geometry, MeshEntry};
 use crate::scene::Scene;
 use crate::skin::{SkinData, SkinEntry};
 use crate::sound::SoundEntry;
+use crate::source::Sources;
 use belfry_animation::{Clip, Track};
-use belfry_asset::{Digest, DigestBuilder, Sources};
 use belfry_audio::Sound;
-use belfry_environment::{Atmosphere, Panorama};
 use belfry_gltf::Model;
+use belfry_image::Image;
+use belfry_image::Radiance;
 use belfry_math::Mat4;
 use belfry_physics::TriangleMesh;
-use belfry_png::Image;
-use belfry_radiance::Radiance;
+use belfry_render::environment::{Atmosphere, Panorama};
 use belfry_render::{AddressMode, Filter, SamplerDesc, SkinVertexRecord, Vertex};
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -466,7 +467,7 @@ pub(super) fn environment_data(
     scene: &Scene,
     entry: &EnvironmentEntry,
     sources: &mut Sources,
-) -> Result<belfry_environment::Prefiltered, String> {
+) -> Result<belfry_render::environment::Prefiltered, String> {
     match &entry.source {
         EnvironmentSource::Panorama(path) => {
             let file = scene.root().join(path);
@@ -476,17 +477,21 @@ pub(super) fn environment_data(
             }))
             .map_err(|payload| panic_message(payload.as_ref()))?;
             let panorama = Panorama::new(radiance.width(), radiance.height(), radiance.rgb());
-            catch_unwind(AssertUnwindSafe(|| belfry_environment::filter(&panorama)))
-                .map_err(|payload| panic_message(payload.as_ref()))
+            catch_unwind(AssertUnwindSafe(|| {
+                belfry_render::environment::filter(&panorama)
+            }))
+            .map_err(|payload| panic_message(payload.as_ref()))
         }
         EnvironmentSource::Atmosphere(atmosphere) => atmosphere_data(atmosphere),
     }
 }
 
-fn atmosphere_data(atmosphere: &Atmosphere) -> Result<belfry_environment::Prefiltered, String> {
+fn atmosphere_data(
+    atmosphere: &Atmosphere,
+) -> Result<belfry_render::environment::Prefiltered, String> {
     catch_unwind(AssertUnwindSafe(|| {
         let (radiance, sky) = atmosphere.panoramas(ATMOSPHERE_WIDTH);
-        belfry_environment::filter_with_sky(&radiance, &sky)
+        belfry_render::environment::filter_with_sky(&radiance, &sky)
     }))
     .map_err(|payload| panic_message(payload.as_ref()))
 }
@@ -495,7 +500,7 @@ pub(super) fn atmosphere_fingerprint(atmosphere: &Atmosphere) -> Digest {
     let mut fingerprint = Digest::builder();
     fingerprint
         .text("atmosphere")
-        .number(u64::from(belfry_environment::MODEL_VERSION))
+        .number(u64::from(belfry_render::environment::MODEL_VERSION))
         .number(atmosphere.sun_elevation.to_bits() as u64)
         .number(atmosphere.sun_azimuth.to_bits() as u64)
         .number(atmosphere.sun_intensity.to_bits() as u64)

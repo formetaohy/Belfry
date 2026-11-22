@@ -1,6 +1,6 @@
 use crate::context::Device;
 use crate::pipeline::PipelineHandle;
-use belfry_gpu_shader::ComputeProgram;
+use belfry_gpu::shader::ComputeProgram;
 use std::collections::HashMap;
 use std::sync::Arc;
 

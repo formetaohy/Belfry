@@ -1,6 +1,7 @@
 mod bus;
 mod command;
 mod component;
+mod device;
 mod effect;
 mod frames;
 mod graph;

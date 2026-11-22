@@ -8,8 +8,7 @@ use crate::scene_value::SceneValue;
 use crate::schema::{ComponentSpec, Field, FieldKind, ReferenceKind};
 use crate::value::{Effect, Value};
 use belfry_animation::{AnimationMachine, Parameter, apply};
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::propagate;
+use belfry_ecs::{Entity, World, propagate};
 use belfry_toml::{Fields, Toml};
 
 static FIELDS: &[Field] = &[

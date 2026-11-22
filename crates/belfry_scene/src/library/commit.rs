@@ -249,7 +249,7 @@ impl Commit {
 
 impl Library {
     fn adopt(&mut self, prepared: &mut Prepared) {
-        self.sources = std::mem::replace(&mut prepared.sources, belfry_asset::Sources::new());
+        self.sources = std::mem::take(&mut prepared.sources);
         self.sources.retain(&prepared.files);
         self.models = std::mem::take(&mut prepared.models);
     }

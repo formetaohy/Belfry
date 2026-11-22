@@ -1,12 +1,12 @@
-use belfry_gpu_compiler::AtomicU32;
-use belfry_gpu_compiler::{ComputeProgram, Fvec2, Fvec4, GraphicsProgram, Read, ReadWrite, Uvec3};
-use belfry_render_abi::{
+use crate::abi::{
     BloomRecord, BloomUpRecord, CascadeRecord, DebugLineRecord, DrawRecord, HzbLevelRecord,
     HzbStepRecord, InstanceRecord, JointRecord, LIGHT_CAPACITY, LIGHT_SLICES, LIGHT_STRIDE,
     LIGHT_TILE, LightRecord, MaterialRecord, ProbeRecord, SHADOW_CASCADES, SkinVertexRecord,
     SkyRecord, TonemapRecord, TransparentRecord, TransparentSetupRecord, VERTEX_FLOATS, ViewRecord,
     WORKGROUP,
 };
+use belfry_gpu::AtomicU32;
+use belfry_gpu::{ComputeProgram, Fvec2, Fvec4, GraphicsProgram, Read, ReadWrite, Uvec3};
 
 pub(crate) const CULL_VIEW: u32 = 0;
 pub(crate) const CULL_INSTANCES: u32 = 1;
@@ -108,7 +108,7 @@ const _: () = assert!(
     "the shadow receiver selects one of four cascades",
 );
 const _: () = assert!(
-    belfry_render_abi::HZB_SCALE == 4,
+    crate::abi::HZB_SCALE == 4,
     "the base reduction samples the block the scale names",
 );
 const _: () = assert!(
@@ -124,7 +124,7 @@ const _: () = assert!(
     "a light cluster covers a tile of at least one pixel and one depth slice",
 );
 
-#[belfry_gpu_compiler::kernel(workgroup_size = 64)]
+#[belfry_gpu::kernel(workgroup_size = 64)]
 mod cull {
     #[kernel]
     fn cull(
@@ -270,7 +270,7 @@ mod cull {
     }
 }
 
-#[belfry_gpu_compiler::kernel(workgroup_size = 64)]
+#[belfry_gpu::kernel(workgroup_size = 64)]
 mod cluster {
     #[kernel]
     fn cluster(
@@ -357,7 +357,7 @@ mod cluster {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod instanced {
     #[binding]
     fn light(light: Read<LightRecord>) {}
@@ -1087,7 +1087,7 @@ mod instanced {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod casting {
     #[binding]
     fn palette(palette: Read<JointRecord>) {}
@@ -1181,7 +1181,7 @@ mod casting {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod selection {
     #[binding]
     fn view(view: Read<ViewRecord>) {}
@@ -1261,7 +1261,7 @@ mod selection {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod depth {
     #[binding]
     fn view(view: Read<ViewRecord>) {}
@@ -1375,7 +1375,7 @@ mod depth {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod basis {
     #[binding]
     fn step(step: Read<HzbStepRecord>) {}
@@ -1425,7 +1425,7 @@ mod basis {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod reduction {
     #[binding]
     fn step(step: Read<HzbStepRecord>) {}
@@ -1507,7 +1507,7 @@ pub(crate) fn hzb_reduce() -> GraphicsProgram {
     reduction()
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod transparency {
     #[binding]
     fn settings(settings: Read<TransparentSetupRecord>) {}
@@ -1598,7 +1598,7 @@ pub(crate) fn transparency_resolve() -> GraphicsProgram {
     transparency()
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod bloom_extraction {
     #[binding]
     fn settings(settings: Read<BloomRecord>) {}
@@ -1679,7 +1679,7 @@ mod bloom_extraction {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod bloom_downsampling {
     #[binding]
     fn settings(settings: Read<BloomRecord>) {}
@@ -1728,7 +1728,7 @@ mod bloom_downsampling {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod bloom_upsampling {
     #[binding]
     fn settings(settings: Read<BloomUpRecord>) {}
@@ -1777,7 +1777,7 @@ mod bloom_upsampling {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod tone_mapping {
     #[binding]
     fn settings(settings: Read<TonemapRecord>) {}
@@ -1870,7 +1870,7 @@ mod tone_mapping {
     }
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod sky {
     #[binding]
     fn view(view: Read<SkyRecord>) {}
@@ -1962,7 +1962,7 @@ pub(crate) fn tonemap() -> GraphicsProgram {
     tone_mapping()
 }
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod lines {
     #[binding]
     fn view(view: Read<ViewRecord>) {}

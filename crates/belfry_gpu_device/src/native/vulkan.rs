@@ -19,7 +19,7 @@ use crate::submission::{Command, RecordedCount, Write};
 use crate::surface::WindowHandle;
 use crate::texture::TextureFormat;
 use ash::{Entry, Instance, vk};
-use belfry_gpu_shader::{ComputeProgram, GraphicsProgram, MAX_BINDING_BYTES};
+use belfry_gpu::shader::{ComputeProgram, GraphicsProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString, c_void};
@@ -580,8 +580,6 @@ struct GraphicsPipelineResource {
 fn native_buffer(native: &NativeBuffer) -> &Arc<BufferResource> {
     match native {
         NativeBuffer::Vulkan(buffer) => &buffer.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's buffer"),
     }
 }
 
@@ -592,32 +590,24 @@ fn buffer(gpu: &GpuBuffer) -> &Arc<BufferResource> {
 fn native_texture(native: &NativeTexture) -> &Arc<TextureResource> {
     match native {
         NativeTexture::Vulkan(texture) => &texture.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's texture"),
     }
 }
 
 fn graphics_pipeline(native: &NativeGraphicsPipeline) -> &Arc<GraphicsPipelineResource> {
     match native {
         NativeGraphicsPipeline::Vulkan(pipeline) => &pipeline.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's graphics pipeline"),
     }
 }
 
 fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
     match native {
         NativePipeline::Vulkan(pipeline) => &pipeline.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's pipeline"),
     }
 }
 
 fn native_sampler(native: &crate::NativeSampler) -> &Sampler {
     match native {
         crate::NativeSampler::Vulkan(sampler) => sampler,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's sampler"),
     }
 }
 
@@ -656,8 +646,6 @@ fn address(mode: AddressMode) -> vk::SamplerAddressMode {
 fn group_resource(native: &NativeGroup) -> &Arc<GroupResource> {
     match native {
         NativeGroup::Vulkan(group) => &group.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Vulkan command cannot use another backend's bind group"),
     }
 }
 
@@ -1313,7 +1301,7 @@ impl Device {
 
     fn pipeline_layout(
         &self,
-        bindings: &[belfry_gpu_shader::BindingSpec],
+        bindings: &[belfry_gpu::shader::BindingSpec],
         stages: vk::ShaderStageFlags,
         label: &str,
     ) -> (Vec<vk::DescriptorSetLayout>, vk::PipelineLayout) {
@@ -1331,12 +1319,12 @@ impl Device {
                     vk::DescriptorSetLayoutBinding::default()
                         .binding(spec.binding)
                         .descriptor_type(match spec.kind {
-                            belfry_gpu_shader::BindingKind::SampledImage
-                            | belfry_gpu_shader::BindingKind::SampledImageTable => {
+                            belfry_gpu::shader::BindingKind::SampledImage
+                            | belfry_gpu::shader::BindingKind::SampledImageTable => {
                                 vk::DescriptorType::SAMPLED_IMAGE
                             }
-                            belfry_gpu_shader::BindingKind::Sampler
-                            | belfry_gpu_shader::BindingKind::SamplerTable => {
+                            belfry_gpu::shader::BindingKind::Sampler
+                            | belfry_gpu::shader::BindingKind::SamplerTable => {
                                 vk::DescriptorType::SAMPLER
                             }
                             _ => vk::DescriptorType::STORAGE_BUFFER,
@@ -1478,8 +1466,6 @@ impl Device {
                 BoundResource::TextureTable(table) => {
                     match table.native() {
                         super::NativeTextureTable::Vulkan => {}
-                        #[cfg(multiple_backends)]
-                        _ => panic!("a Vulkan command cannot use another backend's texture table"),
                     }
                     sources.push((
                         descriptor_type(resource),
@@ -1499,8 +1485,6 @@ impl Device {
                 BoundResource::SamplerTable(table) => {
                     match table.native() {
                         super::NativeSamplerTable::Vulkan => {}
-                        #[cfg(multiple_backends)]
-                        _ => panic!("a Vulkan command cannot use another backend's sampler table"),
                     }
                     sources.push((
                         descriptor_type(resource),
@@ -2060,7 +2044,7 @@ impl Device {
         artifacts: &ArtifactCache,
     ) {
         pipeline.resource.compiled.get_or_init(|| {
-            let belfry_gpu_shader::GraphicsTranslation::Spirv {
+            let belfry_gpu::shader::GraphicsTranslation::Spirv {
                 module,
                 vertex,
                 fragment,

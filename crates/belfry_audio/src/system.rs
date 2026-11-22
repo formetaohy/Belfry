@@ -1,11 +1,11 @@
 use crate::bus::{AudioBus, BusState};
 use crate::command::{Command, Event, VoiceId};
 use crate::component::{AudioListener, AudioSource};
+use crate::device::{Output, OutputFormat, Stream};
 use crate::graph::{self, BusParams, Layout};
 use crate::mixer::{MAX_VOICES, Mixer};
 use crate::ring;
 use crate::spatial::{self, Listener};
-use belfry_audio_device::{Output, OutputFormat, Stream};
 use belfry_ecs::{Entity, World};
 use belfry_math::Transform;
 use std::collections::hash_map::DefaultHasher;
@@ -14,7 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use belfry_audio_device::Unavailable as AudioUnavailable;
+pub use crate::device::Unavailable as AudioUnavailable;
 
 const COMMAND_CAPACITY: usize = 8192;
 const EVENT_CAPACITY: usize = 4096;

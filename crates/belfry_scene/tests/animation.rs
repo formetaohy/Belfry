@@ -1,6 +1,5 @@
 use belfry_animation::{AnimationMachine, Clip, Interpolation, Property, Track, advance};
-use belfry_ecs::World;
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{LocalTransform, World};
 use belfry_math::Mat4;
 use belfry_scene::{
     Assets, NodeId, Scene, SceneNode, SkinData, Target, Value, observe_runtime,

@@ -1,9 +1,9 @@
+use crate::abi::{HZB_LEVEL, HZB_SCALE, HZB_STEP, HzbLevelRecord, HzbStepRecord};
 use crate::program;
 use belfry_gpu_device::{
     BindGroup, Binding, BufferBinding, BufferUsages, Device, Draw, GpuBuffer, GraphicsPipeline,
     PipelineHandle, Queue, Sampler, Submission, Texture, TextureFormat, TextureUsages,
 };
-use belfry_render_abi::{HZB_LEVEL, HZB_SCALE, HZB_STEP, HzbLevelRecord, HzbStepRecord};
 use std::mem::size_of;
 
 const HZB_LEVEL_BYTES: u64 = size_of::<HzbLevelRecord>() as u64;

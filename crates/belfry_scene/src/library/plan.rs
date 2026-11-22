@@ -198,7 +198,7 @@ pub(super) fn plan(job: Job) -> Prepared {
                 &mut files,
             ),
             crate::mesh::Geometry::Shape(_) | crate::mesh::Geometry::Vertices(_) => {
-                Ok(belfry_asset::Digest::default())
+                Ok(crate::digest::Digest::default())
             }
         };
         let fingerprint = mesh_fingerprint(entry, model.as_ref().ok().copied(), wanted);
@@ -321,19 +321,19 @@ pub(super) fn plan(job: Job) -> Prepared {
         let key = digest.as_ref().ok().map(|digest| match &entry.source {
             EnvironmentSource::Panorama(_) => format!(
                 "v{}/{}.env",
-                belfry_environment::CACHE_VERSION,
+                belfry_render::environment::CACHE_VERSION,
                 digest.hex(),
             ),
             EnvironmentSource::Atmosphere(_) => format!(
                 "v{}/atmosphere-{}.env",
-                belfry_environment::CACHE_VERSION,
+                belfry_render::environment::CACHE_VERSION,
                 digest.hex(),
             ),
         });
         let cached = key
             .as_ref()
             .and_then(|key| environment_cache.load(key))
-            .and_then(|bytes| belfry_environment::decode(&bytes));
+            .and_then(|bytes| belfry_render::environment::decode(&bytes));
         let prepared = match cached {
             Some(image) => Ok((image, false)),
             None => digest
@@ -345,7 +345,7 @@ pub(super) fn plan(job: Job) -> Prepared {
         match prepared {
             Ok((image, computed)) => {
                 if computed && let Some(key) = &key {
-                    environment_cache.store(key, &belfry_environment::encode(&image));
+                    environment_cache.store(key, &belfry_render::environment::encode(&image));
                 }
                 environments.push(PreparedEnvironment {
                     entry: entry.clone(),
@@ -446,7 +446,7 @@ fn mips(data: &ImageBytes, colors: &HashSet<ColorSpace>) -> ImageMips {
 }
 
 fn absent<T>(
-    held: &HashMap<String, belfry_asset::Digest>,
+    held: &HashMap<String, crate::digest::Digest>,
     entries: &[T],
     id: impl Fn(&T) -> &str,
 ) -> Vec<String> {

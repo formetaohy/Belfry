@@ -1,9 +1,9 @@
+use crate::abi::{BloomRecord, BloomUpRecord, TonemapRecord};
 use crate::program;
 use belfry_gpu_device::{
     AddressMode, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GraphicsPipeline,
     PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture, TextureFormat, TextureUsages,
 };
-use belfry_render_abi::{BloomRecord, BloomUpRecord, TonemapRecord};
 use std::mem::size_of;
 
 const BLOOM_LEVELS: usize = 5;
@@ -344,14 +344,14 @@ fn dimensions_of(width: u32, height: u32) -> Vec<(u32, u32)> {
 }
 
 const _: () = assert!(
-    BLOOM_BYTES == belfry_render_abi::BLOOM.size as u64,
+    BLOOM_BYTES == crate::abi::BLOOM.size as u64,
     "the bloom record keeps the layout its shader reads",
 );
 const _: () = assert!(
-    BLOOM_UP_BYTES == belfry_render_abi::BLOOM_UP.size as u64,
+    BLOOM_UP_BYTES == crate::abi::BLOOM_UP.size as u64,
     "the bloom up record keeps the layout its shader reads",
 );
 const _: () = assert!(
-    TONEMAP_BYTES == belfry_render_abi::TONEMAP.size as u64,
+    TONEMAP_BYTES == crate::abi::TONEMAP.size as u64,
     "the tonemap record keeps the layout its shader reads",
 );

@@ -1,6 +1,6 @@
 use belfry_app::{App, AppConfig, HeadlessConfig, Time};
 use belfry_ecs::World;
-use belfry_png::Image;
+use belfry_image::Image;
 use belfry_scene::SceneNode;
 use std::fs;
 use std::path::PathBuf;

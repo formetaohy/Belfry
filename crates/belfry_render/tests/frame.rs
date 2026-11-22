@@ -1,10 +1,10 @@
 use belfry_ecs::World;
-use belfry_environment::{Panorama, irradiance, specular};
 use belfry_gpu_device::{
     AddressMode, Backend, BufferUsages, Filter, GpuBuffer, GpuContext, GpuRequest, Sampler,
     SamplerDesc, Submission, Texture, TextureFormat, TextureUsages,
 };
 use belfry_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
+use belfry_render::environment::{Panorama, irradiance, specular};
 use belfry_render::{
     AlphaMode, Camera, DirectionalLight, Environment, Lines, MaterialDesc, MaterialImage,
     MeshInstance, PointLight, Renderer, SamplerDesc as RenderSamplerDesc, Skin, SkinVertexRecord,
@@ -1423,7 +1423,7 @@ fn ambient(backend: Backend) {
         TextureFormat::Rgba16Float,
         TextureUsages::SAMPLED | TextureUsages::COPY_DST,
     );
-    let sky = belfry_environment::sky(&panorama);
+    let sky = belfry_render::environment::sky(&panorama);
     let sky_bytes = sky
         .texels
         .iter()
@@ -1704,7 +1704,7 @@ fn environment(renderer: &mut Renderer, radiance: Vec3) -> Environment {
         TextureFormat::Rgba16Float,
         TextureUsages::SAMPLED | TextureUsages::COPY_DST,
     );
-    let sky = belfry_environment::sky(&panorama);
+    let sky = belfry_render::environment::sky(&panorama);
     let sky_bytes = sky
         .texels
         .iter()

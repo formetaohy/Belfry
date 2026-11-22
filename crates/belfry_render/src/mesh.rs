@@ -1,8 +1,8 @@
+use crate::abi::{SKIN_VERTEX, SkinVertexRecord, VERTEX_FLOATS, Vertex};
 use crate::span;
-use belfry_gpu_compiler::{Fvec4, Uvec4};
+use belfry_gpu::{Fvec4, Uvec4};
 use belfry_gpu_device::{BufferUsages, Device, GpuBuffer, Queue};
 use belfry_math::{Aabb, Vec3};
-use belfry_render_abi::{SKIN_VERTEX, SkinVertexRecord, VERTEX_FLOATS, Vertex};
 use std::mem::size_of;
 
 const VERTEX_BYTES: u64 = VERTEX_FLOATS as u64 * 4;

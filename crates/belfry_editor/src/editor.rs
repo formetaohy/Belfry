@@ -954,7 +954,7 @@ impl Handler for Editor {
             _ => {}
         }
         if let Some(session) = &mut self.session {
-            belfry_ui_window::handle(session.ui.input_mut(), &event, scale);
+            session.ui.input_mut().window(&event, scale);
         }
     }
 

@@ -10,10 +10,6 @@ use objc2_metal::MTLDevice;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(dx12_backend)]
-use windows::Win32::Graphics::Direct3D12::ID3D12Device;
-#[cfg(dx12_backend)]
-use windows::core::Interface;
 
 pub(crate) const HOST_SLICE: Duration = Duration::from_millis(1);
 
@@ -55,8 +51,6 @@ pub struct HostDevice<'a> {
 pub(crate) enum HostKind<'a> {
     #[cfg(vulkan_backend)]
     Vulkan(VulkanHost<'a>),
-    #[cfg(dx12_backend)]
-    Dx12(&'a ID3D12Device),
     #[cfg(metal_backend)]
     Metal(&'a Retained<ProtocolObject<dyn MTLDevice>>),
 }
@@ -66,15 +60,6 @@ impl<'a> HostDevice<'a> {
     pub fn vulkan(host: VulkanHost<'a>) -> Self {
         Self {
             kind: HostKind::Vulkan(host),
-            advance: None,
-            hold: None,
-        }
-    }
-
-    #[cfg(dx12_backend)]
-    pub fn dx12(device: &'a ID3D12Device) -> Self {
-        Self {
-            kind: HostKind::Dx12(device),
             advance: None,
             hold: None,
         }
@@ -111,8 +96,6 @@ impl<'a> HostDevice<'a> {
         match &self.kind {
             #[cfg(vulkan_backend)]
             HostKind::Vulkan(_) => Backend::Vulkan,
-            #[cfg(dx12_backend)]
-            HostKind::Dx12(_) => Backend::Dx12,
             #[cfg(metal_backend)]
             HostKind::Metal(_) => Backend::Metal,
         }
@@ -126,10 +109,6 @@ impl<'a> HostDevice<'a> {
                 vk::Handle::as_raw(host.device.handle()),
                 vk::Handle::as_raw(host.queue),
             ),
-            #[cfg(dx12_backend)]
-            HostKind::Dx12(device) => {
-                HostIdentity::of(Backend::Dx12, Interface::as_raw(*device) as usize as u64, 0)
-            }
             #[cfg(metal_backend)]
             HostKind::Metal(device) => {
                 HostIdentity::of(Backend::Metal, metal_identity(device) as u64, 0)

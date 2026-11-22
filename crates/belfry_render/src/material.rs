@@ -1,11 +1,11 @@
-use belfry_gpu_compiler::Fvec4;
-use belfry_gpu_compiler::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
+use crate::abi::{ALPHA_BLEND, ALPHA_MASK, ALPHA_OPAQUE, MaterialRecord};
+use belfry_gpu::Fvec4;
+use belfry_gpu::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
 use belfry_gpu_device::{
     AddressMode, Device, Filter, Queue, Sampler, SamplerDesc, SamplerTable, Texture, TextureFormat,
     TextureTable, TextureUsages,
 };
 use belfry_math::Vec3;
-use belfry_render_abi::{ALPHA_BLEND, ALPHA_MASK, ALPHA_OPAQUE, MaterialRecord};
 
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];

@@ -3,8 +3,7 @@ use crate::field::{Axis, array_toml, euler, finite, vector_toml, with_axis};
 use crate::scene::Scene;
 use crate::schema::{ComponentSpec, Field, FieldKind};
 use crate::value::{Effect, Value};
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::{LocalTransform, Parent, propagate};
+use belfry_ecs::{Entity, LocalTransform, Parent, World, propagate};
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_toml::{Fields, Toml, floats};
 

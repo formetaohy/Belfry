@@ -11,7 +11,7 @@ use crate::native::{self, NativeDevice};
 use crate::pipeline::PipelineHandle;
 use crate::submission::{Command, SubmissionIndex, Write};
 use crate::surface::{Surface, WindowHandle};
-use belfry_gpu_shader::ComputeProgram;
+use belfry_gpu::shader::ComputeProgram;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
@@ -280,7 +280,7 @@ impl Device {
     pub fn clip_space(&self) -> ClipSpace {
         match self.state.info.backend {
             Backend::Vulkan => ClipSpace::YDown,
-            Backend::Dx12 | Backend::Metal => ClipSpace::YUp,
+            Backend::Metal => ClipSpace::YUp,
         }
     }
 

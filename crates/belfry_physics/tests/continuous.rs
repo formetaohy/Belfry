@@ -1,5 +1,4 @@
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{Entity, LocalTransform, World};
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_physics::{BodyKind, Collider, Gravity, RigidBody, Shape, TriangleMesh, step};
 use std::sync::Arc;

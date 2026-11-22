@@ -1,5 +1,6 @@
 use super::prepare::{CachedModel, panic_message};
 use super::{AssetError, TextureKey};
+use crate::digest::Digest;
 use crate::environment::EnvironmentEntry;
 use crate::image::ImageEntry;
 use crate::material::MaterialEntry;
@@ -7,8 +8,8 @@ use crate::mesh::MeshEntry;
 use crate::scene::Scene;
 use crate::skin::{SkinData, SkinEntry};
 use crate::sound::SoundEntry;
+use crate::source::Sources;
 use belfry_animation::Clip;
-use belfry_asset::{Digest, Sources};
 use belfry_audio::Source;
 use belfry_gpu_device::ArtifactCache;
 use belfry_image::ColorSpace;
@@ -103,7 +104,7 @@ pub(super) struct PreparedSound {
 pub(super) struct PreparedEnvironment {
     pub(super) entry: EnvironmentEntry,
     pub(super) fingerprint: Digest,
-    pub(super) image: belfry_environment::Prefiltered,
+    pub(super) image: belfry_render::environment::Prefiltered,
 }
 
 #[derive(Default)]

@@ -2,7 +2,7 @@
 name = "belfry_text"
 version.workspace = true
 edition.workspace = true
-description = "Font loading, glyph atlases and text layout for the Belfry engine"
+description = "Font loading, glyph atlases and text layout"
 license.workspace = true
 repository.workspace = true
 

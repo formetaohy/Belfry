@@ -3,12 +3,13 @@ mod plan;
 mod prepare;
 mod work;
 
+use crate::digest::Digest;
 use crate::material::MaterialEntry;
 use crate::registry::Assets;
 use crate::scene::Scene;
 use crate::skin::SkinData;
+use crate::source::Sources;
 use belfry_animation::Clip;
-use belfry_asset::{Digest, Sources};
 use belfry_audio::Source;
 use belfry_gpu_device::ArtifactCache;
 use belfry_image::ColorSpace;

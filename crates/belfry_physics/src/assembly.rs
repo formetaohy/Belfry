@@ -3,8 +3,7 @@ use crate::body::{Body, ParentFrame};
 use crate::collider::Collider;
 use crate::joint::Joint;
 use crate::part::Part;
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::{LocalTransform, Parent, world_transform};
+use belfry_ecs::{Entity, LocalTransform, Parent, World, world_transform};
 use belfry_math::Transform;
 use std::collections::{BTreeMap, BTreeSet};
 

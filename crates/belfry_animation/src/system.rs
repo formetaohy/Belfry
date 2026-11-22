@@ -1,6 +1,5 @@
 use crate::AnimationMachine;
-use belfry_ecs::World;
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{LocalTransform, World};
 
 pub fn apply(world: &mut World, machine: &AnimationMachine) {
     for (target, transform) in machine.pose(world) {

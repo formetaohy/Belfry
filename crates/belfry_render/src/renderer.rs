@@ -1,3 +1,11 @@
+use crate::abi::{
+    ARGUMENT_WORDS, CascadeRecord, DebugLineRecord, DrawRecord, InstanceRecord, JOINT, JointRecord,
+    LIGHT, LIGHT_CAPACITY, LIGHT_SLICES, LIGHT_STRIDE, LIGHT_TILE, LightRecord, MATERIAL,
+    MaterialRecord, NO_HIGHLIGHT, POINT_LIGHT, PointLightRecord, SHADOW_ATLAS,
+    SHADOW_ATLAS_COLUMNS, SHADOW_CASCADES, SHADOW_SIDE, SkinVertexRecord, SkyRecord, VERTEX_FLOATS,
+    ViewRecord, WORKGROUP,
+};
+use crate::environment::BRDF_SIZE;
 use crate::environment::Environment;
 use crate::frame::{
     Batch, Placement, Screen, Skinning, ambient_of, arguments_of, bases_of, camera_of,
@@ -22,21 +30,13 @@ use crate::span;
 use crate::transparency::Transparency;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
-use belfry_environment::BRDF_SIZE;
-use belfry_gpu_compiler::Fvec4;
+use belfry_gpu::Fvec4;
 use belfry_gpu_device::{
     AddressMode, BindGroup, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GpuContext,
     GraphicsPipeline, PipelineHandle, PipelineState, Queue, Sampler, SamplerDesc, SamplerTable,
     Submission, SurfaceFrame, Texture, TextureFormat, TextureTable, TextureUsages, Viewport,
 };
 use belfry_math::{Mat4, Transform, Vec2, Vec3};
-use belfry_render_abi::{
-    ARGUMENT_WORDS, CascadeRecord, DebugLineRecord, DrawRecord, InstanceRecord, JOINT, JointRecord,
-    LIGHT, LIGHT_CAPACITY, LIGHT_SLICES, LIGHT_STRIDE, LIGHT_TILE, LightRecord, MATERIAL,
-    MaterialRecord, NO_HIGHLIGHT, POINT_LIGHT, PointLightRecord, SHADOW_ATLAS,
-    SHADOW_ATLAS_COLUMNS, SHADOW_CASCADES, SHADOW_SIDE, SkinVertexRecord, SkyRecord, VERTEX_FLOATS,
-    ViewRecord, WORKGROUP,
-};
 use half::f16;
 use std::mem::size_of;
 
@@ -158,16 +158,15 @@ impl Renderer {
         );
         let limits = device.limits();
         assert!(
-            belfry_gpu_compiler::TEXTURE_TABLE_CAPACITY
-                <= limits.max_sampled_images_per_shader_stage,
+            belfry_gpu::TEXTURE_TABLE_CAPACITY <= limits.max_sampled_images_per_shader_stage,
             "the renderer material table of {} images outruns the device limit of {}",
-            belfry_gpu_compiler::TEXTURE_TABLE_CAPACITY,
+            belfry_gpu::TEXTURE_TABLE_CAPACITY,
             limits.max_sampled_images_per_shader_stage,
         );
         assert!(
-            belfry_gpu_compiler::SAMPLER_TABLE_CAPACITY <= limits.max_samplers_per_shader_stage,
+            belfry_gpu::SAMPLER_TABLE_CAPACITY <= limits.max_samplers_per_shader_stage,
             "the renderer material table of {} samplers outruns the device limit of {}",
-            belfry_gpu_compiler::SAMPLER_TABLE_CAPACITY,
+            belfry_gpu::SAMPLER_TABLE_CAPACITY,
             limits.max_samplers_per_shader_stage,
         );
         let draw = GraphicsPipeline::new(
@@ -237,7 +236,7 @@ impl Renderer {
             TextureFormat::Rgba16Float,
             TextureUsages::SAMPLED | TextureUsages::COPY_DST,
         );
-        let table = belfry_environment::brdf(BRDF_SIZE);
+        let table = crate::environment::brdf(BRDF_SIZE);
         let texels = table
             .iter()
             .flat_map(|texel| texel.iter())
@@ -493,13 +492,13 @@ impl Renderer {
         self.probes.reset();
     }
 
-    pub fn mesh(&mut self, vertices: &[belfry_render_abi::Vertex]) -> Mesh {
+    pub fn mesh(&mut self, vertices: &[crate::abi::Vertex]) -> Mesh {
         self.meshes.add(&self.queue, vertices)
     }
 
     pub fn skinned_mesh(
         &mut self,
-        vertices: &[belfry_render_abi::Vertex],
+        vertices: &[crate::abi::Vertex],
         skin: &[SkinVertexRecord],
     ) -> Mesh {
         self.meshes.add_skinned(&self.queue, vertices, skin)
@@ -514,7 +513,7 @@ impl Renderer {
         self.pick_frame = None;
     }
 
-    pub fn update_mesh(&mut self, mesh: Mesh, vertices: &[belfry_render_abi::Vertex]) {
+    pub fn update_mesh(&mut self, mesh: Mesh, vertices: &[crate::abi::Vertex]) {
         self.meshes.update(&self.queue, mesh, vertices, None);
         self.pick_frame = None;
     }
@@ -522,7 +521,7 @@ impl Renderer {
     pub fn update_skinned_mesh(
         &mut self,
         mesh: Mesh,
-        vertices: &[belfry_render_abi::Vertex],
+        vertices: &[crate::abi::Vertex],
         skin: &[SkinVertexRecord],
     ) {
         assert_eq!(
@@ -1594,7 +1593,7 @@ const _: () = assert!(
     "the cascade record keeps the layout its shader reads",
 );
 const _: () = assert!(
-    belfry_render_abi::CASCADE.size as u64 == CASCADE_BYTES,
+    crate::abi::CASCADE.size as u64 == CASCADE_BYTES,
     "the cascade layout spans its record",
 );
 const _: () = assert!(

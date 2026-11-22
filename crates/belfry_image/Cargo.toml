@@ -2,7 +2,7 @@
 name = "belfry_image"
 version.workspace = true
 edition.workspace = true
-description = "Mip chains of eight bit RGBA images"
+description = "Portable network graphics and Radiance pictures decoded, encoded and mip chained"
 license.workspace = true
 repository.workspace = true
 
@@ -11,3 +11,6 @@ doctest = false
 
 [lints]
 workspace = true
+
+[dependencies]
+flate2 = { workspace = true }

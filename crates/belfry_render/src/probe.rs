@@ -1,11 +1,11 @@
+use crate::abi::{PROBE, ProbeRecord};
 use crate::environment::Environment;
 use crate::growing::Growing;
-use belfry_gpu_compiler::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
+use belfry_gpu::{SAMPLER_TABLE_CAPACITY, TEXTURE_TABLE_CAPACITY};
 use belfry_gpu_device::{
     BufferBinding, BufferUsages, Device, Queue, Sampler, SamplerTable, Texture, TextureTable,
 };
 use belfry_math::{Mat4, Transform, Vec3};
-use belfry_render_abi::{PROBE, ProbeRecord};
 use std::mem::size_of;
 
 const PROBE_BYTES: u64 = size_of::<ProbeRecord>() as u64;
@@ -138,8 +138,8 @@ fn record(
     }
 }
 
-fn vector(value: Vec3, w: f32) -> belfry_gpu_compiler::Fvec4 {
-    belfry_gpu_compiler::Fvec4 {
+fn vector(value: Vec3, w: f32) -> belfry_gpu::Fvec4 {
+    belfry_gpu::Fvec4 {
         x: value.x,
         y: value.y,
         z: value.z,
@@ -147,9 +147,9 @@ fn vector(value: Vec3, w: f32) -> belfry_gpu_compiler::Fvec4 {
     }
 }
 
-fn column(matrix: Mat4, index: usize) -> belfry_gpu_compiler::Fvec4 {
+fn column(matrix: Mat4, index: usize) -> belfry_gpu::Fvec4 {
     let held = matrix.col(index);
-    belfry_gpu_compiler::Fvec4 {
+    belfry_gpu::Fvec4 {
         x: held.x,
         y: held.y,
         z: held.z,

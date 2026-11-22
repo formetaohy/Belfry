@@ -1,7 +1,7 @@
 use crate::abi::{UiInstanceRecord, UiScreenRecord};
-use belfry_gpu_compiler::{Fvec2, Fvec4, GraphicsProgram};
+use belfry_gpu::{Fvec2, Fvec4, GraphicsProgram};
 
-#[belfry_gpu_compiler::graphics]
+#[belfry_gpu::graphics]
 mod paint {
     #[binding]
     fn screen(screen: Read<UiScreenRecord>) {}

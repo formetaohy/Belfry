@@ -6,7 +6,7 @@ use crate::native::{NativeGraphicsPipeline, NativeGroup, NativePipeline};
 use crate::sampler::Sampler;
 use crate::table::{SamplerTable, TextureTable};
 use crate::texture::Texture;
-use belfry_gpu_shader::{BindingKind, BindingSpec, ComputeProgram, GraphicsProgram};
+use belfry_gpu::shader::{BindingKind, BindingSpec, ComputeProgram, GraphicsProgram};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -115,7 +115,7 @@ pub struct GraphicsPipeline {
 pub struct BindGroup {
     pub(crate) native: NativeGroup,
     pub(crate) group: u32,
-    #[cfg(any(dx12_backend, metal_backend))]
+    #[cfg(metal_backend)]
     pub(crate) resources: Vec<BoundResource>,
     pub(crate) owner: Owner,
 }
@@ -157,7 +157,7 @@ impl PipelineHandle {
         BindGroup {
             native,
             group,
-            #[cfg(any(dx12_backend, metal_backend))]
+            #[cfg(metal_backend)]
             resources,
             owner: Owner::Compute(self.slot.clone()),
         }
@@ -228,7 +228,7 @@ impl GraphicsPipeline {
         BindGroup {
             native,
             group,
-            #[cfg(any(dx12_backend, metal_backend))]
+            #[cfg(metal_backend)]
             resources,
             owner: Owner::Graphics(self.slot.clone()),
         }

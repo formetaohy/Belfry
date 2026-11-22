@@ -1,5 +1,4 @@
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::{LocalTransform, Parent};
+use belfry_ecs::{Entity, LocalTransform, Parent, World};
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_physics::{
     BodyKind, Collider, CollisionFilter, Gravity, RigidBody, Shape, raycast, step,

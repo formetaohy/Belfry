@@ -2,7 +2,7 @@
 name = "belfry_gpu"
 version.workspace = true
 edition.workspace = true
-description = "The shared GPU stack a graphics or compute program authors against"
+description = "The device DSL, its lowering into shader modules, and the SPIR-V and Metal text a module compiles to"
 license.workspace = true
 repository.workspace = true
 
@@ -14,9 +14,5 @@ doctest = false
 workspace = true
 
 [dependencies]
-belfry_gpu_ast = { workspace = true }
-belfry_gpu_compiler = { workspace = true }
-belfry_gpu_device = { workspace = true }
-belfry_gpu_layout = { workspace = true }
 belfry_gpu_macro = { workspace = true }
-belfry_gpu_shader = { workspace = true }
+bytemuck = { workspace = true }

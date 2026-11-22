@@ -1,5 +1,4 @@
-use belfry_ecs::World;
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{LocalTransform, World};
 use belfry_math::{Transform, Vec3};
 use belfry_scene::{Assets, Scene, SceneSync, SkinData, Target};
 use std::sync::Arc;

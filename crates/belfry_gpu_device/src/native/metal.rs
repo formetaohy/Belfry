@@ -18,7 +18,7 @@ use crate::sampler::{AddressMode, Filter, SamplerDesc};
 use crate::submission::{Command, RecordedCount, Write};
 use crate::surface::WindowHandle;
 use crate::texture::TextureFormat;
-use belfry_gpu_shader::{
+use belfry_gpu::shader::{
     ComputeProgram, GraphicsProgram, GraphicsTranslation, MAX_BINDING_BYTES,
     METAL_SIZE_BUFFER_SLOT, ShaderTranslation,
 };
@@ -247,24 +247,18 @@ impl SamplerTable {
 fn texture_table(native: &crate::native::NativeTextureTable) -> &TextureTable {
     match native {
         crate::native::NativeTextureTable::Metal(table) => table,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's texture table"),
     }
 }
 
 fn sampler_table(native: &crate::native::NativeSamplerTable) -> &SamplerTable {
     match native {
         crate::native::NativeSamplerTable::Metal(table) => table,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's sampler table"),
     }
 }
 
 fn native_sampler(native: &crate::NativeSampler) -> &Sampler {
     match native {
         crate::NativeSampler::Metal(sampler) => sampler,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's sampler"),
     }
 }
 
@@ -327,8 +321,6 @@ impl Archive {
 fn native_buffer(native: &NativeBuffer) -> &Arc<BufferResource> {
     match native {
         NativeBuffer::Metal(buffer) => &buffer.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's buffer"),
     }
 }
 
@@ -339,32 +331,24 @@ fn buffer(gpu: &GpuBuffer) -> &Arc<BufferResource> {
 fn native_texture(native: &NativeTexture) -> &Arc<TextureResource> {
     match native {
         NativeTexture::Metal(texture) => &texture.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's texture"),
     }
 }
 
 fn graphics_pipeline(native: &NativeGraphicsPipeline) -> &Arc<GraphicsPipelineResource> {
     match native {
         NativeGraphicsPipeline::Metal(pipeline) => &pipeline.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's graphics pipeline"),
     }
 }
 
 fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
     match native {
         NativePipeline::Metal(pipeline) => &pipeline.resource,
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's pipeline"),
     }
 }
 
 fn claim_group(native: &NativeGroup) {
     match native {
         NativeGroup::Metal => {}
-        #[cfg(multiple_backends)]
-        _ => panic!("a Metal command cannot use another backend's bind group"),
     }
 }
 

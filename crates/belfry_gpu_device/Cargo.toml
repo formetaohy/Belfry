@@ -2,7 +2,7 @@
 name = "belfry_gpu_device"
 version.workspace = true
 edition.workspace = true
-description = "Native DX12, Vulkan and Metal devices, memory, pipelines and submissions"
+description = "Native Vulkan and Metal devices, memory, pipelines and submissions"
 license.workspace = true
 repository.workspace = true
 
@@ -15,24 +15,11 @@ workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
-belfry_gpu_shader = { workspace = true }
+belfry_gpu = { workspace = true }
 raw-window-handle = { workspace = true }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
 ash = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-libloading = { workspace = true }
-windows = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D_Dxc",
-    "Win32_Graphics_Direct3D12",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_System_Threading",
-] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = { workspace = true }
@@ -62,4 +49,4 @@ objc2-metal = { workspace = true, features = [
 
 [dev-dependencies]
 bytemuck = { workspace = true }
-belfry_gpu_compiler = { workspace = true }
+belfry_gpu = { workspace = true }

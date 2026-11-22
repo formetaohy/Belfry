@@ -31,7 +31,7 @@ pub(crate) fn function(source: &syn::ItemFn) -> syn::Result<TokenStream> {
         };
         let arg_name = ident.ident.to_string();
         let ty = ty(&argument.ty)?;
-        arguments.push(quote!(belfry_gpu_ast::Argument {
+        arguments.push(quote!(belfry_ast::Argument {
             name: #arg_name.into(), ty: #ty,
         }));
     }
@@ -44,7 +44,7 @@ pub(crate) fn function(source: &syn::ItemFn) -> syn::Result<TokenStream> {
     };
     let returns = matches!(source.sig.output, syn::ReturnType::Type(_, _));
     let body = tail_statements(&source.block.stmts, returns)?;
-    Ok(quote!(belfry_gpu_ast::Function {
+    Ok(quote!(belfry_ast::Function {
         name: #name.into(),
         arguments: vec![#(#arguments),*],
         result: #result,
@@ -66,12 +66,12 @@ fn ty(source: &syn::Type) -> syn::Result<TokenStream> {
                 "Fvec4" => "fvec4",
                 _ => name.as_str(),
             };
-            Ok(quote!(belfry_gpu_ast::Type::Named(#name.into())))
+            Ok(quote!(belfry_ast::Type::Named(#name.into())))
         }
         syn::Type::Array(array) => {
             let element = ty(&array.elem)?;
             let length = expression(&array.len)?;
-            Ok(quote!(belfry_gpu_ast::Type::Array {
+            Ok(quote!(belfry_ast::Type::Array {
                 element: Box::new(#element), length: Box::new(#length),
             }))
         }
@@ -111,7 +111,7 @@ fn tail_statement(source: &Expr) -> syn::Result<TokenStream> {
 }
 
 fn tail_expression(source: &Expr) -> syn::Result<TokenStream> {
-    let path = quote!(belfry_gpu_ast::Statement);
+    let path = quote!(belfry_ast::Statement);
     match source {
         Expr::If(expr) => if_statement(expr, true),
         Expr::Match(selection) => match_statement(selection, true),
@@ -146,7 +146,7 @@ fn branch(source: &Expr, tail: bool) -> syn::Result<Vec<TokenStream>> {
 }
 
 fn if_statement(expr: &syn::ExprIf, tail: bool) -> syn::Result<TokenStream> {
-    let path = quote!(belfry_gpu_ast::Statement);
+    let path = quote!(belfry_ast::Statement);
     let condition = expression(&expr.cond)?;
     let accept = block_statements(&expr.then_branch, tail)?;
     let reject = expr
@@ -161,7 +161,7 @@ fn if_statement(expr: &syn::ExprIf, tail: bool) -> syn::Result<TokenStream> {
 }
 
 fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenStream> {
-    let path = quote!(belfry_gpu_ast::Statement);
+    let path = quote!(belfry_ast::Statement);
     let selector = expression(&selection.expr)?;
     let mut arms = Vec::new();
     for arm in &selection.arms {
@@ -172,7 +172,7 @@ fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenS
             ));
         }
         let pattern = match &arm.pat {
-            Pat::Wild(_) => quote!(belfry_gpu_ast::Pattern::Default),
+            Pat::Wild(_) => quote!(belfry_ast::Pattern::Default),
             Pat::Lit(lit) => {
                 let Lit::Int(number) = &lit.lit else {
                     return Err(syn::Error::new_spanned(
@@ -181,7 +181,7 @@ fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenS
                     ));
                 };
                 let (value, _) = integer(number)?;
-                quote!(belfry_gpu_ast::Pattern::Integer(#value))
+                quote!(belfry_ast::Pattern::Integer(#value))
             }
             Pat::Path(path) if path.path.segments.len() > 1 => {
                 let name = path
@@ -191,7 +191,7 @@ fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenS
                     .map(|part| part.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
-                quote!(belfry_gpu_ast::Pattern::Constant(#name.into()))
+                quote!(belfry_ast::Pattern::Constant(#name.into()))
             }
             _ => {
                 return Err(syn::Error::new_spanned(
@@ -201,7 +201,7 @@ fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenS
             }
         };
         let body = branch(&arm.body, tail)?;
-        arms.push(quote!(belfry_gpu_ast::Arm {
+        arms.push(quote!(belfry_ast::Arm {
             pattern: #pattern, body: vec![#(#body),*],
         }));
     }
@@ -232,7 +232,7 @@ fn statement(source: &Stmt) -> syn::Result<TokenStream> {
             let name = ident.ident.to_string();
             let mutable = ident.mutability.is_some();
             let value = expression(&init.expr)?;
-            Ok(quote!(belfry_gpu_ast::Statement::Let {
+            Ok(quote!(belfry_ast::Statement::Let {
                 name: #name.into(), mutable: #mutable, value: #value,
             }))
         }
@@ -245,7 +245,7 @@ fn statement(source: &Stmt) -> syn::Result<TokenStream> {
 }
 
 fn executable(source: &Expr) -> syn::Result<TokenStream> {
-    let path = quote!(belfry_gpu_ast::Statement);
+    let path = quote!(belfry_ast::Statement);
     match source {
         Expr::If(expr) => if_statement(expr, false),
         Expr::Match(selection) => match_statement(selection, false),
@@ -327,7 +327,7 @@ fn assignment(op: &syn::BinOp) -> Option<TokenStream> {
         _ => return None,
     };
     let name = syn::Ident::new(name, proc_macro2::Span::call_site());
-    Some(quote!(belfry_gpu_ast::BinaryOperator::#name))
+    Some(quote!(belfry_ast::BinaryOperator::#name))
 }
 
 fn binary(op: &syn::BinOp) -> Option<TokenStream> {
@@ -353,11 +353,11 @@ fn binary(op: &syn::BinOp) -> Option<TokenStream> {
         _ => return None,
     };
     let name = syn::Ident::new(name, proc_macro2::Span::call_site());
-    Some(quote!(belfry_gpu_ast::BinaryOperator::#name))
+    Some(quote!(belfry_ast::BinaryOperator::#name))
 }
 
 pub(crate) fn expression(source: &Expr) -> syn::Result<TokenStream> {
-    let path = quote!(belfry_gpu_ast::Expression);
+    let path = quote!(belfry_ast::Expression);
     match source {
         Expr::Lit(lit) => match &lit.lit {
             Lit::Int(value) => {
@@ -413,8 +413,8 @@ pub(crate) fn expression(source: &Expr) -> syn::Result<TokenStream> {
         }
         Expr::Unary(unary) => {
             let op = match unary.op {
-                syn::UnOp::Neg(_) => quote!(belfry_gpu_ast::UnaryOperator::Negate),
-                syn::UnOp::Not(_) => quote!(belfry_gpu_ast::UnaryOperator::Not),
+                syn::UnOp::Neg(_) => quote!(belfry_ast::UnaryOperator::Negate),
+                syn::UnOp::Not(_) => quote!(belfry_ast::UnaryOperator::Not),
                 _ => {
                     return Err(syn::Error::new_spanned(
                         unary,
@@ -486,9 +486,9 @@ fn call_name(source: &Expr) -> syn::Result<String> {
 
 fn integer(number: &syn::LitInt) -> syn::Result<(u32, TokenStream)> {
     let kind = match number.suffix() {
-        "" | "usize" => quote!(belfry_gpu_ast::IntegerType::Inferred),
-        "u32" => quote!(belfry_gpu_ast::IntegerType::Unsigned),
-        "i32" => quote!(belfry_gpu_ast::IntegerType::Signed),
+        "" | "usize" => quote!(belfry_ast::IntegerType::Inferred),
+        "u32" => quote!(belfry_ast::IntegerType::Unsigned),
+        "i32" => quote!(belfry_ast::IntegerType::Signed),
         _ => {
             return Err(syn::Error::new_spanned(
                 number,

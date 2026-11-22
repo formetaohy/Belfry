@@ -1,3 +1,4 @@
+use crate::abi::{CascadeRecord, InstanceRecord, NO_HIGHLIGHT, ViewRecord};
 use crate::camera::Camera;
 use crate::environment::Environment;
 use crate::hidden::Hidden;
@@ -7,10 +8,9 @@ use crate::mesh::{Geometry, Mesh};
 use crate::shadow::Cascade;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
-use belfry_gpu_compiler::Fvec4;
+use belfry_gpu::Fvec4;
 use belfry_gpu_device::{ClipSpace, Device};
 use belfry_math::{Transform, Vec3, Vec4};
-use belfry_render_abi::{CascadeRecord, InstanceRecord, NO_HIGHLIGHT, ViewRecord};
 
 pub(crate) struct Batch {
     pub(crate) mesh: Mesh,

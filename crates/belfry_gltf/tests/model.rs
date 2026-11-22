@@ -12,7 +12,7 @@ const PIXELS: [u8; WIDTH as usize * HEIGHT as usize * 4] = [
 
 #[test]
 fn a_model_reads_a_binary_container_of_triangles_and_textures() {
-    let image = belfry_png::encode(WIDTH, HEIGHT, &PIXELS);
+    let image = belfry_image::encode(WIDTH, HEIGHT, &PIXELS);
     let mut binary = Vec::new();
     for value in [-1.0f32, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0] {
         binary.extend(value.to_le_bytes());

@@ -15,7 +15,7 @@ pub struct Image {
 impl Image {
     pub(crate) fn decode(bytes: &[u8], what: &str, sampler: SamplerDesc) -> Self {
         if bytes.starts_with(&PNG) {
-            let held = belfry_png::Image::decode(bytes, what);
+            let held = belfry_image::Image::decode(bytes, what);
             return Self {
                 width: held.width(),
                 height: held.height(),

@@ -2,8 +2,7 @@ use belfry_animation::{
     AnimationGraph, AnimationMachine, Clip, ClipSource, Comparison, ConditionDesc, Interpolation,
     Parameter, ParameterDesc, Property, StateDesc, Track, TransitionDesc, advance,
 };
-use belfry_ecs::{Entity, World};
-use belfry_hierarchy::LocalTransform;
+use belfry_ecs::{Entity, LocalTransform, World};
 use belfry_math::Transform;
 use std::sync::Arc;
 

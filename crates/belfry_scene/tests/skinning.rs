@@ -1,10 +1,9 @@
 use belfry_animation::AnimationMachine;
-use belfry_ecs::World;
+use belfry_ecs::{World, propagate};
 use belfry_gpu_device::{
     Backend, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission, Texture, TextureFormat,
     TextureUsages,
 };
-use belfry_hierarchy::propagate;
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{Camera, DirectionalLight, Renderer, Skin, Target};
 use belfry_scene::{Node, Scene};
