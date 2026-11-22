@@ -140,9 +140,10 @@ fn an_authored_audio_source_installs_and_edits() {
     assert_eq!(filter.kind(), FilterKind::LowPass);
     let sound = Target::Sound(String::from("tone"));
     assert_eq!(scene.property(&sound, "stream"), Some(Value::Bool(false)));
-    scene
-        .set_property(&sound, "stream", &Value::Bool(true))
-        .expect("a sound streams");
+    edit(&mut scene, |edit| {
+        edit.set_property(&sound, "stream", &Value::Bool(true))
+    })
+    .expect("a sound streams");
     assert!(scene.write().contains("stream = true"));
     assert_eq!(source.priority(), 0);
     assert_eq!(
@@ -219,63 +220,87 @@ fn an_authored_audio_source_installs_and_edits() {
     assert!(written.contains("[nodes.audio_bus]"));
     assert!(written.contains("parent = \"master\""));
     assert!(written.contains("[nodes.audio_filter]"));
-    assert!(scene.remove(&Target::Node(String::from("quiet"))).is_err());
     assert!(
-        scene
-            .set_property(&bus_target, "audio_bus", &Value::Bool(false),)
-            .is_err(),
+        edit(&mut scene, |edit| edit
+            .remove(&Target::Node(String::from("quiet"))))
+        .is_err()
+    );
+    assert!(
+        edit(&mut scene, |edit| edit.set_property(
+            &bus_target,
+            "audio_bus",
+            &Value::Bool(false),
+        ))
+        .is_err(),
     );
     assert_eq!(
         scene.property(&bus_target, "audio_bus"),
         Some(Value::Bool(true))
     );
     assert!(
-        scene
-            .set_property(
+        edit(&mut scene, |edit| {
+            edit.set_property(
                 &Target::Node(String::from("master")),
                 "audio_bus.parent",
                 &Value::Text(String::from("quiet")),
             )
-            .is_err(),
+        })
+        .is_err(),
     );
     assert_eq!(
         scene.property(&Target::Node(String::from("master")), "audio_bus.parent"),
         Some(Value::Text(String::new())),
     );
-    scene
-        .set_property(
+    edit(&mut scene, |edit| {
+        edit.set_property(
             &Target::Node(String::from("master")),
             "audio_bus.gain_db",
             &Value::Number(-3.0),
         )
-        .expect("a bus gain edits without touching the graph");
-    let extra = scene.add_node("extra").expect("the scene adds a node");
-    scene
-        .set_property(&extra, "audio_bus", &Value::Bool(true))
-        .expect("a new bus joins the root");
+    })
+    .expect("a bus gain edits without touching the graph");
+    let extra = edit(&mut scene, |edit| edit.add_node("extra")).expect("the scene adds a node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&extra, "audio_bus", &Value::Bool(true))
+    })
+    .expect("a new bus joins the root");
     assert_eq!(
         scene.property(&extra, "audio_bus.parent"),
         Some(Value::Text(String::from("master"))),
     );
     assert!(
-        scene
-            .set_property(&extra, "audio_bus.parent", &Value::Text(String::new()),)
-            .is_err(),
+        edit(&mut scene, |edit| edit.set_property(
+            &extra,
+            "audio_bus.parent",
+            &Value::Text(String::new()),
+        ))
+        .is_err(),
     );
     assert_eq!(
         scene.property(&extra, "audio_bus.parent"),
         Some(Value::Text(String::from("master"))),
     );
-    let loose = scene.add_node("loose").expect("the scene adds a node");
+    let loose = edit(&mut scene, |edit| edit.add_node("loose")).expect("the scene adds a node");
     assert!(
-        scene
-            .set_property(&loose, "audio_filter", &Value::Bool(true))
-            .is_err(),
+        edit(&mut scene, |edit| edit.set_property(
+            &loose,
+            "audio_filter",
+            &Value::Bool(true)
+        ))
+        .is_err(),
     );
     assert_eq!(
         scene.property(&loose, "audio_filter"),
         Some(Value::Bool(false)),
     );
-    let removed = scene.remove(&Target::Sound(String::from("tone")));
+    let removed = edit(&mut scene, |edit| {
+        edit.remove(&Target::Sound(String::from("tone")))
+    });
     assert!(removed.is_err());
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

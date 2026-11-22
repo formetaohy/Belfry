@@ -1,5 +1,7 @@
+use crate::edit::Edit;
 use crate::field::{axis_value, no_axis, number, split, unit, with_axis};
 use crate::image::{ImageSource, address_name, address_of, filter_name, filter_of};
+use crate::material::MaterialAsset;
 use crate::mesh::MeshAsset;
 use crate::scene::Scene;
 use crate::schema::ReferenceKind;
@@ -43,6 +45,25 @@ impl Scene {
         axis_value(value, axis)
     }
 
+    fn node_property(&self, index: usize, path: &str) -> Option<Value> {
+        let node = self.nodes.get(index)?;
+        if path == "parent" {
+            return Some(Value::Text(node.parent.clone().unwrap_or_default()));
+        }
+        let (component, rest) = path.split_once('.').unwrap_or((path, ""));
+        if rest.is_empty() {
+            return self
+                .registry
+                .registration(component)
+                .map(|_| Value::Bool(node.has_component(component)));
+        }
+        let (field, axis) = split(rest);
+        let held = node.component_by_name(component)?;
+        axis_value(held.read(field)?, axis)
+    }
+}
+
+impl Edit<'_> {
     pub fn set_property(
         &mut self,
         target: &Target,
@@ -73,75 +94,68 @@ impl Scene {
                     .material_index(id)
                     .ok_or_else(|| format!("the scene holds no material {id}"))?;
                 let (field, axis) = split(path);
-                self.set_material(index, field, axis, value)
+                self.change_asset::<crate::material::MaterialEntry, _>(index, |entry, _| {
+                    set_material(&mut entry.asset, &entry.id, field, axis, value)
+                })
             }
             Target::Mesh(id) => {
                 let index = self
                     .mesh_index(id)
                     .ok_or_else(|| format!("the scene holds no mesh {id}"))?;
                 let (field, axis) = split(path);
-                self.set_mesh(index, field, axis, value)
+                self.change_asset::<crate::mesh::MeshEntry, _>(index, |entry, _| {
+                    set_mesh(&mut entry.asset, &entry.id, field, axis, value)
+                })
             }
             Target::Image(id) => {
                 let index = self
                     .image_index(id)
                     .ok_or_else(|| format!("the scene holds no image {id}"))?;
                 let (field, axis) = split(path);
-                self.set_image(index, field, axis, value)
+                self.change_asset::<crate::image::ImageEntry, _>(index, |entry, scene| {
+                    set_image(entry, scene, field, axis, value)
+                })
             }
             Target::Model(id) => {
                 let index = self
                     .model_index(id)
                     .ok_or_else(|| format!("the scene holds no model {id}"))?;
                 let (field, axis) = split(path);
-                self.set_model(index, field, axis, value)
+                self.change_asset::<crate::model::ModelEntry, _>(index, |entry, scene| {
+                    set_model(entry, scene, field, axis, value)
+                })
             }
             Target::Sound(id) => {
                 let index = self
                     .sound_index(id)
                     .ok_or_else(|| format!("the scene holds no sound {id}"))?;
                 let (field, axis) = split(path);
-                self.set_sound(index, field, axis, value)
+                self.change_asset::<crate::sound::SoundEntry, _>(index, |entry, scene| {
+                    set_sound(entry, scene, field, axis, value)
+                })
             }
             Target::Environment(id) => {
                 let index = self
                     .environment_index(id)
                     .ok_or_else(|| format!("the scene holds no environment {id}"))?;
                 let (field, axis) = split(path);
-                self.set_environment(index, field, axis, value)
+                self.change_asset::<crate::environment::EnvironmentEntry, _>(
+                    index,
+                    |entry, scene| set_environment(entry, scene, field, axis, value),
+                )
             }
             Target::Graph(id) => {
                 let index = self
                     .graph_index(id)
                     .ok_or_else(|| format!("the scene holds no graph {id}"))?;
-                let Scene {
-                    graphs, animations, ..
-                } = self;
-                graphs[index]
-                    .asset
-                    .write(path, value, |clip| {
-                        animations.iter().any(|animation| animation.id == clip)
-                    })
-                    .map(|()| Effect::Structure)
+                self.change_asset::<crate::graph::GraphEntry, _>(index, |entry, scene| {
+                    entry
+                        .asset
+                        .write(path, value, |clip| scene.animation_index(clip).is_some())
+                        .map(|()| Effect::Structure)
+                })
             }
         }
-    }
-
-    fn node_property(&self, index: usize, path: &str) -> Option<Value> {
-        let node = self.nodes.get(index)?;
-        if path == "parent" {
-            return Some(Value::Text(node.parent.clone().unwrap_or_default()));
-        }
-        let (component, rest) = path.split_once('.').unwrap_or((path, ""));
-        if rest.is_empty() {
-            return self
-                .registry
-                .registration(component)
-                .map(|_| Value::Bool(node.has_component(component)));
-        }
-        let (field, axis) = split(rest);
-        let held = node.component_by_name(component)?;
-        axis_value(held.read(field)?, axis)
     }
 
     pub(crate) fn set_node(
@@ -150,12 +164,7 @@ impl Scene {
         path: &str,
         value: &Value,
     ) -> Result<Effect, String> {
-        let id = self
-            .nodes
-            .get(index)
-            .ok_or_else(|| String::from("the scene holds no node"))?
-            .id
-            .clone();
+        let id = self.nodes[index].id.clone();
         if self.nodes[index].prefab.is_some() && path != "parent" && !path.starts_with("transform.")
         {
             return Err(format!(
@@ -186,24 +195,17 @@ impl Scene {
             .ok_or_else(|| format!("the node {id} holds no component {component}"))?;
         if rest.is_empty() {
             let wanted = value.boolean()?;
+            if wanted == self.nodes[index].has_component(component) {
+                return Ok(Effect::Structure);
+            }
             if wanted {
-                if self.nodes[index].has_component(component) {
-                    return Ok(Effect::Structure);
-                }
-                let created = self.registry.create(self, component)?;
-                created.validate(self, &id)?;
-                let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-                self.nodes.at_mut(index).insert_component_box(created);
-                if let Some(before) = before
-                    && let Err(error) = self.check_audio_buses()
-                {
-                    *self.nodes.at_mut(index) = before;
-                    return Err(error);
-                }
+                let created = self.registry.create(self.scene, component)?;
+                created.validate(self.scene, &id)?;
+                self.change_node(index, |node, _| {
+                    node.insert_component_box(created);
+                    Ok(())
+                })?;
             } else {
-                if !self.nodes[index].has_component(component) {
-                    return Ok(Effect::Structure);
-                }
                 if required {
                     return Err(format!("the node {id} keeps its {component}"));
                 }
@@ -218,431 +220,427 @@ impl Scene {
                         return Err(format!("the scene references the audio bus {id}"));
                     }
                 }
-                let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-                self.nodes.at_mut(index).remove_component(component);
-                if let Some(before) = before
-                    && let Err(error) = self.check_audio_buses()
-                {
-                    *self.nodes.at_mut(index) = before;
-                    return Err(error);
-                }
+                self.change_node(index, |node, _| {
+                    node.remove_component(component);
+                    Ok(())
+                })?;
             }
-            return Ok(Effect::Structure);
+            return self.checked_audio(component);
         }
         let (field, axis) = split(rest);
-        let mut next = self.nodes[index]
-            .component_by_name(component)
-            .ok_or_else(|| format!("the node {id} holds no {component}"))?
-            .clone_box();
-        let effect = next.write(field, axis, value)?;
-        next.validate(self, &id)?;
-        let before = (component == "audio_bus").then(|| self.nodes[index].clone());
-        self.nodes.at_mut(index).insert_component_box(next);
-        if let Some(before) = before
+        let mark = self.mark();
+        let effect = self.change_node(index, |node, scene| {
+            let mut next = node
+                .component_by_name(component)
+                .ok_or_else(|| format!("the node {id} holds no {component}"))?
+                .clone_box();
+            let effect = next.write(field, axis, value)?;
+            next.validate(scene, &id)?;
+            node.insert_component_box(next);
+            Ok(effect)
+        });
+        let effect = match effect {
+            Ok(effect) => effect,
+            Err(error) => {
+                self.rollback(mark);
+                return Err(error);
+            }
+        };
+        if component == "audio_bus"
             && let Err(error) = self.check_audio_buses()
         {
-            *self.nodes.at_mut(index) = before;
+            self.rollback(mark);
             return Err(error);
         }
         Ok(effect)
     }
 
-    fn set_material(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        if matches!(
-            field,
-            "base_color_image"
-                | "metallic_roughness_image"
-                | "normal_image"
-                | "occlusion_image"
-                | "emissive_image"
-        ) {
-            no_axis(axis, "the material image")?;
-            let image = String::from(value.text()?);
-            let held = if image.is_empty() {
-                None
-            } else {
-                if self.image_index(&image).is_none() {
-                    return Err(format!("the scene holds no image {image}"));
-                }
-                Some(crate::reference::ImageId::new(image))
-            };
-            let asset = &mut self.materials[index].asset;
-            match field {
-                "base_color_image" => asset.base_color_image = held,
-                "metallic_roughness_image" => asset.metallic_roughness_image = held,
-                "normal_image" => asset.normal_image = held,
-                "occlusion_image" => asset.occlusion_image = held,
-                _ => asset.emissive_image = held,
-            }
-            return Ok(Effect::Structure);
+    fn checked_audio(&mut self, component: &str) -> Result<Effect, String> {
+        if component == "audio_bus" {
+            self.check_audio_buses()?;
         }
-        let material = &mut self.materials[index];
-        let id = &material.id;
-        let asset = &mut material.asset;
-        match field {
-            "base_color" | "emissive" => {
-                let subject = if field == "base_color" {
-                    "base color"
-                } else {
-                    "emissive"
-                };
-                let held = if field == "base_color" {
-                    &mut asset.base_color
-                } else {
-                    &mut asset.emissive
-                };
-                let color = with_axis(
-                    *held,
-                    axis,
-                    value,
-                    &format!("the {subject} of material {id}"),
-                )?;
-                unit(color, &format!("the {subject} of material {id}"))?;
-                *held = color;
-            }
-            "metallic" => {
-                no_axis(axis, "the material metallic")?;
-                let metallic = number(value, &format!("the metallic of material {id}"))?;
-                if !(0.0..=1.0).contains(&metallic) {
-                    return Err(format!("the material {id} holds metallic {metallic}"));
-                }
-                asset.metallic = metallic;
-            }
-            "alpha" => {
-                no_axis(axis, "the material alpha")?;
-                let alpha = number(value, &format!("the alpha of material {id}"))?;
-                if !(0.0..=1.0).contains(&alpha) {
-                    return Err(format!("the material {id} holds alpha {alpha}"));
-                }
-                asset.alpha = alpha;
-            }
-            "alpha_mode" => {
-                no_axis(axis, "the material alpha mode")?;
-                let name = value.text()?;
-                asset.alpha_mode = AlphaMode::of(name)
-                    .ok_or_else(|| format!("the material {id} holds the alpha mode {name}"))?;
-            }
-            "alpha_cutoff" => {
-                no_axis(axis, "the material alpha cutoff")?;
-                let cutoff = number(value, &format!("the alpha cutoff of material {id}"))?;
-                if !(0.0..=1.0).contains(&cutoff) {
-                    return Err(format!("the material {id} holds alpha cutoff {cutoff}"));
-                }
-                asset.alpha_cutoff = cutoff;
-            }
-            "roughness" => {
-                no_axis(axis, "the material roughness")?;
-                let roughness = number(value, &format!("the roughness of material {id}"))?;
-                if roughness <= 0.0 || roughness > 1.0 {
-                    return Err(format!("the material {id} holds roughness {roughness}"));
-                }
-                asset.roughness = roughness;
-            }
-            "normal_scale" => {
-                no_axis(axis, "the material normal scale")?;
-                let scale = number(value, &format!("the normal scale of material {id}"))?;
-                if !scale.is_finite() || scale < 0.0 {
-                    return Err(format!("the material {id} holds normal scale {scale}"));
-                }
-                asset.normal_scale = scale;
-            }
-            "occlusion_strength" => {
-                no_axis(axis, "the material occlusion strength")?;
-                let strength = number(value, &format!("the occlusion strength of material {id}"))?;
-                if !(0.0..=1.0).contains(&strength) {
-                    return Err(format!(
-                        "the material {id} holds occlusion strength {strength}"
-                    ));
-                }
-                asset.occlusion_strength = strength;
-            }
-            other => return Err(format!("the material {id} holds no property {other}")),
-        }
-        Ok(Effect::Structure)
-    }
-
-    fn set_mesh(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        no_axis(axis, "the mesh shape")?;
-        let mesh = &mut self.meshes[index];
-        if field != "shape" {
-            return Err(format!("the mesh {} holds no property {field}", mesh.id));
-        }
-        let name = value.text()?;
-        let shape = Shape::from_name(name)
-            .ok_or_else(|| format!("the mesh {} holds the shape {name}", mesh.id))?;
-        mesh.asset = MeshAsset::shape(shape);
-        Ok(Effect::Structure)
-    }
-
-    fn set_image(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        let image = &mut self.images[index];
-        let id = &image.id;
-        match field {
-            "path" => {
-                no_axis(axis, "the image path")?;
-                let ImageSource::Path(held) = &mut image.source else {
-                    return Err(format!("the image {id} reads its bytes from its model"));
-                };
-                let path = PathBuf::from(value.text()?);
-                if path.as_os_str().is_empty() || !path.is_relative() {
-                    return Err(format!("the image {id} holds the path {}", path.display()));
-                }
-                if !self.root.join(&path).is_file() {
-                    return Err(format!(
-                        "the image {id} names {}, which the scene root {} does not hold",
-                        path.display(),
-                        self.root.display(),
-                    ));
-                }
-                *held = path;
-            }
-            "min_filter" | "mag_filter" | "mip_filter" | "wrap_u" | "wrap_v" => {
-                no_axis(axis, "the image sampler")?;
-                let name = value.text()?;
-                match field {
-                    "min_filter" => {
-                        image.sampler.min_filter = filter_of(name)
-                            .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
-                    }
-                    "mag_filter" => {
-                        image.sampler.mag_filter = filter_of(name)
-                            .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
-                    }
-                    "mip_filter" => {
-                        image.sampler.mip_filter = filter_of(name)
-                            .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
-                    }
-                    "wrap_u" => {
-                        image.sampler.address_u = address_of(name)
-                            .ok_or_else(|| format!("the image {id} holds the wrap {name}"))?;
-                    }
-                    _ => {
-                        image.sampler.address_v = address_of(name)
-                            .ok_or_else(|| format!("the image {id} holds the wrap {name}"))?;
-                    }
-                }
-            }
-            other => return Err(format!("the image {id} holds no property {other}")),
-        }
-        Ok(Effect::Structure)
-    }
-
-    fn set_environment(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        let entry = &mut self.environments[index];
-        let id = entry.id.clone();
-        match &mut entry.source {
-            crate::environment::EnvironmentSource::Panorama(path) => {
-                no_axis(axis, "the environment path")?;
-                if field != "path" {
-                    return Err(format!("the environment {id} holds no property {field}"));
-                }
-                let next = PathBuf::from(value.text()?);
-                if next.as_os_str().is_empty() || !next.is_relative() {
-                    return Err(format!(
-                        "the environment {id} holds the path {}",
-                        next.display(),
-                    ));
-                }
-                if !self.root.join(&next).is_file() {
-                    return Err(format!(
-                        "the environment {id} names {}, which the scene root {} does not hold",
-                        next.display(),
-                        self.root.display(),
-                    ));
-                }
-                *path = next;
-            }
-            crate::environment::EnvironmentSource::Atmosphere(atmosphere) => {
-                let what = |subject: &str| format!("the {subject} of environment {id}");
-                let parameter = |axis: Option<crate::field::Axis>, value: &Value| {
-                    no_axis(axis, &format!("the {field} of environment {id}"))?;
-                    number(value, &what(field))
-                };
-                match field {
-                    "sun_elevation" => {
-                        let held = parameter(axis, value)?;
-                        if !(-90.0..=90.0).contains(&held) {
-                            return Err(format!(
-                                "the environment {id} holds the sun elevation {held}",
-                            ));
-                        }
-                        atmosphere.sun_elevation = held;
-                    }
-                    "sun_azimuth" => {
-                        let held = parameter(axis, value)?;
-                        if !(0.0..=360.0).contains(&held) {
-                            return Err(format!(
-                                "the environment {id} holds the sun azimuth {held}",
-                            ));
-                        }
-                        atmosphere.sun_azimuth = held;
-                    }
-                    "sun_intensity" => {
-                        let held = parameter(axis, value)?;
-                        if held <= 0.0 {
-                            return Err(format!(
-                                "the environment {id} holds the sun intensity {held}",
-                            ));
-                        }
-                        atmosphere.sun_intensity = held;
-                    }
-                    "rayleigh" => {
-                        let held = parameter(axis, value)?;
-                        if held < 0.0 {
-                            return Err(format!(
-                                "the environment {id} holds the Rayleigh scale {held}",
-                            ));
-                        }
-                        atmosphere.rayleigh = held;
-                    }
-                    "mie" => {
-                        let held = parameter(axis, value)?;
-                        if held < 0.0 {
-                            return Err(
-                                format!("the environment {id} holds the Mie scale {held}",),
-                            );
-                        }
-                        atmosphere.mie = held;
-                    }
-                    "mie_anisotropy" => {
-                        let held = parameter(axis, value)?;
-                        if !(-1.0..1.0).contains(&held) {
-                            return Err(format!(
-                                "the environment {id} holds the Mie anisotropy {held}",
-                            ));
-                        }
-                        atmosphere.mie_anisotropy = held;
-                    }
-                    "ozone" => {
-                        let held = parameter(axis, value)?;
-                        if held < 0.0 {
-                            return Err(format!(
-                                "the environment {id} holds the ozone scale {held}",
-                            ));
-                        }
-                        atmosphere.ozone = held;
-                    }
-                    "ground_albedo" => {
-                        let held = with_axis(
-                            atmosphere.ground_albedo,
-                            axis,
-                            value,
-                            &what("ground albedo"),
-                        )?;
-                        unit(held, &what("ground albedo"))?;
-                        atmosphere.ground_albedo = held;
-                    }
-                    "altitude" => {
-                        let held = parameter(axis, value)?;
-                        if held < 0.0 {
-                            return Err(format!("the environment {id} holds the altitude {held}",));
-                        }
-                        atmosphere.altitude = held;
-                    }
-                    _ => {
-                        return Err(format!("the environment {id} holds no property {field}",));
-                    }
-                }
-            }
-        }
-        Ok(Effect::Structure)
-    }
-
-    fn set_sound(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        if field == "stream" {
-            no_axis(axis, "the sound stream")?;
-            self.sounds[index].stream = value.boolean()?;
-            return Ok(Effect::Structure);
-        }
-        no_axis(axis, "the sound path")?;
-        let sound = &mut self.sounds[index];
-        if field != "path" {
-            return Err(format!("the sound {} holds no property {field}", sound.id));
-        }
-        let path = PathBuf::from(value.text()?);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!(
-                "the sound {} holds the path {}",
-                sound.id,
-                path.display()
-            ));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the sound {} names {}, which the scene root {} does not hold",
-                sound.id,
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        sound.path = path;
-        Ok(Effect::Structure)
-    }
-
-    fn set_model(
-        &mut self,
-        index: usize,
-        field: &str,
-        axis: Option<crate::field::Axis>,
-        value: &Value,
-    ) -> Result<Effect, String> {
-        no_axis(axis, "the model path")?;
-        let model = &mut self.models[index];
-        if field != "path" {
-            return Err(format!("the model {} holds no property {field}", model.id));
-        }
-        let path = PathBuf::from(value.text()?);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!(
-                "the model {} holds the path {}",
-                model.id,
-                path.display()
-            ));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the model {} names {}, which the scene root {} does not hold",
-                model.id,
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        model.path = path;
         Ok(Effect::Structure)
     }
 }
 
-fn material_property(asset: &crate::material::MaterialAsset, field: &str) -> Option<Value> {
+fn set_material(
+    asset: &mut MaterialAsset,
+    id: &str,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    if matches!(
+        field,
+        "base_color_image"
+            | "metallic_roughness_image"
+            | "normal_image"
+            | "occlusion_image"
+            | "emissive_image"
+    ) {
+        no_axis(axis, "the material image")?;
+        let image = String::from(value.text()?);
+        let held = if image.is_empty() {
+            None
+        } else {
+            Some(crate::reference::ImageId::new(image))
+        };
+        match field {
+            "base_color_image" => asset.base_color_image = held,
+            "metallic_roughness_image" => asset.metallic_roughness_image = held,
+            "normal_image" => asset.normal_image = held,
+            "occlusion_image" => asset.occlusion_image = held,
+            _ => asset.emissive_image = held,
+        }
+        return Ok(Effect::Structure);
+    }
+    let material = asset;
+    match field {
+        "base_color" | "emissive" => {
+            let subject = if field == "base_color" {
+                "base color"
+            } else {
+                "emissive"
+            };
+            let held = if field == "base_color" {
+                &mut material.base_color
+            } else {
+                &mut material.emissive
+            };
+            let color = with_axis(
+                *held,
+                axis,
+                value,
+                &format!("the {subject} of material {id}"),
+            )?;
+            unit(color, &format!("the {subject} of material {id}"))?;
+            *held = color;
+        }
+        "metallic" => {
+            no_axis(axis, "the material metallic")?;
+            let metallic = number(value, &format!("the metallic of material {id}"))?;
+            if !(0.0..=1.0).contains(&metallic) {
+                return Err(format!("the material {id} holds metallic {metallic}"));
+            }
+            material.metallic = metallic;
+        }
+        "alpha" => {
+            no_axis(axis, "the material alpha")?;
+            let alpha = number(value, &format!("the alpha of material {id}"))?;
+            if !(0.0..=1.0).contains(&alpha) {
+                return Err(format!("the material {id} holds alpha {alpha}"));
+            }
+            material.alpha = alpha;
+        }
+        "alpha_mode" => {
+            no_axis(axis, "the material alpha mode")?;
+            let name = value.text()?;
+            material.alpha_mode = AlphaMode::of(name)
+                .ok_or_else(|| format!("the material {id} holds the alpha mode {name}"))?;
+        }
+        "alpha_cutoff" => {
+            no_axis(axis, "the material alpha cutoff")?;
+            let cutoff = number(value, &format!("the alpha cutoff of material {id}"))?;
+            if !(0.0..=1.0).contains(&cutoff) {
+                return Err(format!("the material {id} holds alpha cutoff {cutoff}"));
+            }
+            material.alpha_cutoff = cutoff;
+        }
+        "roughness" => {
+            no_axis(axis, "the material roughness")?;
+            let roughness = number(value, &format!("the roughness of material {id}"))?;
+            if roughness <= 0.0 || roughness > 1.0 {
+                return Err(format!("the material {id} holds roughness {roughness}"));
+            }
+            material.roughness = roughness;
+        }
+        "normal_scale" => {
+            no_axis(axis, "the material normal scale")?;
+            let scale = number(value, &format!("the normal scale of material {id}"))?;
+            if !scale.is_finite() || scale < 0.0 {
+                return Err(format!("the material {id} holds normal scale {scale}"));
+            }
+            material.normal_scale = scale;
+        }
+        "occlusion_strength" => {
+            no_axis(axis, "the material occlusion strength")?;
+            let strength = number(value, &format!("the occlusion strength of material {id}"))?;
+            if !(0.0..=1.0).contains(&strength) {
+                return Err(format!(
+                    "the material {id} holds occlusion strength {strength}"
+                ));
+            }
+            material.occlusion_strength = strength;
+        }
+        other => return Err(format!("the material {id} holds no property {other}")),
+    }
+    Ok(Effect::Structure)
+}
+
+fn set_mesh(
+    asset: &mut MeshAsset,
+    id: &str,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    no_axis(axis, "the mesh shape")?;
+    if field != "shape" {
+        return Err(format!("the mesh {id} holds no property {field}"));
+    }
+    let name = value.text()?;
+    let shape =
+        Shape::from_name(name).ok_or_else(|| format!("the mesh {id} holds the shape {name}"))?;
+    *asset = MeshAsset::shape(shape);
+    Ok(Effect::Structure)
+}
+
+fn set_image(
+    entry: &mut crate::image::ImageEntry,
+    scene: &Scene,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    let id = &entry.id;
+    match field {
+        "path" => {
+            no_axis(axis, "the image path")?;
+            let ImageSource::Path(held) = &mut entry.source else {
+                return Err(format!("the image {id} reads its bytes from its model"));
+            };
+            let path = PathBuf::from(value.text()?);
+            if path.as_os_str().is_empty() || !path.is_relative() {
+                return Err(format!("the image {id} holds the path {}", path.display()));
+            }
+            if !scene.root.join(&path).is_file() {
+                return Err(format!(
+                    "the image {id} names {}, which the scene root {} does not hold",
+                    path.display(),
+                    scene.root.display(),
+                ));
+            }
+            *held = path;
+        }
+        "min_filter" | "mag_filter" | "mip_filter" | "wrap_u" | "wrap_v" => {
+            no_axis(axis, "the image sampler")?;
+            let name = value.text()?;
+            match field {
+                "min_filter" => {
+                    entry.sampler.min_filter = filter_of(name)
+                        .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
+                }
+                "mag_filter" => {
+                    entry.sampler.mag_filter = filter_of(name)
+                        .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
+                }
+                "mip_filter" => {
+                    entry.sampler.mip_filter = filter_of(name)
+                        .ok_or_else(|| format!("the image {id} holds the filter {name}"))?;
+                }
+                "wrap_u" => {
+                    entry.sampler.address_u = address_of(name)
+                        .ok_or_else(|| format!("the image {id} holds the wrap {name}"))?;
+                }
+                _ => {
+                    entry.sampler.address_v = address_of(name)
+                        .ok_or_else(|| format!("the image {id} holds the wrap {name}"))?;
+                }
+            }
+        }
+        other => return Err(format!("the image {id} holds no property {other}")),
+    }
+    Ok(Effect::Structure)
+}
+
+fn set_environment(
+    entry: &mut crate::environment::EnvironmentEntry,
+    scene: &Scene,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    let id = entry.id.clone();
+    match &mut entry.source {
+        crate::environment::EnvironmentSource::Panorama(path) => {
+            no_axis(axis, "the environment path")?;
+            if field != "path" {
+                return Err(format!("the environment {id} holds no property {field}"));
+            }
+            let next = PathBuf::from(value.text()?);
+            if next.as_os_str().is_empty() || !next.is_relative() {
+                return Err(format!(
+                    "the environment {id} holds the path {}",
+                    next.display(),
+                ));
+            }
+            if !scene.root.join(&next).is_file() {
+                return Err(format!(
+                    "the environment {id} names {}, which the scene root {} does not hold",
+                    next.display(),
+                    scene.root.display(),
+                ));
+            }
+            *path = next;
+        }
+        crate::environment::EnvironmentSource::Atmosphere(atmosphere) => {
+            let what = |subject: &str| format!("the {subject} of environment {id}");
+            let parameter = |axis: Option<crate::field::Axis>, value: &Value| {
+                no_axis(axis, &format!("the {field} of environment {id}"))?;
+                number(value, &what(field))
+            };
+            match field {
+                "sun_elevation" => {
+                    let held = parameter(axis, value)?;
+                    if !(-90.0..=90.0).contains(&held) {
+                        return Err(format!(
+                            "the environment {id} holds the sun elevation {held}",
+                        ));
+                    }
+                    atmosphere.sun_elevation = held;
+                }
+                "sun_azimuth" => {
+                    let held = parameter(axis, value)?;
+                    if !(0.0..=360.0).contains(&held) {
+                        return Err(format!("the environment {id} holds the sun azimuth {held}",));
+                    }
+                    atmosphere.sun_azimuth = held;
+                }
+                "sun_intensity" => {
+                    let held = parameter(axis, value)?;
+                    if held <= 0.0 {
+                        return Err(format!(
+                            "the environment {id} holds the sun intensity {held}",
+                        ));
+                    }
+                    atmosphere.sun_intensity = held;
+                }
+                "rayleigh" => {
+                    let held = parameter(axis, value)?;
+                    if held < 0.0 {
+                        return Err(format!(
+                            "the environment {id} holds the Rayleigh scale {held}",
+                        ));
+                    }
+                    atmosphere.rayleigh = held;
+                }
+                "mie" => {
+                    let held = parameter(axis, value)?;
+                    if held < 0.0 {
+                        return Err(format!("the environment {id} holds the Mie scale {held}",));
+                    }
+                    atmosphere.mie = held;
+                }
+                "mie_anisotropy" => {
+                    let held = parameter(axis, value)?;
+                    if !(-1.0..1.0).contains(&held) {
+                        return Err(format!(
+                            "the environment {id} holds the Mie anisotropy {held}",
+                        ));
+                    }
+                    atmosphere.mie_anisotropy = held;
+                }
+                "ozone" => {
+                    let held = parameter(axis, value)?;
+                    if held < 0.0 {
+                        return Err(format!("the environment {id} holds the ozone scale {held}",));
+                    }
+                    atmosphere.ozone = held;
+                }
+                "ground_albedo" => {
+                    let held = with_axis(
+                        atmosphere.ground_albedo,
+                        axis,
+                        value,
+                        &what("ground albedo"),
+                    )?;
+                    unit(held, &what("ground albedo"))?;
+                    atmosphere.ground_albedo = held;
+                }
+                "altitude" => {
+                    let held = parameter(axis, value)?;
+                    if held < 0.0 {
+                        return Err(format!("the environment {id} holds the altitude {held}",));
+                    }
+                    atmosphere.altitude = held;
+                }
+                _ => {
+                    return Err(format!("the environment {id} holds no property {field}",));
+                }
+            }
+        }
+    }
+    Ok(Effect::Structure)
+}
+
+fn set_sound(
+    entry: &mut crate::sound::SoundEntry,
+    scene: &Scene,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    if field == "stream" {
+        no_axis(axis, "the sound stream")?;
+        entry.stream = value.boolean()?;
+        return Ok(Effect::Structure);
+    }
+    no_axis(axis, "the sound path")?;
+    if field != "path" {
+        return Err(format!("the sound {} holds no property {field}", entry.id));
+    }
+    let path = PathBuf::from(value.text()?);
+    if path.as_os_str().is_empty() || !path.is_relative() {
+        return Err(format!(
+            "the sound {} holds the path {}",
+            entry.id,
+            path.display()
+        ));
+    }
+    if !scene.root.join(&path).is_file() {
+        return Err(format!(
+            "the sound {} names {}, which the scene root {} does not hold",
+            entry.id,
+            path.display(),
+            scene.root.display(),
+        ));
+    }
+    entry.path = path;
+    Ok(Effect::Structure)
+}
+
+fn set_model(
+    entry: &mut crate::model::ModelEntry,
+    scene: &Scene,
+    field: &str,
+    axis: Option<crate::field::Axis>,
+    value: &Value,
+) -> Result<Effect, String> {
+    no_axis(axis, "the model path")?;
+    if field != "path" {
+        return Err(format!("the model {} holds no property {field}", entry.id));
+    }
+    let path = PathBuf::from(value.text()?);
+    if path.as_os_str().is_empty() || !path.is_relative() {
+        return Err(format!(
+            "the model {} holds the path {}",
+            entry.id,
+            path.display()
+        ));
+    }
+    if !scene.root.join(&path).is_file() {
+        return Err(format!(
+            "the model {} names {}, which the scene root {} does not hold",
+            entry.id,
+            path.display(),
+            scene.root.display(),
+        ));
+    }
+    entry.path = path;
+    Ok(Effect::Structure)
+}
+
+fn material_property(asset: &MaterialAsset, field: &str) -> Option<Value> {
     let image = |held: &Option<crate::reference::ImageId>| {
         Some(Value::Text(
             held.as_ref()

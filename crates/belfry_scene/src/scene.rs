@@ -1,26 +1,22 @@
 use crate::animation::AnimationEntry;
 use crate::environment::EnvironmentEntry;
-use crate::field::euler;
 use crate::graph::GraphEntry;
 use crate::image::ImageEntry;
 use crate::install;
 use crate::library::{self, Library};
-use crate::material::{MaterialAsset, MaterialEntry};
-use crate::mesh::{MeshAsset, MeshEntry};
+use crate::material::MaterialEntry;
+use crate::mesh::MeshEntry;
 use crate::model::ModelEntry;
 use crate::node::Node;
 use crate::nodes::Nodes;
 use crate::registry::{Assets, AudioBusRef, Registry};
 use crate::schema::ReferenceKind;
-use crate::shape::Shape;
 use crate::skin::SkinEntry;
 use crate::sound::SoundEntry;
 use crate::target::{Target, valid_id};
-use crate::value::Value;
 use belfry_ecs::{Entity, World, propagate};
 use belfry_math::Transform;
 use belfry_render::Renderer;
-use belfry_render::environment::Atmosphere;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -292,52 +288,16 @@ impl Scene {
         &self.nodes
     }
 
-    pub fn images_mut(&mut self) -> &mut Vec<ImageEntry> {
-        &mut self.images
-    }
-
     pub fn sounds(&self) -> &[SoundEntry] {
         &self.sounds
-    }
-
-    pub fn sounds_mut(&mut self) -> &mut Vec<SoundEntry> {
-        &mut self.sounds
     }
 
     pub fn environments(&self) -> &[EnvironmentEntry] {
         &self.environments
     }
 
-    pub fn environments_mut(&mut self) -> &mut Vec<EnvironmentEntry> {
-        &mut self.environments
-    }
-
-    pub fn meshes_mut(&mut self) -> &mut Vec<MeshEntry> {
-        &mut self.meshes
-    }
-
-    pub fn materials_mut(&mut self) -> &mut Vec<MaterialEntry> {
-        &mut self.materials
-    }
-
-    pub fn models_mut(&mut self) -> &mut Vec<ModelEntry> {
-        &mut self.models
-    }
-
-    pub fn skins_mut(&mut self) -> &mut Vec<SkinEntry> {
-        &mut self.skins
-    }
-
-    pub fn animations_mut(&mut self) -> &mut Vec<AnimationEntry> {
-        &mut self.animations
-    }
-
-    pub fn graphs_mut(&mut self) -> &mut Vec<GraphEntry> {
-        &mut self.graphs
-    }
-
-    pub fn nodes_mut(&mut self) -> impl std::ops::DerefMut<Target = Vec<Node>> + '_ {
-        self.nodes.mutable()
+    pub(crate) fn remember_node(&mut self, at: usize, node: Node) {
+        self.nodes.replace(at, node);
     }
 
     pub fn node_index(&self, id: &str) -> Option<usize> {
@@ -486,149 +446,6 @@ impl Scene {
         }
     }
 
-    pub fn add_node(&mut self, id: &str) -> Result<Target, String> {
-        self.insert_node(Node::new(id))
-    }
-
-    pub fn insert_node(&mut self, node: Node) -> Result<Target, String> {
-        assert_id(&node.id, "node")?;
-        if self.node_index(&node.id).is_some() {
-            return Err(format!("the scene holds the node {}", node.id));
-        }
-        let id = node.id.clone();
-        self.nodes.push(node);
-        Ok(Target::Node(id))
-    }
-
-    pub fn add_instance(&mut self, id: &str, path: &str) -> Result<Target, String> {
-        assert_id(id, "prefab instance")?;
-        if self.node_index(id).is_some() {
-            return Err(format!("the scene holds the node {id}"));
-        }
-        let mut marker = Node::new(id);
-        marker.prefab = Some(PathBuf::from(path));
-        self.attach_instance(marker)
-    }
-
-    pub fn add_mesh(&mut self, id: &str, shape: Shape) -> Result<Target, String> {
-        assert_id(id, "mesh")?;
-        if self.mesh_index(id).is_some() {
-            return Err(format!("the scene holds the mesh {id}"));
-        }
-        self.meshes
-            .push(MeshEntry::new(id, MeshAsset::shape(shape)));
-        Ok(Target::Mesh(String::from(id)))
-    }
-
-    pub fn add_material(&mut self, id: &str) -> Result<Target, String> {
-        assert_id(id, "material")?;
-        if self.material_index(id).is_some() {
-            return Err(format!("the scene holds the material {id}"));
-        }
-        self.materials
-            .push(MaterialEntry::new(id, MaterialAsset::grey()));
-        Ok(Target::Material(String::from(id)))
-    }
-
-    pub fn add_sound(&mut self, id: &str, path: &str) -> Result<Target, String> {
-        assert_id(id, "sound")?;
-        if self.sound_index(id).is_some() {
-            return Err(format!("the scene holds the sound {id}"));
-        }
-        let path = PathBuf::from(path);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!("the sound {id} holds the path {}", path.display()));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the sound {id} names {}, which the scene root {} does not hold",
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        self.sounds.push(SoundEntry::new(id, path));
-        Ok(Target::Sound(String::from(id)))
-    }
-
-    pub fn add_environment(&mut self, id: &str, path: &str) -> Result<Target, String> {
-        assert_id(id, "environment")?;
-        if self.environment_index(id).is_some() {
-            return Err(format!("the scene holds the environment {id}"));
-        }
-        let path = PathBuf::from(path);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!(
-                "the environment {id} holds the path {}",
-                path.display(),
-            ));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the environment {id} names {}, which the scene root {} does not hold",
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        self.environments.push(EnvironmentEntry::new(id, path));
-        Ok(Target::Environment(String::from(id)))
-    }
-
-    pub fn add_atmosphere(&mut self, id: &str, atmosphere: Atmosphere) -> Result<Target, String> {
-        assert_id(id, "environment")?;
-        if self.environment_index(id).is_some() {
-            return Err(format!("the scene holds the environment {id}"));
-        }
-        self.environments
-            .push(EnvironmentEntry::with_atmosphere(id, atmosphere));
-        Ok(Target::Environment(String::from(id)))
-    }
-
-    pub fn add_image(&mut self, id: &str, path: &str) -> Result<Target, String> {
-        assert_id(id, "image")?;
-        if self.image_index(id).is_some() {
-            return Err(format!("the scene holds the image {id}"));
-        }
-        let path = PathBuf::from(path);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!("the image {id} holds the path {}", path.display()));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the image {id} names {}, which the scene root {} does not hold",
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        self.images.push(ImageEntry::new(id, path));
-        Ok(Target::Image(String::from(id)))
-    }
-
-    pub fn add_model(&mut self, id: &str, path: &str) -> Result<Target, String> {
-        assert_id(id, "model")?;
-        if self.model_index(id).is_some() {
-            return Err(format!("the scene holds the model {id}"));
-        }
-        let path = PathBuf::from(path);
-        if path.as_os_str().is_empty() || !path.is_relative() {
-            return Err(format!("the model {id} holds the path {}", path.display()));
-        }
-        if !self.root.join(&path).is_file() {
-            return Err(format!(
-                "the model {id} names {}, which the scene root {} does not hold",
-                path.display(),
-                self.root.display(),
-            ));
-        }
-        self.models.push(ModelEntry::new(id, path));
-        Ok(Target::Model(String::from(id)))
-    }
-
-    pub fn remove(&mut self, target: &Target) -> Result<(), String> {
-        let deletion = crate::deletion::plan(self, target)?;
-        crate::deletion::apply(self, deletion);
-        Ok(())
-    }
-
     pub(crate) fn check_audio_buses(&self) -> Result<(), String> {
         let links = self
             .nodes
@@ -692,26 +509,6 @@ impl Scene {
         false
     }
 
-    pub fn reparent(&mut self, index: usize, parent: Option<usize>) {
-        assert!(index < self.nodes.len(), "a reparented node exists");
-        assert!(
-            self.nodes[index].owner.is_none(),
-            "the node {} belongs to a prefab instance",
-            self.nodes[index].id,
-        );
-        if let Some(parent) = parent {
-            assert!(parent < self.nodes.len(), "a named parent exists");
-            assert!(
-                !self.is_ancestor(index, parent),
-                "{} parents itself through {}",
-                self.nodes[index].id,
-                self.nodes[parent].id,
-            );
-        }
-        let id = parent.map(|at| self.nodes[at].id.clone());
-        self.nodes.reparent(index, id);
-    }
-
     pub fn children(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
         self.nodes.children_of(index).iter().copied()
     }
@@ -741,50 +538,6 @@ impl Scene {
             .get(index)
             .and_then(|node| node.component::<Transform>())
             .unwrap_or_else(|| panic!("a scene node holds its transform"))
-    }
-
-    pub fn set_transform(&mut self, index: usize, transform: Transform) {
-        assert!(index < self.nodes.len(), "a transformed node exists");
-        if self.nodes[index].owner.is_none() {
-            self.nodes.at_mut(index).insert_component(transform);
-            return;
-        }
-        let current = self.transform(index);
-        if current.translation != transform.translation {
-            self.write_override(
-                index,
-                "transform.translation",
-                &Value::Vector(transform.translation),
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "the node {} holds its transform: {error}",
-                    self.nodes[index].id
-                )
-            });
-        }
-        if current.rotation != transform.rotation {
-            self.write_override(
-                index,
-                "transform.rotation",
-                &Value::Vector(euler(transform.rotation)),
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "the node {} holds its transform: {error}",
-                    self.nodes[index].id
-                )
-            });
-        }
-        if current.scale != transform.scale {
-            self.write_override(index, "transform.scale", &Value::Vector(transform.scale))
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "the node {} holds its transform: {error}",
-                        self.nodes[index].id
-                    )
-                });
-        }
     }
 
     pub fn world_transform(&self, index: usize) -> Transform {
@@ -1137,14 +890,6 @@ impl Scene {
                 );
             }
         }
-    }
-}
-
-fn assert_id(id: &str, what: &str) -> Result<(), String> {
-    if valid_id(id) {
-        Ok(())
-    } else {
-        Err(format!("the {what} id {id} holds no letter, digit, _ or -"))
     }
 }
 

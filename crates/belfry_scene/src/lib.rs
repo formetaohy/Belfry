@@ -3,7 +3,9 @@ mod animation_library;
 mod body;
 mod collider;
 mod deletion;
+mod delta;
 mod digest;
+mod edit;
 mod environment;
 mod field;
 mod graph;
@@ -46,6 +48,8 @@ pub use belfry_render::environment::Atmosphere;
 pub use belfry_scene_macro::SceneComponent;
 pub use body::BodyRef;
 pub use collider::{ColliderRef, ShapeKind};
+pub use delta::Delta;
+pub use edit::Edit;
 pub use environment::{EnvironmentEntry, EnvironmentRef, EnvironmentSource};
 pub use field::Axis;
 pub use graph::{

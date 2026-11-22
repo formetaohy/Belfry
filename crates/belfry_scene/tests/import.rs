@@ -64,9 +64,10 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
     .expect("a test writes a model");
 
     let mut scene = Scene::new(&root);
-    let target = scene
-        .import_model("box", "model.gltf", None)
-        .expect("a scene imports a model");
+    let target = edit(&mut scene, |edit| {
+        edit.import_model("box", "model.gltf", None)
+    })
+    .expect("a scene imports a model");
     assert_eq!(target, Target::Node(String::from("box")));
     assert_eq!(scene.models().len(), 1);
     assert_eq!(scene.images().len(), 1);
@@ -122,8 +123,19 @@ fn an_imported_model_expands_into_scene_assets_and_nodes() {
     let written = scene.write();
     let mut parsed = Scene::parse(&written, &root, "the written scene");
     assert_eq!(parsed, scene);
-    assert!(parsed.import_model("box", "model.gltf", None).is_err());
-    assert!(parsed.remove(&Target::Model(String::from("box"))).is_err());
+    assert!(
+        edit(&mut parsed, |edit| edit.import_model(
+            "box",
+            "model.gltf",
+            None
+        ))
+        .is_err()
+    );
+    assert!(
+        edit(&mut parsed, |edit| edit
+            .remove(&Target::Model(String::from("box"))))
+        .is_err()
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -202,9 +214,10 @@ fn an_imported_skin_and_animation_expand_into_scene_assets() {
     .expect("a test writes a model");
 
     let mut scene = Scene::new(&root);
-    let target = scene
-        .import_model("rig", "model.gltf", None)
-        .expect("a scene imports a skinned model");
+    let target = edit(&mut scene, |edit| {
+        edit.import_model("rig", "model.gltf", None)
+    })
+    .expect("a scene imports a skinned model");
     assert_eq!(target, Target::Node(String::from("rig")));
     assert_eq!(scene.nodes().len(), 3);
     assert_eq!(scene.meshes().len(), 1);
@@ -247,11 +260,15 @@ fn an_imported_skin_and_animation_expand_into_scene_assets() {
     let mut parsed = Scene::parse(&written, &root, "the written scene");
     assert_eq!(parsed, scene);
     assert!(
-        parsed
-            .remove(&Target::Node(String::from("rig_joint")))
-            .is_err()
+        edit(&mut parsed, |edit| edit
+            .remove(&Target::Node(String::from("rig_joint"))))
+        .is_err()
     );
-    assert!(parsed.remove(&Target::Model(String::from("rig"))).is_err());
+    assert!(
+        edit(&mut parsed, |edit| edit
+            .remove(&Target::Model(String::from("rig"))))
+        .is_err()
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -282,4 +299,10 @@ fn skinned_triangle() -> Vec<u8> {
         binary.extend(value.to_le_bytes());
     }
     binary
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

@@ -1,3 +1,4 @@
+use crate::edit::Edit;
 use crate::node::{InstanceOverride, Node};
 use crate::prefab::{Loader, describe};
 use crate::scene::Scene;
@@ -43,6 +44,54 @@ impl Scene {
         }
     }
 
+    pub fn instance_marker(&self, id: &str) -> Option<&str> {
+        let index = self.node_index(id)?;
+        if self.nodes[index].owner.is_none() {
+            return self.nodes[index]
+                .prefab
+                .is_some()
+                .then(|| self.nodes[index].id.as_str());
+        }
+        let marker = self.instance_marker_index(index)?;
+        Some(self.nodes[marker].id.as_str())
+    }
+
+    pub fn instance_overrides(&self, marker: &str) -> &[InstanceOverride] {
+        self.node_index(marker)
+            .map_or(&[], |index| self.nodes[index].overrides.as_slice())
+    }
+
+    pub fn instance_additions(&self, marker: &str) -> &[Node] {
+        self.node_index(marker)
+            .map_or(&[], |index| self.nodes[index].additions.as_slice())
+    }
+
+    pub fn instance_removals(&self, marker: &str) -> &[String] {
+        self.node_index(marker)
+            .map_or(&[], |index| self.nodes[index].removals.as_slice())
+    }
+
+    pub fn instance_changes(&self, marker: &str) -> usize {
+        let Some(index) = self.node_index(marker) else {
+            return 0;
+        };
+        let node = &self.nodes[index];
+        node.overrides.len() + node.additions.len() + node.removals.len()
+    }
+
+    pub(crate) fn instance_marker_index(&self, index: usize) -> Option<usize> {
+        let mut marker = self.nodes.get(index)?.owner.as_deref()?;
+        loop {
+            let at = self.node_index(marker)?;
+            match self.nodes[at].owner.as_deref() {
+                Some(outer) => marker = outer,
+                None => return Some(at),
+            }
+        }
+    }
+}
+
+impl Edit<'_> {
     pub fn insert_child(&mut self, parent: &str, node: Node) -> Result<Target, String> {
         let parent_index = self
             .node_index(parent)
@@ -94,7 +143,7 @@ impl Scene {
                 return self.attach_instance(node);
             }
             let id = node.id.clone();
-            self.nodes.push(node);
+            self.append_nodes(vec![node]);
             return Ok(Target::Node(id));
         };
         let prefix = format!("{top}_");
@@ -145,30 +194,28 @@ impl Scene {
         placed.id = id.clone();
         placed.parent = Some(String::from(parent));
         placed.owner = Some(top.clone());
-        let mut scene = self.clone();
-        let top_index = scene
-            .node_index(&top)
-            .expect("a prefab instance names its marker");
-        let anchor = scene
-            .subtree(top_index)
+        let anchor = self
+            .subtree(marker_index)
             .into_iter()
             .max()
             .expect("a prefab instance holds its marker")
             + 1;
         let (placed, generated) = if placed.prefab.is_some() {
-            scene.grow_instance(placed, Some(&top))?
+            self.grow_instance(placed, Some(&top))?
         } else {
             (placed, Vec::new())
         };
-        scene.nodes.insert(anchor, placed);
-        scene.nodes.splice(anchor + 1, generated);
-        let marker = scene
-            .node_index(&top)
-            .expect("a prefab instance names its marker");
-        scene.nodes.at_mut(marker).additions.push(addition);
-        crate::prefab::apply_overrides(&mut scene);
-        scene.validate("an added instance node");
-        *self = scene;
+        let mut nodes = Vec::with_capacity(generated.len() + 1);
+        nodes.push(placed);
+        nodes.extend(generated);
+        self.insert_nodes(anchor, nodes);
+        self.change_node(marker_index, |node, _| {
+            node.additions.push(addition);
+            Ok(())
+        })?;
+        let candidates = self.subtree(marker_index);
+        crate::prefab::apply_overrides(self, candidates);
+        self.validate("an added instance node");
         Ok(Target::Node(id))
     }
 
@@ -187,12 +234,12 @@ impl Scene {
             marker.id,
         );
         let id = marker.id.clone();
-        let mut scene = self.clone();
-        let (marker, generated) = scene.grow_instance(marker, None)?;
-        scene.nodes.push(marker);
-        scene.nodes.extend(generated);
-        scene.validate("an added prefab instance");
-        *self = scene;
+        let (marker, generated) = self.grow_instance(marker, None)?;
+        let mut nodes = Vec::with_capacity(generated.len() + 1);
+        nodes.push(marker);
+        nodes.extend(generated);
+        self.append_nodes(nodes);
+        self.validate("an added prefab instance");
         Ok(Target::Node(id))
     }
 
@@ -226,72 +273,41 @@ impl Scene {
         let from = crate::prefab::root_of(&self.root, &path);
         let root = self.root.clone();
         crate::prefab::import(self, &template, &key, &from, &root, &marker.id)?;
-        self.instances.insert(marker.id.clone(), keys.clone());
+        self.set_instance(&marker.id, Some(keys.clone()));
         for (nested, held) in &template.instances {
-            self.instances
-                .insert(format!("{}_{nested}", marker.id), held.clone());
+            self.set_instance(&format!("{}_{nested}", marker.id), Some(held.clone()));
         }
         if let Some(outer) = outer {
-            self.instances
-                .get_mut(outer)
+            let mut held = self
+                .instances
+                .get(outer)
                 .unwrap_or_else(|| panic!("the prefab instance {outer} holds the addition"))
-                .extend(keys);
+                .clone();
+            held.extend(keys);
+            self.set_instance(outer, Some(held));
         }
         let generated = crate::prefab::instantiate(&marker, &template, &mut ids, &from, &root)?;
         Ok((marker, generated))
     }
 
-    pub fn instance_marker(&self, id: &str) -> Option<&str> {
-        let index = self.node_index(id)?;
-        if self.nodes[index].owner.is_none() {
-            return self.nodes[index]
-                .prefab
-                .is_some()
-                .then(|| self.nodes[index].id.as_str());
-        }
-        let marker = self.instance_marker_index(index)?;
-        Some(self.nodes[marker].id.as_str())
-    }
-
-    pub fn instance_overrides(&self, marker: &str) -> &[InstanceOverride] {
-        self.node_index(marker)
-            .map_or(&[], |index| self.nodes[index].overrides.as_slice())
-    }
-
-    pub fn instance_additions(&self, marker: &str) -> &[Node] {
-        self.node_index(marker)
-            .map_or(&[], |index| self.nodes[index].additions.as_slice())
-    }
-
-    pub fn instance_removals(&self, marker: &str) -> &[String] {
-        self.node_index(marker)
-            .map_or(&[], |index| self.nodes[index].removals.as_slice())
-    }
-
-    pub fn instance_changes(&self, marker: &str) -> usize {
-        let Some(index) = self.node_index(marker) else {
-            return 0;
-        };
-        let node = &self.nodes[index];
-        node.overrides.len() + node.additions.len() + node.removals.len()
-    }
-
     pub fn unpack(&mut self, marker: &str) -> Result<(), String> {
-        let mut scene = self.clone();
-        let index = scene
+        let index = self
             .node_index(marker)
             .ok_or_else(|| format!("the scene holds no node {marker}"))?;
-        if scene.nodes[index].prefab.is_none() {
+        if self.nodes[index].prefab.is_none() {
             return Err(format!("the node {marker} holds no prefab"));
         }
-        let owner = scene.nodes[index].owner.clone();
-        let overrides = scene.nodes[index].overrides.clone();
-        let keys = scene.instances.remove(marker);
+        let owner = self.nodes[index].owner.clone();
+        let overrides = self.nodes[index].overrides.clone();
+        let keys = self.instances.get(marker).cloned();
         if let Some(keys) = &keys {
-            for (other, held) in &scene.instances {
-                let nested = scene
+            for (other, held) in &self.instances {
+                if other == marker {
+                    continue;
+                }
+                let nested = self
                     .node_index(other)
-                    .and_then(|at| scene.instance_marker_index(at))
+                    .and_then(|at| self.instance_marker_index(at))
                     == Some(index);
                 if nested {
                     continue;
@@ -304,29 +320,39 @@ impl Scene {
                 }
             }
         }
-        for node in scene.nodes.mutable().iter_mut() {
-            if node.owner.as_deref() == Some(marker) {
+        self.set_instance(marker, None);
+        let materialized = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.owner.as_deref() == Some(marker))
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        for at in materialized {
+            self.change_node(at, |node, _| {
                 node.owner = owner.clone();
-            }
+                Ok(())
+            })?;
         }
-        let held = scene.nodes.at_mut(index);
-        held.prefab = None;
-        held.overrides.clear();
-        held.additions.clear();
-        held.removals.clear();
+        self.change_node(index, |node, _| {
+            node.prefab = None;
+            node.overrides.clear();
+            node.additions.clear();
+            node.removals.clear();
+            Ok(())
+        })?;
         for entry in overrides {
             let target = format!("{marker}_{}", entry.node);
-            let target = scene.node_index(&target).unwrap_or_else(|| {
+            let target = self.node_index(&target).unwrap_or_else(|| {
                 panic!(
                     "the unpacked prefab instance {marker} overrides the node {}, which it does not hold",
                     entry.node,
                 )
             });
-            if scene.nodes[target].owner.is_none() {
+            if self.nodes[target].owner.is_none() {
                 continue;
             }
-            scene
-                .transfer_override(target, &entry.path, &entry.value)
+            self.transfer_override(target, &entry.path, &entry.value)
                 .unwrap_or_else(|error| {
                     panic!(
                         "the unpacked prefab instance {marker} overrides {}: {error}",
@@ -334,45 +360,36 @@ impl Scene {
                     )
                 });
         }
-        if let Some(keys) = keys {
-            let held = scene
-                .instances
-                .values()
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            scene.owners.retain(|owned| {
-                owned.scope.as_deref() != Some(marker)
-                    && (held.contains(&owned.prefab) || !keys.contains(&owned.prefab))
-            });
-        } else {
-            scene
-                .owners
-                .retain(|owned| owned.scope.as_deref() != Some(marker));
+        match keys {
+            Some(keys) => {
+                let held = self
+                    .instances
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let owners = self
+                    .owners
+                    .iter()
+                    .filter(|owned| {
+                        owned.scope.as_deref() != Some(marker)
+                            && (held.contains(&owned.prefab) || !keys.contains(&owned.prefab))
+                    })
+                    .cloned()
+                    .collect();
+                self.set_owners(owners);
+            }
+            None => {
+                let owners = self
+                    .owners
+                    .iter()
+                    .filter(|owned| owned.scope.as_deref() != Some(marker))
+                    .cloned()
+                    .collect();
+                self.set_owners(owners);
+            }
         }
-        scene.validate("an unpacked prefab instance");
-        *self = scene;
-        Ok(())
-    }
-
-    pub fn revert(&mut self, marker: &str) -> Result<(), String> {
-        let index = self
-            .node_index(marker)
-            .ok_or_else(|| format!("the scene holds no node {marker}"))?;
-        if self.nodes[index].prefab.is_none() {
-            return Err(format!("the node {marker} holds no prefab"));
-        }
-        let mut document = self.clone();
-        document.nodes.at_mut(index).overrides.clear();
-        document.nodes.at_mut(index).additions.clear();
-        document.nodes.at_mut(index).removals.clear();
-        let rebuilt = Scene::parse_with(
-            &document.write(),
-            self.root.clone(),
-            "a reverted scene",
-            Arc::clone(&self.registry),
-        );
-        *self = rebuilt;
+        self.validate("an unpacked prefab instance");
         Ok(())
     }
 
@@ -457,9 +474,13 @@ impl Scene {
             path: String::from(path),
             value: value.clone(),
         };
-        let overrides = &mut self.nodes.at_mut(marker).overrides;
-        overrides.retain(|held| held.node != entry.node || held.path != entry.path);
-        overrides.push(entry);
+        self.change_node(marker, |held, _| {
+            held.overrides
+                .retain(|other| other.node != entry.node || other.path != entry.path);
+            held.overrides.push(entry.clone());
+            Ok(())
+        })
+        .expect("a prefab instance records its override");
     }
 
     pub(crate) fn transfer_override(
@@ -504,18 +525,22 @@ impl Scene {
     }
 
     fn drop_override(&mut self, marker: usize, node: &str, path: &str) {
-        self.nodes
-            .at_mut(marker)
-            .overrides
-            .retain(|entry| entry.node != node || entry.path != path);
+        self.change_node(marker, |held, _| {
+            held.overrides
+                .retain(|entry| entry.node != node || entry.path != path);
+            Ok(())
+        })
+        .expect("a prefab instance drops its override");
     }
 
     fn drop_component_overrides(&mut self, marker: usize, node: &str, component: &str) {
         let prefix = format!("{component}.");
-        self.nodes
-            .at_mut(marker)
-            .overrides
-            .retain(|entry| entry.node != node || !entry.path.starts_with(&prefix));
+        self.change_node(marker, |held, _| {
+            held.overrides
+                .retain(|entry| entry.node != node || !entry.path.starts_with(&prefix));
+            Ok(())
+        })
+        .expect("a prefab instance drops its component overrides");
     }
 
     fn restore_component(
@@ -554,8 +579,11 @@ impl Scene {
         };
         let mut restored = component.clone_box();
         restored.remap(&format!("{}_", self.nodes[marker].id));
-        restored.validate(self, &self.nodes[index].id)?;
-        self.nodes.at_mut(index).insert_component_box(restored);
+        restored.validate(self.scene, &self.nodes[index].id)?;
+        self.change_node(index, |held, _| {
+            held.insert_component_box(restored);
+            Ok(())
+        })?;
         Ok(true)
     }
 
@@ -577,16 +605,5 @@ impl Scene {
             self.apply_override(index, &entry.path, &entry.value)?;
         }
         Ok(())
-    }
-
-    fn instance_marker_index(&self, index: usize) -> Option<usize> {
-        let mut marker = self.nodes.get(index)?.owner.as_deref()?;
-        loop {
-            let at = self.node_index(marker)?;
-            match self.nodes[at].owner.as_deref() {
-                Some(outer) => marker = outer,
-                None => return Some(at),
-            }
-        }
     }
 }

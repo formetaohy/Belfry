@@ -1,9 +1,6 @@
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{Camera, DirectionalLight, PointLight};
-use belfry_scene::{
-    AudioBusRef, AudioListenerRef, MaterialAsset, MaterialEntry, MeshAsset, MeshEntry, MeshRef,
-    Node, Registry, Scene, Shape,
-};
+use belfry_scene::{AudioBusRef, AudioListenerRef, MeshRef, Node, Registry, Scene, Shape};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -14,37 +11,36 @@ pub(crate) fn scene(path: &Path, registry: Arc<Registry>) -> Scene {
         .unwrap_or_else(|| Path::new("."));
     let mut scene = Scene::with_registry(root, registry);
     scene
-        .meshes_mut()
-        .push(MeshEntry::new("cube", MeshAsset::shape(Shape::Cube)));
-    scene
-        .materials_mut()
-        .push(MaterialEntry::new("grey", MaterialAsset::grey()));
-    scene.nodes_mut().push(
-        Node::new("camera")
-            .with(Transform::from_translation(Vec3::new(0.0, 1.0, 4.0)))
-            .with(Camera::new(1.0, 0.1, 1000.0))
-            .with(AudioListenerRef),
-    );
-    scene
-        .nodes_mut()
-        .push(Node::new("master").with(AudioBusRef::default()));
-    scene.nodes_mut().push(
-        Node::new("sun")
-            .with(Transform::from_rotation(
-                Quat::from_rotation_y(-0.55) * Quat::from_rotation_x(-0.75),
-            ))
-            .with(DirectionalLight::new(
-                Vec3::ONE,
-                std::f32::consts::PI,
-                100.0,
-            )),
-    );
-    let mut lamp = lamp();
-    lamp.id = String::from("lamp");
-    scene.nodes_mut().push(lamp);
-    let mut cube = mesh("cube", "grey");
-    cube.id = String::from("cube");
-    scene.nodes_mut().push(cube);
+        .edit(|edit| {
+            edit.add_mesh("cube", Shape::Cube)?;
+            edit.add_material("grey")?;
+            edit.insert_node(
+                Node::new("camera")
+                    .with(Transform::from_translation(Vec3::new(0.0, 1.0, 4.0)))
+                    .with(Camera::new(1.0, 0.1, 1000.0))
+                    .with(AudioListenerRef),
+            )?;
+            edit.insert_node(Node::new("master").with(AudioBusRef::default()))?;
+            edit.insert_node(
+                Node::new("sun")
+                    .with(Transform::from_rotation(
+                        Quat::from_rotation_y(-0.55) * Quat::from_rotation_x(-0.75),
+                    ))
+                    .with(DirectionalLight::new(
+                        Vec3::ONE,
+                        std::f32::consts::PI,
+                        100.0,
+                    )),
+            )?;
+            let mut lamp = lamp();
+            lamp.id = String::from("lamp");
+            edit.insert_node(lamp)?;
+            let mut cube = mesh("cube", "grey");
+            cube.id = String::from("cube");
+            edit.insert_node(cube)?;
+            Ok(())
+        })
+        .expect("the editor builds its first scene");
     scene
 }
 

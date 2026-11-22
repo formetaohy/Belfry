@@ -364,27 +364,33 @@ fn a_scene_collides_the_triangles_of_its_mesh() {
     let mut edited = Scene::parse(MESH, ".", "the edited mesh scene");
     let ground = belfry_scene::Target::Node(String::from("ground"));
     assert_eq!(
-        edited.set_property(
-            &ground,
-            "collider.shape",
-            &belfry_scene::Value::Text(String::from("cuboid")),
-        ),
+        edit(&mut edited, |edit| {
+            edit.set_property(
+                &ground,
+                "collider.shape",
+                &belfry_scene::Value::Text(String::from("cuboid")),
+            )
+        }),
         Ok(belfry_scene::Effect::Value),
     );
     assert_eq!(
-        edited.set_property(
-            &ground,
-            "collider.shape",
-            &belfry_scene::Value::Text(String::from("mesh")),
-        ),
+        edit(&mut edited, |edit| {
+            edit.set_property(
+                &ground,
+                "collider.shape",
+                &belfry_scene::Value::Text(String::from("mesh")),
+            )
+        }),
         Ok(belfry_scene::Effect::Structure),
     );
     assert_eq!(
-        edited.set_property(
-            &ground,
-            "collider.mesh",
-            &belfry_scene::Value::Text(String::from("ground")),
-        ),
+        edit(&mut edited, |edit| {
+            edit.set_property(
+                &ground,
+                "collider.mesh",
+                &belfry_scene::Value::Text(String::from("ground")),
+            )
+        }),
         Ok(belfry_scene::Effect::Structure),
     );
     let mut world = World::new();
@@ -404,4 +410,10 @@ fn a_scene_collides_the_triangles_of_its_mesh() {
     let observed = Toml::object([("nodes", observe_runtime(&world, scene.registry()))]);
     let text = observed.write();
     assert!(text.contains("shape = \"mesh\""));
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

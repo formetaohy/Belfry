@@ -1,6 +1,16 @@
+use crate::animation::AnimationEntry;
+use crate::edit::Edit;
+use crate::environment::EnvironmentEntry;
+use crate::graph::GraphEntry;
+use crate::image::ImageEntry;
+use crate::material::MaterialEntry;
+use crate::mesh::MeshEntry;
+use crate::model::ModelEntry;
 use crate::prefab::{Loader, describe};
 use crate::scene::{Owned, Scene};
 use crate::schema::ReferenceKind;
+use crate::skin::SkinEntry;
+use crate::sound::SoundEntry;
 use crate::target::Target;
 use std::collections::{BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -32,47 +42,52 @@ pub(crate) fn plan(scene: &Scene, target: &Target) -> Result<Deletion, String> {
     Ok(planner.plan)
 }
 
-pub(crate) fn apply(scene: &mut Scene, deletion: Deletion) {
+pub(crate) fn apply(edit: &mut Edit<'_>, deletion: Deletion) {
     let Deletion {
         nodes,
         assets,
         instances,
         edits,
     } = deletion;
-    scene
-        .nodes
-        .remove_many(&nodes.into_iter().collect::<Vec<_>>());
+    let indices = nodes.into_iter().collect::<Vec<_>>();
+    edit.remove_nodes(&indices);
     for (kind, id) in &assets {
-        detach_entry(scene, *kind, id);
+        detach_entry(edit, *kind, id);
     }
-    scene.owners.retain(|held| {
-        !assets
-            .iter()
-            .any(|(kind, id)| *kind == held.kind && id == &held.id)
-    });
+    let owners = edit
+        .owners
+        .iter()
+        .filter(|held| {
+            !assets
+                .iter()
+                .any(|(kind, id)| *kind == held.kind && id == &held.id)
+        })
+        .cloned()
+        .collect();
+    edit.set_owners(owners);
     for id in &instances {
-        scene.instances.remove(id);
+        edit.set_instance(id, None);
     }
     if edits.is_empty() {
         return;
     }
-    for edit in &edits {
-        edit.apply(scene);
+    for held in &edits {
+        held.apply(edit);
     }
-    scene.validate("a removed instance node");
+    edit.validate("a removed instance node");
 }
 
-fn detach_entry(scene: &mut Scene, kind: ReferenceKind, id: &str) {
+fn detach_entry(edit: &mut Edit<'_>, kind: ReferenceKind, id: &str) {
     let index = match kind {
-        ReferenceKind::Mesh => scene.mesh_index(id),
-        ReferenceKind::Material => scene.material_index(id),
-        ReferenceKind::Image => scene.image_index(id),
-        ReferenceKind::Model => scene.model_index(id),
-        ReferenceKind::Sound => scene.sound_index(id),
-        ReferenceKind::Environment => scene.environment_index(id),
-        ReferenceKind::Graph => scene.graph_index(id),
-        ReferenceKind::Animation => scene.animation_index(id),
-        ReferenceKind::Skin => scene.skin_index(id),
+        ReferenceKind::Mesh => edit.mesh_index(id),
+        ReferenceKind::Material => edit.material_index(id),
+        ReferenceKind::Image => edit.image_index(id),
+        ReferenceKind::Model => edit.model_index(id),
+        ReferenceKind::Sound => edit.sound_index(id),
+        ReferenceKind::Environment => edit.environment_index(id),
+        ReferenceKind::Graph => edit.graph_index(id),
+        ReferenceKind::Animation => edit.animation_index(id),
+        ReferenceKind::Skin => edit.skin_index(id),
         ReferenceKind::Node | ReferenceKind::AudioBus => {
             panic!("an asset of the {kind} kind detaches", kind = kind.name())
         }
@@ -84,33 +99,15 @@ fn detach_entry(scene: &mut Scene, kind: ReferenceKind, id: &str) {
         )
     });
     match kind {
-        ReferenceKind::Mesh => {
-            scene.meshes.remove(index);
-        }
-        ReferenceKind::Material => {
-            scene.materials.remove(index);
-        }
-        ReferenceKind::Image => {
-            scene.images.remove(index);
-        }
-        ReferenceKind::Model => {
-            scene.models.remove(index);
-        }
-        ReferenceKind::Sound => {
-            scene.sounds.remove(index);
-        }
-        ReferenceKind::Environment => {
-            scene.environments.remove(index);
-        }
-        ReferenceKind::Graph => {
-            scene.graphs.remove(index);
-        }
-        ReferenceKind::Animation => {
-            scene.animations.remove(index);
-        }
-        ReferenceKind::Skin => {
-            scene.skins.remove(index);
-        }
+        ReferenceKind::Mesh => edit.remove_asset::<MeshEntry>(index),
+        ReferenceKind::Material => edit.remove_asset::<MaterialEntry>(index),
+        ReferenceKind::Image => edit.remove_asset::<ImageEntry>(index),
+        ReferenceKind::Model => edit.remove_asset::<ModelEntry>(index),
+        ReferenceKind::Sound => edit.remove_asset::<SoundEntry>(index),
+        ReferenceKind::Environment => edit.remove_asset::<EnvironmentEntry>(index),
+        ReferenceKind::Graph => edit.remove_asset::<GraphEntry>(index),
+        ReferenceKind::Animation => edit.remove_asset::<AnimationEntry>(index),
+        ReferenceKind::Skin => edit.remove_asset::<SkinEntry>(index),
         ReferenceKind::Node | ReferenceKind::AudioBus => {
             panic!("an asset of the {kind} kind detaches", kind = kind.name())
         }
@@ -118,29 +115,31 @@ fn detach_entry(scene: &mut Scene, kind: ReferenceKind, id: &str) {
 }
 
 impl MarkerEdit {
-    fn apply(&self, scene: &mut Scene) {
-        let marker = scene.node_index(&self.marker).unwrap_or_else(|| {
+    fn apply(&self, edit: &mut Edit<'_>) {
+        let marker = edit.node_index(&self.marker).unwrap_or_else(|| {
             panic!(
                 "the deleted subtree keeps the prefab instance {}",
                 self.marker,
             )
         });
-        let node = scene.nodes.at_mut(marker);
-        node.additions.retain(|held| {
-            !self
-                .removed
-                .contains(&format!("{}{}", self.prefix, held.id))
-        });
-        node.overrides.retain(|entry| {
-            !self
-                .removed
-                .contains(&format!("{}{}", self.prefix, entry.node))
-        });
-        if !self.addition {
-            node.removals
-                .retain(|removal| removal != &self.relative && !self.redundant.contains(removal));
-            node.removals.push(self.relative.clone());
-        }
+        let removed = &self.removed;
+        let prefix = &self.prefix;
+        let relative = &self.relative;
+        let redundant = &self.redundant;
+        let addition = self.addition;
+        edit.change_node(marker, |node, _| {
+            node.additions
+                .retain(|held| !removed.contains(&format!("{prefix}{}", held.id)));
+            node.overrides
+                .retain(|entry| !removed.contains(&format!("{prefix}{}", entry.node)));
+            if !addition {
+                node.removals
+                    .retain(|removal| removal != relative && !redundant.contains(removal));
+                node.removals.push(relative.clone());
+            }
+            Ok(())
+        })
+        .expect("a prefab instance keeps the structure a deletion leaves");
     }
 }
 

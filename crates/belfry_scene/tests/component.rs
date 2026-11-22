@@ -229,36 +229,44 @@ fn a_derived_component_travels_through_every_layer() {
     );
     assert_eq!(scene.property(&player, "player"), Some(Value::Bool(true)));
     assert_eq!(scene.property(&player, "health.cooldown"), None);
-    scene
-        .set_property(&player, "health", &Value::Bool(false))
-        .expect("a derived component leaves its node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health", &Value::Bool(false))
+    })
+    .expect("a derived component leaves its node");
     assert_eq!(scene.property(&player, "health"), Some(Value::Bool(false)));
-    scene
-        .set_property(&player, "health", &Value::Bool(true))
-        .expect("a derived component joins its node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health", &Value::Bool(true))
+    })
+    .expect("a derived component joins its node");
     assert_eq!(
         scene.property(&player, "health.value"),
         Some(Value::Number(100.0))
     );
-    scene
-        .set_property(&player, "health.value", &Value::Number(20.0))
-        .expect("a derived component edits its number");
-    scene
-        .set_property(&player, "health.spawn.x", &Value::Number(1.0))
-        .expect("a derived component edits one vector axis");
-    scene
-        .set_property(&player, "health.team", &Value::Text(String::from("green")))
-        .expect_err("a derived component rejects a choice it does not hold");
-    scene
-        .set_property(&player, "health.team", &Value::Text(String::from("blue")))
-        .expect("a derived component edits its choice");
-    scene
-        .set_property(&player, "player", &Value::Bool(false))
-        .expect("a derived tag leaves its node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health.value", &Value::Number(20.0))
+    })
+    .expect("a derived component edits its number");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health.spawn.x", &Value::Number(1.0))
+    })
+    .expect("a derived component edits one vector axis");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health.team", &Value::Text(String::from("green")))
+    })
+    .expect_err("a derived component rejects a choice it does not hold");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "health.team", &Value::Text(String::from("blue")))
+    })
+    .expect("a derived component edits its choice");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "player", &Value::Bool(false))
+    })
+    .expect("a derived tag leaves its node");
     assert_eq!(scene.property(&player, "player"), Some(Value::Bool(false)));
-    scene
-        .set_property(&player, "player", &Value::Bool(true))
-        .expect("a derived tag joins its node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "player", &Value::Bool(true))
+    })
+    .expect("a derived tag joins its node");
     assert_eq!(scene.property(&player, "player"), Some(Value::Bool(true)));
     let written = scene.write();
     assert!(written.contains("[nodes.health]"));
@@ -374,25 +382,30 @@ fn a_derived_component_holds_custom_values_and_asset_references() {
         Some(Value::Number(3.0))
     );
     assert_eq!(scene.asset_ids(ReferenceKind::Node), vec!["cube", "player"]);
-    scene
-        .set_property(&player, "spawn.mesh", &Value::Text(String::from("ghost")))
-        .expect_err("a reference names an asset the scene holds");
-    scene
-        .set_property(&player, "spawn.reach", &Value::Number(11.0))
-        .expect_err("a custom value validates itself");
-    scene
-        .set_property(&player, "spawn.reach", &Value::Number(4.0))
-        .expect("a custom value edits its number");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "spawn.mesh", &Value::Text(String::from("ghost")))
+    })
+    .expect_err("a reference names an asset the scene holds");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "spawn.reach", &Value::Number(11.0))
+    })
+    .expect_err("a custom value validates itself");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "spawn.reach", &Value::Number(4.0))
+    })
+    .expect("a custom value edits its number");
     assert_eq!(
         scene.property(&player, "spawn.reach"),
         Some(Value::Number(4.0))
     );
-    scene
-        .set_property(&player, "spawn", &Value::Bool(false))
-        .expect("a derived component leaves its node");
-    scene
-        .set_property(&player, "spawn", &Value::Bool(true))
-        .expect("a derived component joins its node with scene references");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "spawn", &Value::Bool(false))
+    })
+    .expect("a derived component leaves its node");
+    edit(&mut scene, |edit| {
+        edit.set_property(&player, "spawn", &Value::Bool(true))
+    })
+    .expect("a derived component joins its node with scene references");
     assert_eq!(
         scene.property(&player, "spawn.mesh"),
         Some(Value::Text(String::from("cube")))
@@ -415,26 +428,39 @@ fn a_derived_component_holds_custom_values_and_asset_references() {
     assert_eq!(again, scene);
 
     assert!(
-        scene.remove(&Target::Mesh(String::from("cube"))).is_err(),
+        edit(&mut scene, |edit| edit
+            .remove(&Target::Mesh(String::from("cube"))))
+        .is_err(),
         "a referenced mesh stays"
     );
     assert!(
-        scene
-            .remove(&Target::Material(String::from("grey")))
-            .is_err(),
+        edit(&mut scene, |edit| edit
+            .remove(&Target::Material(String::from("grey"))))
+        .is_err(),
         "a referenced material stays"
     );
     assert!(
-        scene.remove(&Target::Node(String::from("cube"))).is_err(),
+        edit(&mut scene, |edit| edit
+            .remove(&Target::Node(String::from("cube"))))
+        .is_err(),
         "a referenced node stays"
     );
-    scene
-        .remove(&Target::Node(String::from("player")))
-        .expect("a node leaves with the components it owns");
-    scene
-        .remove(&Target::Mesh(String::from("cube")))
-        .expect("an unreferenced mesh leaves");
-    scene
-        .remove(&Target::Material(String::from("grey")))
-        .expect("an unreferenced material leaves");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("player")))
+    })
+    .expect("a node leaves with the components it owns");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Mesh(String::from("cube")))
+    })
+    .expect("an unreferenced mesh leaves");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Material(String::from("grey")))
+    })
+    .expect("an unreferenced material leaves");
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

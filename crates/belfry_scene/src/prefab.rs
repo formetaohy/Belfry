@@ -1,16 +1,14 @@
 use crate::animation::AnimationEntry;
+use crate::delta::{Asset, owned};
+use crate::edit::Edit;
 use crate::graph::GraphEntry;
-use crate::image::{ImageEntry, ImageSource};
-use crate::material::MaterialEntry;
-use crate::mesh::MeshEntry;
-use crate::model::ModelEntry;
+use crate::image::ImageSource;
 use crate::node::Node;
 use crate::nodes::Nodes;
 use crate::registry::Registry;
-use crate::scene::{Owned, Scene};
+use crate::scene::Scene;
 use crate::schema::{FieldKind, ReferenceKind};
 use crate::skin::SkinEntry;
-use crate::sound::SoundEntry;
 use crate::value::Value;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -95,7 +93,7 @@ impl Loader {
             ids,
             nodes: Vec::with_capacity(scene.nodes.len()),
         };
-        for node in scene.nodes.take() {
+        for node in scene.nodes().to_vec() {
             let prefab = node.prefab.clone();
             materialization.nodes.push(node.clone());
             let Some(path) = prefab else {
@@ -105,16 +103,16 @@ impl Loader {
                 .load(root, &path, what)
                 .unwrap_or_else(|error| panic!("{what}: {error}"));
             let from = root_of(root, &path);
-            import(scene, &template, &key, &from, root, &node.id)
-                .unwrap_or_else(|error| panic!("{what}: {error}"));
             scene
-                .instances
-                .insert(node.id.clone(), owners(&template, &key));
-            for (nested, held) in &template.instances {
-                scene
-                    .instances
-                    .insert(format!("{}_{nested}", node.id), held.clone());
-            }
+                .edit(|edit| {
+                    import(edit, &template, &key, &from, root, &node.id)?;
+                    edit.set_instance(&node.id, Some(owners(&template, &key)));
+                    for (nested, held) in &template.instances {
+                        edit.set_instance(&format!("{}_{nested}", node.id), Some(held.clone()));
+                    }
+                    Ok(())
+                })
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
             let generated = instantiate(&node, &template, &mut materialization.ids, &from, root)
                 .unwrap_or_else(|error| panic!("{what}: {error}"));
             materialization.nodes.extend(generated);
@@ -122,7 +120,13 @@ impl Loader {
             apply_removals(scene, &node, &mut materialization.nodes, what);
         }
         scene.nodes = Nodes::from(materialization.nodes);
-        apply_overrides(scene);
+        scene
+            .edit(|edit| {
+                let candidates = 0..edit.nodes().len();
+                apply_overrides(edit, candidates);
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("{what}: {error}"));
     }
 }
 
@@ -165,18 +169,24 @@ impl Materialization<'_> {
             .load(self.root, &path, self.what)
             .unwrap_or_else(|error| panic!("{}: {error}", self.what));
         let from = root_of(self.root, &path);
-        import(scene, &template, &key, &from, self.root, &held.id)
-            .unwrap_or_else(|error| panic!("{}: {error}", self.what));
         let keys = owners(&template, &key);
-        scene.instances.insert(held.id.clone(), keys.clone());
-        for (nested, held_keys) in &template.instances {
-            scene
-                .instances
-                .insert(format!("{}_{nested}", held.id), held_keys.clone());
-        }
-        if let Some(outer) = scene.instances.get_mut(&marker.id) {
-            outer.extend(keys);
-        }
+        let root = self.root;
+        let marker_id = marker.id.clone();
+        scene
+            .edit(|edit| {
+                import(edit, &template, &key, &from, root, &held.id)?;
+                edit.set_instance(&held.id, Some(keys.clone()));
+                for (nested, held_keys) in &template.instances {
+                    edit.set_instance(&format!("{}_{nested}", held.id), Some(held_keys.clone()));
+                }
+                if let Some(outer) = edit.instances.get(&marker_id).cloned() {
+                    let mut held = outer;
+                    held.extend(keys);
+                    edit.set_instance(&marker_id, Some(held));
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("{}: {error}", self.what));
         let generated = instantiate(&held, &template, &mut self.ids, &from, self.root)
             .unwrap_or_else(|error| panic!("{}: {error}", self.what));
         self.nodes.extend(generated);
@@ -231,9 +241,15 @@ fn apply_removals(scene: &mut Scene, marker: &Node, nodes: &mut Vec<Node>, what:
         }
     }
     nodes.retain(|node| !removed.contains(&node.id));
-    for id in &removed {
-        scene.instances.remove(id);
-    }
+    let ids = removed.into_iter().collect::<Vec<_>>();
+    scene
+        .edit(|edit| {
+            for id in &ids {
+                edit.set_instance(id, None);
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{what}: {error}"));
     let at = nodes
         .iter()
         .position(|node| node.id == marker.id)
@@ -241,9 +257,9 @@ fn apply_removals(scene: &mut Scene, marker: &Node, nodes: &mut Vec<Node>, what:
     let held = &mut nodes[at];
     held.removals = kept;
     held.additions
-        .retain(|addition| !removed.contains(&format!("{prefix}{}", addition.id)));
+        .retain(|addition| !ids.contains(&format!("{prefix}{}", addition.id)));
     held.overrides
-        .retain(|entry| !removed.contains(&format!("{prefix}{}", entry.node)));
+        .retain(|entry| !ids.contains(&format!("{prefix}{}", entry.node)));
 }
 
 fn descendant(parent: &HashMap<&str, &str>, of: &str, ancestor: &str) -> bool {
@@ -257,26 +273,27 @@ fn descendant(parent: &HashMap<&str, &str>, of: &str, ancestor: &str) -> bool {
     false
 }
 
-pub(crate) fn apply_overrides(scene: &mut Scene) {
-    let mut markers = scene
-        .nodes()
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.prefab().is_some() && !node.overrides().is_empty())
-        .map(|(index, _)| (depth(scene, index), index))
+pub(crate) fn apply_overrides(edit: &mut Edit<'_>, candidates: impl IntoIterator<Item = usize>) {
+    let mut markers = candidates
+        .into_iter()
+        .filter(|index| {
+            let node = &edit.nodes()[*index];
+            node.prefab().is_some() && !node.overrides().is_empty()
+        })
+        .map(|index| (depth(edit, index), index))
         .collect::<Vec<_>>();
-    markers.sort_by_key(|(depth, _)| Reverse(*depth));
+    markers.sort_by_key(|(depth, index)| (Reverse(*depth), *index));
+    markers.dedup_by_key(|(_, index)| *index);
     for (_, marker) in markers {
-        let marker_id = scene.nodes()[marker].id.clone();
-        let overrides = scene.nodes()[marker].overrides().to_vec();
+        let marker_id = edit.nodes()[marker].id.clone();
+        let overrides = edit.nodes()[marker].overrides().to_vec();
         let mut applied = Vec::new();
         for entry in overrides {
             let id = format!("{marker_id}_{}", entry.node);
-            let Some(index) = scene.node_index(&id) else {
+            let Some(index) = edit.node_index(&id) else {
                 continue;
             };
-            scene
-                .apply_override(index, &entry.path, &entry.value)
+            edit.apply_override(index, &entry.path, &entry.value)
                 .unwrap_or_else(|error| {
                     panic!(
                         "the prefab instance {marker_id} overrides {} of {}: {error}",
@@ -285,7 +302,11 @@ pub(crate) fn apply_overrides(scene: &mut Scene) {
                 });
             applied.push(entry);
         }
-        scene.nodes.at_mut(marker).overrides = applied;
+        edit.change_node(marker, |node, _| {
+            node.overrides = applied;
+            Ok(())
+        })
+        .expect("a prefab instance keeps the overrides it applies");
     }
 }
 
@@ -390,7 +411,7 @@ pub(crate) fn owners(template: &Scene, key: &Path) -> BTreeSet<PathBuf> {
 }
 
 pub(crate) fn import(
-    scene: &mut Scene,
+    edit: &mut Edit<'_>,
     template: &Scene,
     key: &Path,
     from: &Path,
@@ -403,9 +424,9 @@ pub(crate) fn import(
         if let ImageSource::Path(path) = &mut entry.source {
             *path = rebase(from, target, path);
         }
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -414,15 +435,14 @@ pub(crate) fn import(
                 scope: None,
             },
             entry,
-            |scene| &mut scene.images,
         )?;
     }
     for entry in template.sounds() {
         let mut entry = entry.clone();
         entry.path = rebase(from, target, &entry.path);
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -431,7 +451,6 @@ pub(crate) fn import(
                 scope: None,
             },
             entry,
-            |scene| &mut scene.sounds,
         )?;
     }
     for entry in template.environments() {
@@ -439,9 +458,9 @@ pub(crate) fn import(
         if let crate::environment::EnvironmentSource::Panorama(path) = &mut entry.source {
             *path = rebase(from, target, path);
         }
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -450,13 +469,12 @@ pub(crate) fn import(
                 scope: None,
             },
             entry,
-            |scene| &mut scene.environments,
         )?;
     }
     for entry in template.meshes() {
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -465,13 +483,12 @@ pub(crate) fn import(
                 scope: None,
             },
             entry.clone(),
-            |scene| &mut scene.meshes,
         )?;
     }
     for entry in template.materials() {
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -480,15 +497,14 @@ pub(crate) fn import(
                 scope: None,
             },
             entry.clone(),
-            |scene| &mut scene.materials,
         )?;
     }
     for entry in template.models() {
         let mut entry = entry.clone();
         entry.path = rebase(from, target, &entry.path);
-        let source = String::from(entry.asset_id());
+        let source = String::from(entry.id());
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -497,14 +513,13 @@ pub(crate) fn import(
                 scope: None,
             },
             entry,
-            |scene| &mut scene.models,
         )?;
     }
     for entry in template.skins() {
         let source = entry.id.clone();
         let held = SkinEntry::new(format!("{prefix}{source}"), entry.asset.rebased(&prefix));
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -513,14 +528,13 @@ pub(crate) fn import(
                 scope: Some(scope),
             },
             held,
-            |scene| &mut scene.skins,
         )?;
     }
     for entry in template.animations() {
         let source = entry.id.clone();
         let held = AnimationEntry::new(format!("{prefix}{source}"), entry.asset.rebased(&prefix));
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -529,14 +543,13 @@ pub(crate) fn import(
                 scope: Some(scope),
             },
             held,
-            |scene| &mut scene.animations,
         )?;
     }
     for entry in template.graphs() {
         let source = entry.id.clone();
         let held = GraphEntry::new(format!("{prefix}{source}"), entry.asset.rebased(&prefix));
         import_entry(
-            scene,
+            edit,
             Import {
                 template,
                 key,
@@ -545,7 +558,6 @@ pub(crate) fn import(
                 scope: Some(scope),
             },
             held,
-            |scene| &mut scene.graphs,
         )?;
     }
     Ok(())
@@ -559,70 +571,7 @@ struct Import<'a> {
     scope: Option<&'a str>,
 }
 
-trait Asset {
-    fn asset_id(&self) -> &str;
-}
-
-impl Asset for ImageEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for crate::environment::EnvironmentEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for SoundEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for MeshEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for MaterialEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for ModelEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for SkinEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for AnimationEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl Asset for GraphEntry {
-    fn asset_id(&self) -> &str {
-        &self.id
-    }
-}
-
-fn import_entry<T: Asset + Clone + PartialEq>(
-    scene: &mut Scene,
-    import: Import<'_>,
-    entry: T,
-    mut entries: impl FnMut(&mut Scene) -> &mut Vec<T>,
-) -> Result<(), String> {
+fn import_entry<A: Asset>(edit: &mut Edit<'_>, import: Import<'_>, entry: A) -> Result<(), String> {
     let Import {
         template,
         key,
@@ -630,25 +579,19 @@ fn import_entry<T: Asset + Clone + PartialEq>(
         source,
         scope,
     } = import;
-    let id = String::from(entry.asset_id());
+    let id = String::from(entry.id());
     let owner = template
         .asset_owner(kind, source)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| key.to_path_buf());
-    match scene.asset_owner(kind, &id).map(Path::to_path_buf) {
+    match edit.asset_owner(kind, &id).map(Path::to_path_buf) {
         Some(held) if held == owner => {
-            let items = entries(scene);
-            let at = items
+            let at = A::held(edit)
                 .iter()
-                .position(|held| held.asset_id() == id)
+                .position(|held| held.id() == id)
                 .expect("an imported asset keeps the document entry it names");
-            items[at] = entry;
-            let record = scene
-                .owners
-                .iter_mut()
-                .find(|held| held.kind == kind && held.id == id)
-                .expect("an imported asset keeps the owner it records");
-            record.scope = scope.map(String::from);
+            edit.set_asset(at, entry);
+            edit.change_owner(kind, &id, |record| record.scope = scope.map(String::from));
         }
         Some(held) => {
             return Err(format!(
@@ -659,9 +602,8 @@ fn import_entry<T: Asset + Clone + PartialEq>(
             ));
         }
         None => {
-            let items = entries(scene);
-            if let Some(at) = items.iter().position(|held| held.asset_id() == id) {
-                if items[at] == entry {
+            if let Some(at) = A::held(edit).iter().position(|held| held.id() == id) {
+                if A::held(edit)[at] == entry {
                     return Ok(());
                 }
                 return Err(format!(
@@ -670,13 +612,7 @@ fn import_entry<T: Asset + Clone + PartialEq>(
                     owner.display(),
                 ));
             }
-            items.push(entry);
-            scene.owners.push(Owned {
-                kind,
-                id,
-                prefab: owner,
-                scope: scope.map(String::from),
-            });
+            edit.add_asset(entry, owned(kind, id, &owner, scope));
         }
     }
     Ok(())

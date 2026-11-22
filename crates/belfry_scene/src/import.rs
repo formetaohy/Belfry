@@ -1,4 +1,5 @@
 use crate::animation::{AnimationAsset, AnimationEntry};
+use crate::edit::Edit;
 use crate::graph::{GraphAsset, GraphEntry, GraphState};
 use crate::image::ImageEntry;
 use crate::material::{MaterialAsset, MaterialEntry};
@@ -6,7 +7,6 @@ use crate::mesh::{MeshAsset, MeshEntry};
 use crate::model::ModelEntry;
 use crate::node::{AnimationRef, MeshRef, Node, SkinRef};
 use crate::reference::{AnimationId, ModelId, NodeId};
-use crate::scene::Scene;
 use crate::skin::{SkinAsset, SkinEntry};
 use crate::target::{Target, valid_id};
 use belfry_gltf::Model;
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-impl Scene {
+impl Edit<'_> {
     pub fn import_model(
         &mut self,
         id: &str,
@@ -365,12 +365,22 @@ impl Scene {
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        self.models.push(ModelEntry::new(id, path));
-        self.images.extend(images);
-        self.materials.extend(materials);
-        self.meshes.extend(meshes);
-        self.skins.extend(skins);
-        self.animations.extend(animations);
+        self.adopt(ModelEntry::new(id, path));
+        for entry in images {
+            self.adopt(entry);
+        }
+        for entry in materials {
+            self.adopt(entry);
+        }
+        for entry in meshes {
+            self.adopt(entry);
+        }
+        for entry in skins {
+            self.adopt(entry);
+        }
+        for entry in animations {
+            self.adopt(entry);
+        }
         if let Some(graph) = graph_id {
             let mut used = HashSet::new();
             let mut entry = String::new();
@@ -395,12 +405,12 @@ impl Scene {
                     .unwrap_or_else(|error| panic!("{error}"))
                 })
                 .collect();
-            self.graphs.push(GraphEntry::new(
+            self.adopt(GraphEntry::new(
                 graph,
                 GraphAsset::new(entry, Vec::new(), states, Vec::new()),
             ));
         }
-        self.nodes.extend(nodes);
+        self.append_nodes(nodes);
         Ok(Target::Node(holder))
     }
 }

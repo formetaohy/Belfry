@@ -177,7 +177,7 @@ impl SceneSync {
         if let Some(applied) = &mut self.applied
             && let Some(at) = applied.node_index(&node.id)
         {
-            applied.nodes_mut()[at] = node.clone();
+            applied.remember_node(at, node.clone());
         }
         belfry_animation::settle(world);
         propagate(world);

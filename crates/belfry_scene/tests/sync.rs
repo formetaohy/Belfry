@@ -52,15 +52,23 @@ scale = [1.0, 1.0, 1.0]
 #[test]
 fn a_scene_index_follows_structure_edits() {
     let mut scene = Scene::parse(SCENE, ".", "the test scene");
-    scene.nodes_mut().push(belfry_scene::Node::new("c"));
+    edit(&mut scene, |edit| {
+        edit.insert_node(belfry_scene::Node::new("c"))
+    })
+    .expect("the scene adds the node c");
     let b = scene.node_index("b").expect("the scene holds b");
     let c = scene.node_index("c").expect("the scene holds c");
-    scene.reparent(b, Some(c));
+    edit(&mut scene, |edit| {
+        edit.reparent(b, Some(c));
+        Ok(())
+    })
+    .expect("the scene reparents the node b");
     assert_eq!(scene.children(c).collect::<Vec<_>>(), [b]);
     assert_eq!(scene.subtree(c), [b, c]);
-    scene
-        .remove(&Target::Node(String::from("a")))
-        .expect("the scene removes the node a");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("a")))
+    })
+    .expect("the scene removes the node a");
     for (at, node) in scene.nodes().iter().enumerate() {
         assert_eq!(
             scene.node_index(&node.id),
@@ -88,13 +96,18 @@ fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
     world.insert(a, Ticks(7));
     assert_eq!(sync.entities(), [a, b]);
 
-    scene.set_transform(0, Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)));
-    scene
-        .insert_node(belfry_scene::Node::new("c"))
-        .expect("the scene adds a node");
-    scene
-        .remove(&Target::Node(String::from("b")))
-        .expect("the scene removes a node");
+    edit(&mut scene, |edit| {
+        edit.set_transform(0, Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)))
+    })
+    .expect("the scene moves the node a");
+    edit(&mut scene, |edit| {
+        edit.insert_node(belfry_scene::Node::new("c"))
+    })
+    .expect("the scene adds a node");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("b")))
+    })
+    .expect("the scene removes a node");
     assert_eq!(
         scene.transform(0),
         Transform::from_translation(Vec3::new(2.0, 0.0, 0.0))
@@ -112,4 +125,10 @@ fn a_scene_sync_reuses_entities_and_reinstalls_changed_components() {
     let c = sync.id("c").expect("the sync spawns the added node");
     assert!(world.is_alive(c));
     assert!(!world.is_alive(b));
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

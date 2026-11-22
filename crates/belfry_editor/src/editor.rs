@@ -7,10 +7,7 @@ use std::time::{Duration, Instant};
 
 use belfry_gpu_device::{GpuContext, GpuRequest, Submission, WindowHandle};
 use belfry_math::{Quat, Rect, Transform, Vec2, Vec3};
-use belfry_scene::{
-    MaterialAsset, MaterialEntry, MeshAsset, MeshEntry, Node, Registry, Scene, Shape, Target,
-    Value, Watch,
-};
+use belfry_scene::{Delta, Node, Registry, Scene, Shape, Target, Value, Watch};
 use belfry_ui::InputKey as Key;
 use belfry_window::{
     Event, Flow, Handler, KeyCode, ModifiersState, MouseButton, Window, WindowConfig,
@@ -56,8 +53,7 @@ pub fn run(config: EditorConfig) {
 struct DragState {
     drag: gizmo::Drag,
     node: usize,
-    before: Scene,
-    started: bool,
+    delta: Option<Delta>,
 }
 
 pub struct Editor {
@@ -205,6 +201,7 @@ impl Editor {
         match loaded {
             Ok(scene) => {
                 self.scene = scene;
+                self.drag = None;
                 self.history.reset();
                 self.dirty = false;
                 self.status = format!("Reloaded {}", self.path.display());
@@ -228,6 +225,7 @@ impl Editor {
                 catch_unwind(AssertUnwindSafe(|| Scene::load_with(&self.path, registry)))
             {
                 self.scene = scene;
+                self.drag = None;
                 self.history.reset();
                 self.dirty = false;
                 self.status = String::from("Reloaded from disk");
@@ -281,15 +279,16 @@ impl Editor {
         }
     }
 
-    fn record(&mut self, before: Scene) {
-        if self.scene != before {
-            self.history.record(before, self.scene.clone());
-            self.dirty = true;
+    fn record(&mut self, delta: Delta) {
+        if delta.is_empty() {
+            return;
         }
+        self.history.record(delta);
+        self.dirty = true;
     }
 
     fn undo(&mut self) {
-        self.drag = None;
+        self.finish_drag();
         if self.history.undo(&mut self.scene) {
             self.dirty = true;
             self.status = String::from("Undo");
@@ -299,12 +298,20 @@ impl Editor {
     }
 
     fn redo(&mut self) {
-        self.drag = None;
+        self.finish_drag();
         if self.history.redo(&mut self.scene) {
             self.dirty = true;
             self.status = String::from("Redo");
             self.clamp();
             self.refresh_preview();
+        }
+    }
+
+    fn finish_drag(&mut self) {
+        if let Some(state) = self.drag.take()
+            && let Some(delta) = state.delta
+        {
+            self.record(delta);
         }
     }
 
@@ -356,99 +363,85 @@ impl Editor {
             self.error = Some(format!("the editor adds no {kind}"));
             return;
         }
-        let before = self.scene.clone();
-        if kind == "mesh" {
-            if self.scene.meshes().is_empty() {
-                let id = unique_asset(&self.scene, "mesh", "cube");
-                self.scene
-                    .meshes_mut()
-                    .push(MeshEntry::new(id, MeshAsset::shape(Shape::Cube)));
-            }
-            if self.scene.materials().is_empty() {
-                let id = unique_asset(&self.scene, "material", "grey");
-                self.scene
-                    .materials_mut()
-                    .push(MaterialEntry::new(id, MaterialAsset::grey()));
-            }
-        }
-        let mut node = match kind {
-            "mesh" => {
-                crate::default::mesh(&self.scene.meshes()[0].id, &self.scene.materials()[0].id)
-            }
-            "camera" => crate::default::camera(),
-            "sun" => crate::default::sun(),
-            "lamp" => crate::default::lamp(),
-            _ => Node::new(""),
-        };
         let parent = match &self.selected {
             Some(Target::Node(id)) if self.scene.node_index(id).is_some() => Some(id.clone()),
             _ => None,
         };
-        node.id = match &parent {
-            Some(parent) => self.scene.child_id(parent, kind),
-            None => unique_node(&self.scene, kind),
-        };
-        let target = match &parent {
-            Some(parent) => self.scene.insert_child(parent, node),
-            None => self.scene.insert_node(node),
-        };
-        match target {
-            Ok(target) => {
-                self.record(before);
+        let inserted = self.scene.edit(|edit| {
+            if kind == "mesh" {
+                if edit.meshes().is_empty() {
+                    let id = unique_asset(edit, "mesh", "cube");
+                    edit.add_mesh(&id, Shape::Cube)?;
+                }
+                if edit.materials().is_empty() {
+                    let id = unique_asset(edit, "material", "grey");
+                    edit.add_material(&id)?;
+                }
+            }
+            let mut node = match kind {
+                "mesh" => crate::default::mesh(&edit.meshes()[0].id, &edit.materials()[0].id),
+                "camera" => crate::default::camera(),
+                "sun" => crate::default::sun(),
+                "lamp" => crate::default::lamp(),
+                _ => Node::new(""),
+            };
+            node.id = match &parent {
+                Some(parent) => edit.child_id(parent, kind),
+                None => unique_node(edit, kind),
+            };
+            match &parent {
+                Some(parent) => edit.insert_child(parent, node),
+                None => edit.insert_node(node),
+            }
+        });
+        match inserted {
+            Ok((target, delta)) => {
+                self.record(delta);
                 self.selected = Some(target);
                 self.status = format!("Added {kind}");
                 self.refresh_preview();
             }
-            Err(error) => {
-                self.scene = before;
-                self.error = Some(error);
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
     fn add_asset(&mut self, kind: &str) {
-        let before = self.scene.clone();
-        let created = match kind {
+        let import = self.import.clone();
+        let created = self.scene.edit(|edit| match kind {
             "mesh" => {
-                let id = unique_asset(&self.scene, "mesh", "mesh");
-                self.scene.add_mesh(&id, Shape::Cube)
+                let id = unique_asset(edit, "mesh", "mesh");
+                edit.add_mesh(&id, Shape::Cube)
             }
             "material" => {
-                let id = unique_asset(&self.scene, "material", "material");
-                self.scene.add_material(&id)
+                let id = unique_asset(edit, "material", "material");
+                edit.add_material(&id)
             }
             "graph" => {
-                let id = unique_asset(&self.scene, "graph", "graph");
-                self.scene.add_graph(&id)
+                let id = unique_asset(edit, "graph", "graph");
+                edit.add_graph(&id)
             }
             "image" => {
-                let id = unique_asset(&self.scene, "image", "image");
-                self.scene.add_image(&id, &self.import)
+                let id = unique_asset(edit, "image", "image");
+                edit.add_image(&id, &import)
             }
             "sound" => {
-                let id = unique_asset(&self.scene, "sound", "sound");
-                self.scene.add_sound(&id, &self.import)
+                let id = unique_asset(edit, "sound", "sound");
+                edit.add_sound(&id, &import)
             }
             "environment" => {
-                let id = unique_asset(&self.scene, "environment", "environment");
-                self.scene.add_environment(&id, &self.import)
+                let id = unique_asset(edit, "environment", "environment");
+                edit.add_environment(&id, &import)
             }
-            other => {
-                self.error = Some(format!("the editor adds no {other} asset"));
-                return;
-            }
-        };
+            other => Err(format!("the editor adds no {other} asset")),
+        });
         match created {
-            Ok(target) => {
-                self.record(before);
+            Ok((target, delta)) => {
+                self.record(delta);
                 self.selected = Some(target);
                 self.status = format!("Added {kind}");
                 self.refresh_preview();
             }
-            Err(error) => {
-                self.scene = before;
-                self.error = Some(error);
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -458,18 +451,14 @@ impl Editor {
             return;
         }
         let id = model_id(&self.scene, path);
-        let before = self.scene.clone();
-        match self.scene.import_model(&id, path, None) {
-            Ok(target) => {
-                self.record(before);
+        match self.scene.edit(|edit| edit.import_model(&id, path, None)) {
+            Ok((target, delta)) => {
+                self.record(delta);
                 self.selected = Some(target);
                 self.status = format!("Imported {path}");
                 self.refresh_preview();
             }
-            Err(error) => {
-                self.scene = before;
-                self.error = Some(error);
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -492,30 +481,29 @@ impl Editor {
             Some(Target::Node(id)) if self.scene.node_index(id).is_some() => Some(id.clone()),
             _ => None,
         };
-        let id = match &parent {
-            Some(parent) => self.scene.child_id(parent, &name),
-            None => unique_node(&self.scene, &name),
-        };
-        let before = self.scene.clone();
-        let inserted = match &parent {
-            Some(parent) => self.scene.insert_child(parent, Node::instance(&id, path)),
-            None => self.scene.add_instance(&id, path),
-        };
+        let inserted = self.scene.edit(|edit| {
+            let id = match &parent {
+                Some(parent) => edit.child_id(parent, &name),
+                None => unique_node(edit, &name),
+            };
+            match &parent {
+                Some(parent) => edit.insert_child(parent, Node::instance(&id, path)),
+                None => edit.add_instance(&id, path),
+            }
+        });
         match inserted {
-            Ok(target) => {
-                self.record(before);
+            Ok((target, delta)) => {
+                self.record(delta);
                 self.selected = Some(target);
                 self.status = format!("Instantiated {path}");
                 self.refresh_preview();
             }
-            Err(error) => {
-                self.scene = before;
-                self.error = Some(error);
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
     fn remove(&mut self) {
+        self.finish_drag();
         let Some(target) = self.selected.clone() else {
             return;
         };
@@ -527,13 +515,11 @@ impl Editor {
                 .map(|index| Target::Node(self.scene.nodes()[index].id.clone())),
             _ => None,
         };
-        let before = self.scene.clone();
-        match self.scene.remove(&target) {
-            Ok(()) => {
-                self.record(before);
+        match self.scene.edit(|edit| edit.remove(&target)) {
+            Ok(((), delta)) => {
+                self.record(delta);
                 self.selected = parent;
                 self.status = format!("Removed {target}");
-                self.drag = None;
                 self.refresh_preview();
             }
             Err(error) => self.error = Some(error),
@@ -567,10 +553,12 @@ impl Editor {
             Message::AddAsset(kind) => self.add_asset(kind),
             Message::Remove => self.remove(),
             Message::AddComponent(target, name) => {
-                let before = self.scene.clone();
-                match self.scene.set_property(&target, &name, &Value::Bool(true)) {
-                    Ok(_) => {
-                        self.record(before);
+                match self
+                    .scene
+                    .edit(|edit| edit.set_property(&target, &name, &Value::Bool(true)))
+                {
+                    Ok((_, delta)) => {
+                        self.record(delta);
                         self.status = format!("Added {name}");
                         self.refresh_preview();
                     }
@@ -578,10 +566,12 @@ impl Editor {
                 }
             }
             Message::RemoveComponent(target, name) => {
-                let before = self.scene.clone();
-                match self.scene.set_property(&target, &name, &Value::Bool(false)) {
-                    Ok(_) => {
-                        self.record(before);
+                match self
+                    .scene
+                    .edit(|edit| edit.set_property(&target, &name, &Value::Bool(false)))
+                {
+                    Ok((_, delta)) => {
+                        self.record(delta);
                         self.status = format!("Removed {name}");
                         self.refresh_preview();
                     }
@@ -592,16 +582,16 @@ impl Editor {
                 target,
                 path,
                 value,
-            } => {
-                let before = self.scene.clone();
-                match self.scene.set_property(&target, &path, &value) {
-                    Ok(_) => {
-                        self.record(before);
-                        self.apply_edit(&target);
-                    }
-                    Err(error) => self.error = Some(error),
+            } => match self
+                .scene
+                .edit(|edit| edit.set_property(&target, &path, &value))
+            {
+                Ok((_, delta)) => {
+                    self.record(delta);
+                    self.apply_edit(&target);
                 }
-            }
+                Err(error) => self.error = Some(error),
+            },
             Message::Import(path) => self.import(&path),
             Message::Prefab(path) => self.prefab(&path),
             Message::Pane(pane) => self.panels.toggle(pane),
@@ -755,24 +745,27 @@ impl Editor {
     }
 
     fn gizmo_point(&mut self, point: Vec2) {
-        let Some(state) = self.drag.as_mut() else {
+        let Some(mut state) = self.drag.take() else {
             return;
         };
         let transform = state.drag.transform(point);
-        self.scene.set_transform(state.node, transform);
-        if self.scene != state.before {
-            if state.started {
-                self.history.amend(self.scene.clone());
-            } else {
-                self.history
-                    .record(state.before.clone(), self.scene.clone());
-                state.started = true;
-            }
-            self.dirty = true;
-            if let Some(session) = &mut self.session {
-                session.preview.apply(&self.scene, state.node);
-            }
+        if let Some(previous) = state.delta.take() {
+            previous.revert(&mut self.scene);
         }
+        match self
+            .scene
+            .edit(|edit| edit.set_transform(state.node, transform))
+        {
+            Ok(((), delta)) => {
+                state.delta = Some(delta);
+                self.dirty = true;
+                if let Some(session) = &mut self.session {
+                    session.preview.apply(&self.scene, state.node);
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+        self.drag = Some(state);
     }
 
     fn press(&mut self, button: MouseButton, scale: f32) {
@@ -806,8 +799,7 @@ impl Editor {
                         self.drag = Some(DragState {
                             drag: gizmo::begin(target, handle, self.mode, transform, parent, point),
                             node: index,
-                            before: self.scene.clone(),
-                            started: false,
+                            delta: None,
                         });
                         return;
                     }
@@ -840,7 +832,7 @@ impl Editor {
             self.camera_drag = None;
         }
         if button == MouseButton::Left && self.drag.is_some() {
-            self.drag = None;
+            self.finish_drag();
             self.refresh_preview();
         }
     }

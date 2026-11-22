@@ -49,18 +49,20 @@ fn paint(backend: Backend) {
         TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
     );
     let mut scene = Scene::new(&root);
-    scene
-        .import_model("rig", "model.gltf", None)
-        .expect("a scene imports a skinned model");
-    scene
-        .insert_node(
+    edit(&mut scene, |edit| {
+        edit.import_model("rig", "model.gltf", None)
+    })
+    .expect("a scene imports a skinned model");
+    edit(&mut scene, |edit| {
+        edit.insert_node(
             Node::new("camera")
                 .with(Transform::from_translation(Vec3::new(0.0, 0.0, 3.0)))
                 .with(Camera::new(std::f32::consts::FRAC_PI_2, 0.1, 100.0)),
         )
-        .expect("a test adds its camera");
-    scene
-        .insert_node(
+    })
+    .expect("a test adds its camera");
+    edit(&mut scene, |edit| {
+        edit.insert_node(
             Node::new("sun")
                 .with(Transform::from_rotation(Quat::from_rotation_x(-0.8)))
                 .with(DirectionalLight::new(
@@ -69,7 +71,8 @@ fn paint(backend: Backend) {
                     100.0,
                 )),
         )
-        .expect("a test adds its light");
+    })
+    .expect("a test adds its light");
     let mut world = World::new();
     scene.instantiate(&mut world, &mut renderer);
     assert_eq!(world.count::<Skin>(), 1);
@@ -183,4 +186,10 @@ fn read(context: &GpuContext, target: &Texture) -> Vec<[u8; 4]> {
 
 fn directory() -> PathBuf {
     std::env::temp_dir().join(format!("belfry_skinning_{}", std::process::id()))
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }

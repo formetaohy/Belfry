@@ -105,9 +105,10 @@ fn deleting_a_prefab_instance_prunes_the_assets_it_owns() {
         scene.node_index("prop_body").is_some(),
         "a prefab instance expands the nodes of its prefab",
     );
-    scene
-        .remove(&Target::Node(String::from("prop")))
-        .expect("a prefab instance deletes");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("prop")))
+    })
+    .expect("a prefab instance deletes");
     assert!(
         scene.node_index("prop").is_none(),
         "the deleted prefab instance leaves no node",
@@ -137,7 +138,9 @@ fn a_refused_deletion_leaves_the_scene_as_it_stood() {
     let mut scene = Scene::parse(REFERENCED, ".", "a referenced scene");
     let before = scene.write();
     assert!(
-        scene.remove(&Target::Mesh(String::from("cube"))).is_err(),
+        edit(&mut scene, |edit| edit
+            .remove(&Target::Mesh(String::from("cube"))))
+        .is_err(),
         "a scene refuses to delete the mesh a node renders",
     );
     assert_eq!(
@@ -146,9 +149,10 @@ fn a_refused_deletion_leaves_the_scene_as_it_stood() {
         "a refused deletion changes no node and no asset",
     );
     let baked = scene.write();
-    scene
-        .remove(&Target::Node(String::from("cube")))
-        .expect("an unreferenced node deletes");
+    edit(&mut scene, |edit| {
+        edit.remove(&Target::Node(String::from("cube")))
+    })
+    .expect("an unreferenced node deletes");
     assert_ne!(
         scene.write(),
         baked,
@@ -158,4 +162,10 @@ fn a_refused_deletion_leaves_the_scene_as_it_stood() {
 
 fn directory(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("belfry_scene_{name}_{}", std::process::id()))
+}
+fn edit<T>(
+    scene: &mut belfry_scene::Scene,
+    change: impl FnOnce(&mut belfry_scene::Edit<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    scene.edit(change).map(|(value, _)| value)
 }
