@@ -1,0 +1,300 @@
+use super::*;
+
+impl Renderer {
+    pub(super) fn stale_probe(world: &World) -> Option<Probe> {
+        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
+        world.iter::<CaptureProbe>().find_map(|(entity, probe)| {
+            let transform = *world.get::<Transform>(entity)?;
+            let environment = world.get::<Environment>(entity)?.clone();
+            probe.stale(transform, revision).then_some(Probe {
+                entity,
+                transform,
+                probe: *probe,
+                environment,
+            })
+        })
+    }
+
+    pub(super) fn capture(
+        &mut self,
+        world: &World,
+        probe: Option<Probe>,
+        inputs: &CaptureInputs<'_>,
+        travel: &Travel,
+        rotation: Mat4,
+        intensity: f32,
+    ) {
+        let Some(probe) = probe else {
+            return;
+        };
+        let radius = probe.transform.scale.length();
+        let shadow = shadow::probe(
+            probe.transform.translation,
+            radius,
+            travel,
+            inputs.spheres,
+            self.device.clip_space(),
+            radius,
+        );
+        self.captures.prepare(&CaptureFrame {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            eye: probe.transform.translation,
+            clip_space: self.device.clip_space(),
+            rotation,
+            intensity,
+            shadow,
+            batches: inputs.batches,
+            arguments: inputs.arguments,
+            slots: inputs.slots,
+            opaque_instances: inputs.opaque_instances,
+            points: inputs.points,
+        });
+        let mut submission = Submission::new(&self.device, "belfry capture");
+        if inputs.opaque > 0 {
+            let hzb = self
+                .hzb
+                .as_ref()
+                .expect("a captured scene culls against the depth pyramid of its frame");
+            let culled = inputs.opaque_instances.div_ceil(WORKGROUP);
+            let instances = self
+                .instances
+                .buffer()
+                .binding(0, u64::from(inputs.instances) * INSTANCE_BYTES);
+            for view in 0..self.captures.view_count() {
+                let group = hzb.cull(
+                    &self.cull,
+                    self.captures.view(view),
+                    instances,
+                    self.captures.drawn_view(view),
+                    self.captures.argument_view(view),
+                );
+                submission.dispatch(&self.cull, &group, [culled, 1, 1]);
+            }
+        }
+        if inputs.opaque > 0 && !inputs.points.is_empty() {
+            let (offset, bytes) = self.captures.cluster_region();
+            submission.clear(self.captures.lighting.buffer(), offset, bytes);
+            let points = self.captures.point_lights();
+            for face in 0..crate::capture::FACES {
+                let group = self.light_clusters.bind_group(
+                    0,
+                    &[
+                        Binding::buffer(program::CLUSTER_VIEW, self.captures.view(face)),
+                        Binding::buffer(program::CLUSTER_POINTS, points),
+                        Binding::buffer(program::CLUSTER_GRID, self.captures.clusters(face)),
+                    ],
+                );
+                submission.dispatch(
+                    &self.light_clusters,
+                    &group,
+                    [
+                        self.captures.cluster_columns() * self.captures.cluster_rows(),
+                        LIGHT_SLICES,
+                        1,
+                    ],
+                );
+            }
+        }
+        let capture_shade = self.shading.group(
+            &self.draw,
+            (&self.captures.shadow, &self.captures.shadow_sampler),
+            (self.probes.textures(), self.probes.samplers()),
+        );
+        let pipelines = Pipelines {
+            depth: &self.depth,
+            opaque: &self.draw,
+            blended: &self.transparent_draw,
+            motion: self.temporality.motion(),
+            shadow: &self.shadow,
+        };
+        let textures = self.materials.textures();
+        let samplers = self.materials.samplers();
+        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        let materials = self
+            .material_records
+            .buffer()
+            .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES);
+        let palette = self.joints.buffer().binding(0, inputs.joint_bytes);
+        if inputs.opaque > 0 {
+            let mut cast_groups = Vec::with_capacity(inputs.opaque as usize);
+            for (index, batch) in inputs
+                .batches
+                .iter()
+                .take(inputs.opaque as usize)
+                .enumerate()
+            {
+                let geometry = self.meshes.geometry(batch.mesh);
+                let group = self.shadow.bind_group(
+                    0,
+                    &[
+                        Binding::buffer(program::SHADOW_PALETTE, palette),
+                        Binding::buffer(program::SHADOW_SKINS, self.meshes.skin_binding(geometry)),
+                        Binding::buffer(
+                            program::SHADOW_DRAWN,
+                            self.captures.shadow_drawn(inputs.bases[index], batch.count),
+                        ),
+                        Binding::buffer(
+                            program::SHADOW_VERTICES,
+                            self.meshes.buffer().binding(
+                                u64::from(geometry.first) * VERTEX_BYTES,
+                                u64::from(geometry.count) * VERTEX_BYTES,
+                            ),
+                        ),
+                        Binding::buffer(program::SHADOW_MATERIALS, materials),
+                    ],
+                );
+                cast_groups.push([group, shadow_tables.clone()]);
+            }
+            let casters = (0..inputs.opaque)
+                .map(|index| {
+                    Draw::indirect(
+                        &self.shadow,
+                        &cast_groups[index as usize],
+                        self.captures.shadow_arguments(index),
+                    )
+                })
+                .collect::<Vec<_>>();
+            submission.render(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0], &casters);
+        }
+        let mut skies = Vec::with_capacity(crate::capture::FACES as usize);
+        for face in 0..crate::capture::FACES {
+            skies.push([
+                self.sky.bind_group(
+                    0,
+                    &[Binding::buffer(program::SKY_VIEW, self.captures.sky(face))],
+                ),
+                self.sky_shade.clone(),
+            ]);
+        }
+        let mut batches =
+            Vec::with_capacity(crate::capture::FACES as usize * inputs.opaque as usize);
+        if inputs.opaque > 0 {
+            let tables = inputs
+                .tables
+                .as_ref()
+                .expect("a captured batch binds the material table of its frame");
+            let lights = self.captures.lighting();
+            for face in 0..crate::capture::FACES {
+                for (index, batch) in inputs
+                    .batches
+                    .iter()
+                    .take(inputs.opaque as usize)
+                    .enumerate()
+                {
+                    let geometry = self.meshes.geometry(batch.mesh);
+                    let shade = self.draw.bind_group(
+                        0,
+                        &[
+                            Binding::buffer(
+                                program::DRAW_LIGHT,
+                                self.light.binding(0, LIGHT_BYTES),
+                            ),
+                            Binding::buffer(program::DRAW_CASCADES, self.captures.cascades()),
+                            Binding::buffer(
+                                program::DRAW_DRAWN,
+                                self.captures.drawn(face, inputs.bases[index], batch.count),
+                            ),
+                            Binding::buffer(program::DRAW_MATERIALS, materials),
+                            Binding::buffer(program::DRAW_VIEW, self.captures.view(face)),
+                            Binding::buffer(program::DRAW_PALETTE, palette),
+                            Binding::buffer(
+                                program::DRAW_SKINS,
+                                self.meshes.skin_binding(geometry),
+                            ),
+                            Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.fragments()),
+                            Binding::buffer(program::DRAW_HEADS, self.transparency.heads()),
+                            Binding::buffer(program::DRAW_COUNTER, self.transparency.counter()),
+                            Binding::buffer(program::DRAW_SETTINGS, self.transparency.settings()),
+                            Binding::buffer(
+                                program::DRAW_PROBES,
+                                self.probes.record(inputs.probe_count),
+                            ),
+                            Binding::buffer(
+                                program::DRAW_VERTICES,
+                                self.meshes.buffer().binding(
+                                    u64::from(geometry.first) * VERTEX_BYTES,
+                                    u64::from(geometry.count) * VERTEX_BYTES,
+                                ),
+                            ),
+                            Binding::buffer(program::DRAW_LIGHTS, lights),
+                        ],
+                    );
+                    batches.push([shade, tables.clone(), capture_shade.clone()]);
+                }
+            }
+        }
+        let mut draws =
+            Vec::with_capacity(crate::capture::FACES as usize * (1 + inputs.opaque as usize));
+        let mut batch = 0;
+        for face in 0..crate::capture::FACES {
+            let viewport = Viewport::new(
+                (face * crate::capture::PROBE_RESOLUTION) as f32,
+                0.0,
+                crate::capture::PROBE_RESOLUTION as f32,
+                crate::capture::PROBE_RESOLUTION as f32,
+            );
+            draws
+                .push(Draw::new(&self.sky, &skies[face as usize], SKY_VERTICES).viewport(viewport));
+            for index in 0..inputs.opaque {
+                draws.push(
+                    Draw::indirect(
+                        &self.draw,
+                        &batches[batch],
+                        self.captures.arguments(face, index),
+                    )
+                    .viewport(viewport),
+                );
+                batch += 1;
+            }
+        }
+        submission.render(&self.captures.atlas, [0.0, 0.0, 0.0, 1.0], &draws);
+        let convert = [
+            self.captures.convert.bind_group(
+                0,
+                &[Binding::buffer(
+                    program::CAPTURE_SETUP,
+                    self.captures.setup(),
+                )],
+            ),
+            self.captures.convert.bind_group(
+                1,
+                &[
+                    Binding::texture(program::CAPTURE_ATLAS, &self.captures.atlas),
+                    Binding::sampler(program::CAPTURE_SAMPLER, &self.captures.sampler),
+                ],
+            ),
+        ];
+        let panorama = self.captures.panorama(&self.device);
+        submission.render(
+            &panorama,
+            [0.0, 0.0, 0.0, 1.0],
+            &[Draw::new(&self.captures.convert, &convert, 3)],
+        );
+        submission.submit(&self.queue);
+        let sampler = self.shading.sampler().clone();
+        let request = self.bake(&panorama, &sampler);
+        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
+        let mut marker = probe.probe;
+        marker.captured(probe.transform, revision);
+        self.captures.begin(crate::capture::Pending {
+            entity: probe.entity,
+            probe: marker,
+            intensity: probe.environment.intensity,
+            background: probe.environment.background,
+            blend: probe.environment.blend,
+            panorama,
+            request,
+        });
+    }
+
+    pub(super) fn settle_captures(&mut self) {
+        let Some(request) = self.captures.pending().map(|pending| pending.request) else {
+            return;
+        };
+        let Some(baked) = self.take_baked(request) else {
+            return;
+        };
+        self.captures.settle(baked, self.shading.sampler());
+    }
+}

@@ -1,0 +1,342 @@
+use super::*;
+
+pub(super) struct ChannelFrame<'a> {
+    pub(super) clear: [f32; 4],
+    pub(super) collection: &'a Collection,
+    pub(super) batches: &'a [Batch],
+    pub(super) bases: &'a [u32],
+    pub(super) slots: u32,
+    pub(super) total: u32,
+    pub(super) depth_batches: u32,
+    pub(super) joint_bytes: u64,
+    pub(super) point_lights: u32,
+    pub(super) cluster_offset_bytes: u64,
+    pub(super) cluster_bytes: u64,
+    pub(super) cluster_x: u32,
+    pub(super) cluster_y: u32,
+    pub(super) sky: bool,
+    pub(super) line_groups: &'a [BindGroup],
+    pub(super) line_vertices: u32,
+    pub(super) probe_count: u32,
+}
+
+pub(super) struct Channels {
+    pub(super) arguments: Vec<u32>,
+    pub(super) tables: BindGroup,
+}
+
+impl Renderer {
+    pub(super) fn channels(
+        &mut self,
+        submission: &mut Submission,
+        frame: ChannelFrame<'_>,
+    ) -> Channels {
+        let ChannelFrame {
+            clear,
+            collection,
+            batches,
+            bases,
+            slots,
+            total,
+            depth_batches,
+            joint_bytes,
+            point_lights: point_light_count,
+            cluster_offset_bytes,
+            cluster_bytes,
+            cluster_x,
+            cluster_y,
+            sky,
+            line_groups,
+            line_vertices,
+            probe_count,
+        } = frame;
+        submission.clear(self.lighting.buffer(), cluster_offset_bytes, cluster_bytes);
+        if point_light_count > 0 {
+            let group = self.light_clusters.bind_group(
+                0,
+                &[
+                    Binding::buffer(program::CLUSTER_VIEW, self.views.binding(0, VIEW_BYTES)),
+                    Binding::buffer(
+                        program::CLUSTER_POINTS,
+                        self.lighting
+                            .buffer()
+                            .binding(0, u64::from(point_light_count) * POINT_LIGHT_BYTES),
+                    ),
+                    Binding::buffer(
+                        program::CLUSTER_GRID,
+                        self.lighting
+                            .buffer()
+                            .binding(cluster_offset_bytes, cluster_bytes),
+                    ),
+                ],
+            );
+            submission.dispatch(
+                &self.light_clusters,
+                &group,
+                [cluster_x * cluster_y, LIGHT_SLICES, 1],
+            );
+        }
+        let arguments = batches
+            .iter()
+            .flat_map(|batch| arguments_of(self.meshes.geometry(batch.mesh)))
+            .collect::<Vec<u32>>();
+        assert!(
+            collection
+                .records
+                .iter()
+                .all(|record| record.material < self.materials.records().len() as u32),
+            "a rendered instance names a material this renderer does not hold"
+        );
+        self.upload(&collection.records, &arguments, slots);
+        self.main_batches = batches.len() as u32;
+        let hzb = self
+            .hzb
+            .as_ref()
+            .expect("a rendered frame owns its depth pyramid");
+        let instances = self
+            .instances
+            .buffer()
+            .binding(0, u64::from(total) * INSTANCE_BYTES);
+        let depth_cull = hzb.cull(
+            &self.cull,
+            self.views.binding(VIEW_BYTES, VIEW_BYTES),
+            instances,
+            self.depth_drawn
+                .buffer()
+                .binding(0, u64::from(slots) * DRAW_BYTES),
+            self.depth_arguments
+                .buffer()
+                .binding(0, arguments.len() as u64 * WORD_BYTES),
+        );
+        let main_cull = hzb.cull(
+            &self.cull,
+            self.views.binding(0, VIEW_BYTES),
+            instances,
+            self.main_drawn
+                .buffer()
+                .binding(0, u64::from(slots) * DRAW_BYTES),
+            self.main_arguments
+                .buffer()
+                .binding(0, arguments.len() as u64 * WORD_BYTES),
+        );
+        let mut shadow_cull = Vec::with_capacity(CASCADE_COUNT as usize);
+        for cascade in 0..CASCADE_COUNT {
+            shadow_cull.push(
+                hzb.cull(
+                    &self.cull,
+                    self.shadow_views
+                        .binding(u64::from(cascade) * VIEW_BYTES, VIEW_BYTES),
+                    instances,
+                    self.shadow_drawn.buffer().binding(
+                        u64::from(cascade) * u64::from(slots) * DRAW_BYTES,
+                        u64::from(slots) * DRAW_BYTES,
+                    ),
+                    self.shadow_arguments.buffer().binding(
+                        u64::from(cascade) * self.shadow_span,
+                        arguments.len() as u64 * WORD_BYTES,
+                    ),
+                ),
+            );
+        }
+        submission.dispatch(&self.cull, &depth_cull, [total.div_ceil(WORKGROUP), 1, 1]);
+        for group in &shadow_cull {
+            submission.dispatch(&self.cull, group, [total.div_ceil(WORKGROUP), 1, 1]);
+        }
+        let pipelines = Pipelines {
+            depth: &self.depth,
+            opaque: &self.draw,
+            blended: &self.transparent_draw,
+            motion: self.temporality.motion(),
+            shadow: &self.shadow,
+        };
+        let mut slots_in = Vec::with_capacity(batches.len());
+        for (index, batch) in batches.iter().enumerate() {
+            let geometry = self.meshes.geometry(batch.mesh);
+            slots_in.push(Slot {
+                vertices: self.meshes.buffer().binding(
+                    u64::from(geometry.first) * VERTEX_BYTES,
+                    u64::from(geometry.count) * VERTEX_BYTES,
+                ),
+                skins: self.meshes.skin_binding(geometry),
+                depth_drawn: self.depth_drawn.buffer().binding(
+                    u64::from(bases[index]) * DRAW_BYTES,
+                    u64::from(batch.count) * DRAW_BYTES,
+                ),
+                main_drawn: self.main_drawn.buffer().binding(
+                    u64::from(bases[index]) * DRAW_BYTES,
+                    u64::from(batch.count) * DRAW_BYTES,
+                ),
+                shadow_drawn: std::array::from_fn(|cascade| {
+                    self.shadow_drawn.buffer().binding(
+                        cascade as u64 * u64::from(slots) * DRAW_BYTES
+                            + u64::from(bases[index]) * DRAW_BYTES,
+                        u64::from(batch.count) * DRAW_BYTES,
+                    )
+                }),
+            });
+        }
+        self.groups.prepare(
+            &pipelines,
+            &Inputs {
+                shared: Shared {
+                    view: self.views.binding(0, VIEW_BYTES),
+                    motion_view: self.temporality.view(),
+                    palette: self.joints.buffer().binding(0, joint_bytes),
+                    previous_palette: self.previous_joints.buffer().binding(0, joint_bytes),
+                    materials: self
+                        .material_records
+                        .buffer()
+                        .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
+                    light: self.light.binding(0, LIGHT_BYTES),
+                    cascades: self
+                        .cascades
+                        .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
+                    lighting: self.lighting.buffer().binding(0, self.lighting_capacity),
+                    probes: self.probes.record(probe_count),
+                    fragments: self.transparency.fragments(),
+                    heads: self.transparency.heads(),
+                    counter: self.transparency.counter(),
+                    settings: self.transparency.settings(),
+                },
+                slots: &slots_in,
+                opaque: depth_batches,
+            },
+        );
+        let textures = self.materials.textures();
+        let samplers = self.materials.samplers();
+        for held in self.palettes.fresh() {
+            submission.copy(
+                self.joints.buffer(),
+                u64::from(held.palette) * JOINT_BYTES,
+                self.previous_joints.buffer(),
+                u64::from(held.palette) * JOINT_BYTES,
+                u64::from(held.joints) * JOINT_BYTES,
+            );
+        }
+        let depth_tables = self.tables.depth(&pipelines, textures, samplers);
+        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        let tables = self.tables.opaque(&pipelines, textures, samplers);
+        let transparent_tables = self.tables.blended(&pipelines, textures, samplers);
+        let motion_tables = self.tables.motion(&pipelines, textures, samplers);
+        let depth_groups = (0..depth_batches as usize)
+            .map(|index| {
+                [
+                    self.groups
+                        .at(index)
+                        .depth()
+                        .expect("an opaque batch binds the depth pass")
+                        .clone(),
+                    depth_tables.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut main_groups = Vec::with_capacity(batches.len());
+        let mut motion_groups = Vec::with_capacity(batches.len());
+        for index in 0..batches.len() {
+            let slot = self.groups.at(index);
+            if index < depth_batches as usize {
+                main_groups.push([slot.shade().clone(), tables.clone(), self.shade.clone()]);
+            } else {
+                main_groups.push([
+                    slot.shade().clone(),
+                    transparent_tables.clone(),
+                    self.transparent_shade.clone(),
+                ]);
+            }
+            motion_groups.push([slot.motion().clone(), motion_tables.clone()]);
+        }
+        let mut cast_groups = Vec::with_capacity(CASCADE_COUNT as usize * depth_batches as usize);
+        for cascade in 0..CASCADE_COUNT as usize {
+            for batch in 0..depth_batches as usize {
+                cast_groups.push([
+                    self.groups.at(batch).shadow(cascade).clone(),
+                    shadow_tables.clone(),
+                ]);
+            }
+        }
+        let depth = depth_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                Draw::indirect(
+                    &self.depth,
+                    groups,
+                    self.depth_arguments
+                        .buffer()
+                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        submission.render(hzb.depth(), [1.0, 0.0, 0.0, 1.0], &depth);
+        hzb.build(submission, &self.hzb_base, &self.hzb_reduce);
+        submission.dispatch(&self.cull, &main_cull, [total.div_ceil(WORKGROUP), 1, 1]);
+        let motion = motion_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                Draw::indirect(
+                    self.temporality.motion(),
+                    groups,
+                    self.main_arguments
+                        .buffer()
+                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &motion);
+        let mut main = main_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                let pipeline = if index < depth_batches as usize {
+                    &self.draw
+                } else {
+                    &self.transparent_draw
+                };
+                Draw::indirect(
+                    pipeline,
+                    groups,
+                    self.main_arguments
+                        .buffer()
+                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        let sky_groups = [self.sky_view.clone(), self.sky_shade.clone()];
+        if sky {
+            main.insert(0, Draw::new(&self.sky, &sky_groups, SKY_VERTICES));
+        }
+        if !line_groups.is_empty() {
+            main.push(Draw::new(&self.line_pipeline, line_groups, line_vertices));
+        }
+        let cast = cast_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                let cascade = index / depth_batches as usize;
+                let batch = index % depth_batches as usize;
+                let column = cascade as u32 % SHADOW_ATLAS_COLUMNS;
+                let row = cascade as u32 / SHADOW_ATLAS_COLUMNS;
+                Draw::indirect(
+                    &self.shadow,
+                    groups,
+                    self.shadow_arguments.buffer().binding(
+                        u64::from(cascade as u32) * self.shadow_span
+                            + batch as u64 * ARGUMENT_BYTES,
+                        ARGUMENT_BYTES,
+                    ),
+                )
+                .viewport(Viewport::new(
+                    column as f32 * SHADOW_SIDE as f32,
+                    row as f32 * SHADOW_SIDE as f32,
+                    SHADOW_SIDE as f32,
+                    SHADOW_SIDE as f32,
+                ))
+            })
+            .collect::<Vec<_>>();
+        submission.render(&self.shadow_map, [1.0, 0.0, 0.0, 1.0], &cast);
+        self.transparency.clear(submission);
+        submission.render(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0], &main);
+        Channels { arguments, tables }
+    }
+}

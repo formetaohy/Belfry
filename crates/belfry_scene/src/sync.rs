@@ -5,6 +5,7 @@ use crate::install::NodeMap;
 use crate::node::SceneNode;
 use crate::registry::Assets;
 use crate::scene::Scene;
+use crate::schema::ReferenceKind;
 use belfry_ecs::{Entity, Parent, World, propagate};
 use belfry_render::SceneRevision;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +51,7 @@ impl SceneSync {
         if !changed.any() && self.applied.as_ref() == Some(scene) {
             return;
         }
+        let scene_changed = self.applied.as_ref() != Some(scene);
         let previous = self.applied.as_ref();
         let mut ids = HashMap::with_capacity(scene.nodes().len());
         let mut entities = Vec::with_capacity(scene.nodes().len());
@@ -74,11 +76,18 @@ impl SceneSync {
             }
         }
         let nodes = NodeMap::new(ids.clone());
-        let animations = AnimationLibrary::build(scene, assets, &nodes);
-        let graphs = GraphLibrary::build(scene, &animations);
+        if scene_changed
+            || world.resource::<GraphLibrary>().is_none()
+            || changed.holds(ReferenceKind::Animation)
+            || changed.holds(ReferenceKind::Graph)
+            || changed.holds(ReferenceKind::Model)
+        {
+            let animations = AnimationLibrary::build(scene, assets, &nodes);
+            let graphs = GraphLibrary::build(scene, &animations);
+            world.insert_resource(animations);
+            world.insert_resource(graphs);
+        }
         world.insert_resource(nodes);
-        world.insert_resource(animations);
-        world.insert_resource(graphs);
         for (index, node) in scene.nodes().iter().enumerate() {
             let (entity, reused) = entities[index];
             let previous = previous.and_then(|applied| {
@@ -135,7 +144,9 @@ impl SceneSync {
         self.applied = Some(scene.clone());
         self.entities = entities.into_iter().map(|(entity, _)| entity).collect();
         self.ids = ids;
-        advance_revision(world);
+        if scene_changed || changed.visual() {
+            advance_revision(world);
+        }
         belfry_animation::settle(world);
         propagate(world);
     }

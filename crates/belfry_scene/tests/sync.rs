@@ -1,7 +1,7 @@
 use belfry_ecs::{LocalTransform, Parent, World};
 use belfry_math::{Transform, Vec3};
 use belfry_render::SceneRevision;
-use belfry_scene::{Assets, Changed, Scene, SceneSync, SkinData, Target};
+use belfry_scene::{Assets, Changed, ReferenceKind, Scene, SceneSync, SkinData, Target};
 use std::sync::Arc;
 
 struct NoAssets;
@@ -129,6 +129,26 @@ fn a_scene_sync_follows_the_structure_it_edits() {
             3.0, 0.0, 0.0
         )))),
         "an applied node installs the component its scene changed",
+    );
+    let held = world
+        .resource::<SceneRevision>()
+        .copied()
+        .expect("a synced scene carries its revision");
+    let mut silent = Changed::none();
+    silent.insert(ReferenceKind::AudioBus, "master");
+    sync.sync(&scene, &mut world, &NoAssets, &silent);
+    assert_eq!(
+        world.resource::<SceneRevision>().copied(),
+        Some(held),
+        "a change no probe can see leaves the revision it rebakes on",
+    );
+    let mut visible = Changed::none();
+    visible.insert(ReferenceKind::Mesh, "cube");
+    sync.sync(&scene, &mut world, &NoAssets, &visible);
+    assert_eq!(
+        world.resource::<SceneRevision>().copied(),
+        Some(SceneRevision(held.0 + 1)),
+        "a visible change advances the revision the probes rebake on",
     );
 }
 fn edit<T>(

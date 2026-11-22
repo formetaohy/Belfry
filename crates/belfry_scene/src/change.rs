@@ -1,6 +1,17 @@
 use crate::schema::ReferenceKind;
 use std::collections::{BTreeMap, BTreeSet};
 
+const VISUAL: [ReferenceKind; 8] = [
+    ReferenceKind::Image,
+    ReferenceKind::Material,
+    ReferenceKind::Mesh,
+    ReferenceKind::Model,
+    ReferenceKind::Skin,
+    ReferenceKind::Animation,
+    ReferenceKind::Graph,
+    ReferenceKind::Environment,
+];
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Changed {
     entries: BTreeMap<ReferenceKind, BTreeSet<String>>,
@@ -24,6 +35,10 @@ impl Changed {
 
     pub fn holds(&self, kind: ReferenceKind) -> bool {
         self.entries.get(&kind).is_some_and(|ids| !ids.is_empty())
+    }
+
+    pub fn visual(&self) -> bool {
+        VISUAL.iter().any(|kind| self.holds(*kind))
     }
 
     pub fn touches(&self, kind: ReferenceKind, id: &str) -> bool {
