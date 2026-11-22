@@ -1,4 +1,5 @@
 use crate::ClipSource;
+use crate::graph::AnimationGraph;
 use crate::layer::AnimationLayer;
 use crate::pose::Pose;
 use belfry_ecs::Entity;
@@ -72,6 +73,28 @@ impl AnimationPlayer {
         self.primary = self.layers.len() - 1;
     }
 
+    pub(crate) fn rebase(&mut self, graph: &AnimationGraph) {
+        let mut index = 0;
+        while index < self.layers.len() {
+            let name = self.layers[index].source().name().to_owned();
+            match clip_of(graph, &name) {
+                Some((source, speed, looped)) => {
+                    self.layers[index].rebase(Arc::clone(source), speed, looped);
+                    index += 1;
+                }
+                None => {
+                    self.layers.remove(index);
+                    if index < self.primary {
+                        self.primary -= 1;
+                    }
+                }
+            }
+        }
+        if !self.layers.is_empty() {
+            self.primary = self.primary.min(self.layers.len() - 1);
+        }
+    }
+
     pub(crate) fn advance(&mut self, delta: f32) -> bool {
         assert!(delta.is_finite(), "an animation delta of {delta} is finite");
         let mut changed = false;
@@ -122,4 +145,12 @@ impl AnimationPlayer {
             .get_mut(primary)
             .unwrap_or_else(|| panic!("the animation holds no layer to play"))
     }
+}
+
+fn clip_of<'a>(graph: &'a AnimationGraph, name: &str) -> Option<(&'a Arc<ClipSource>, f32, bool)> {
+    graph
+        .states()
+        .iter()
+        .find(|state| state.source().name() == name)
+        .map(|state| (state.source(), state.speed(), state.looped()))
 }

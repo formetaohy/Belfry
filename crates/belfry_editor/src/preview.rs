@@ -7,7 +7,7 @@ use belfry_gpu_device::{
 };
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{Camera, DirectionalLight, PointLight, Renderer, Target};
-use belfry_scene::{Library, Refresh, Scene, SceneSync};
+use belfry_scene::{Changed, Library, Refresh, Scene, SceneSync};
 use belfry_ui::Ui;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -76,14 +76,14 @@ impl Preview {
         self.start();
         Refresh {
             applied: true,
-            changed: false,
+            changed: Changed::none(),
             errors: Vec::new(),
         }
     }
 
     pub(crate) fn poll(&mut self) -> Option<Refresh> {
         self.start();
-        let mut refresh = {
+        let refresh = {
             let library = self
                 .library
                 .as_mut()
@@ -102,17 +102,13 @@ impl Preview {
             return None;
         }
         self.wanted = None;
-        let initial = self.binding.applied().is_none();
         {
             let library = self
                 .library
                 .as_ref()
                 .expect("a preview holds the assets its scene renders");
             self.binding
-                .sync(&requested, &mut self.world, library, refresh.changed);
-        }
-        if initial {
-            refresh.changed = false;
+                .sync(&requested, &mut self.world, library, &refresh.changed);
         }
         let library = self
             .library

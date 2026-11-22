@@ -1,4 +1,5 @@
 use crate::animation_library::AnimationLibrary;
+use crate::change::Changed;
 use crate::graph_library::GraphLibrary;
 use crate::install::NodeMap;
 use crate::node::SceneNode;
@@ -44,9 +45,9 @@ impl SceneSync {
         scene: &Scene,
         world: &mut World,
         assets: &dyn Assets,
-        replace_assets: bool,
+        changed: &Changed,
     ) {
-        if !replace_assets && self.applied.as_ref() == Some(scene) {
+        if !changed.any() && self.applied.as_ref() == Some(scene) {
             return;
         }
         let previous = self.applied.as_ref();
@@ -110,14 +111,13 @@ impl SceneSync {
                 }
             }
             for registration in scene.registry().registrations() {
-                let replaced = (replace_assets && registration.tied_to_assets)
+                let authored = node.component_by_name(registration.spec.name);
+                let replaced = authored.is_some_and(|component| component.stale(changed))
                     || (!shared
                         && (!reused
                             || previous.is_none_or(|previous| {
-                                match (
-                                    previous.component_by_name(registration.spec.name),
-                                    node.component_by_name(registration.spec.name),
-                                ) {
+                                match (previous.component_by_name(registration.spec.name), authored)
+                                {
                                     (None, None) => false,
                                     (Some(authored), Some(next)) => !authored.equals(next),
                                     _ => true,
@@ -126,9 +126,9 @@ impl SceneSync {
                 if !replaced {
                     continue;
                 }
-                (registration.remove)(world, entity);
-                if let Some(component) = node.component_by_name(registration.spec.name) {
-                    component.install(scene, &node.id, world, entity, assets);
+                match authored {
+                    Some(component) => component.rebind(scene, &node.id, world, entity, assets),
+                    None => (registration.remove)(world, entity),
                 }
             }
         }
@@ -168,12 +168,10 @@ impl SceneSync {
             }
         }
         for registration in scene.registry().registrations() {
+            let authored = node.component_by_name(registration.spec.name);
             let replaced = !shared
                 && previous.is_none_or(|previous| {
-                    match (
-                        previous.component_by_name(registration.spec.name),
-                        node.component_by_name(registration.spec.name),
-                    ) {
+                    match (previous.component_by_name(registration.spec.name), authored) {
                         (None, None) => false,
                         (Some(authored), Some(next)) => !authored.equals(next),
                         _ => true,
@@ -182,9 +180,9 @@ impl SceneSync {
             if !replaced {
                 continue;
             }
-            (registration.remove)(world, entity);
-            if let Some(component) = node.component_by_name(registration.spec.name) {
-                component.install(scene, &node.id, world, entity, assets);
+            match authored {
+                Some(component) => component.rebind(scene, &node.id, world, entity, assets),
+                None => (registration.remove)(world, entity),
             }
         }
         if let Some(applied) = &mut self.applied

@@ -3,6 +3,7 @@ mod plan;
 mod prepare;
 mod work;
 
+use crate::change::Changed;
 use crate::digest::Digest;
 use crate::material::MaterialEntry;
 use crate::registry::Assets;
@@ -76,7 +77,7 @@ impl fmt::Display for AssetError {
 
 pub struct Refresh {
     pub applied: bool,
-    pub changed: bool,
+    pub changed: Changed,
     pub errors: Vec<AssetError>,
 }
 
@@ -199,7 +200,7 @@ impl Library {
             }
             Outcome::Failed(message) => Some(Refresh {
                 applied: false,
-                changed: false,
+                changed: Changed::none(),
                 errors: vec![AssetError {
                     kind: "asset",
                     id: String::from("worker"),

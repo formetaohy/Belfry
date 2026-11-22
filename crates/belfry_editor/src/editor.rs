@@ -244,7 +244,7 @@ impl Editor {
                 self.clamp();
                 self.refresh_preview();
             }
-        } else if change.model {
+        } else if change.model || change.asset {
             self.refresh_preview();
         }
         self.rewatch();

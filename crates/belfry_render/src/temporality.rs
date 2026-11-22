@@ -108,12 +108,6 @@ impl Temporality {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.screen = None;
-        self.previous = None;
-        self.frame = 0;
-    }
-
     pub(crate) fn jitter(&mut self) -> Vec2 {
         let index = self.frame % SAMPLE_COUNT + 1;
         self.frame = self.frame.wrapping_add(1);

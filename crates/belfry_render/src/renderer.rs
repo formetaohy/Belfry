@@ -393,21 +393,6 @@ impl Renderer {
         self.ambient = identity;
     }
 
-    pub fn reset(&mut self) {
-        self.meshes.reset();
-        self.materials.reset();
-        self.materials_dirty = true;
-        self.tables.invalidate();
-        self.groups.invalidate();
-        self.pick_frame = None;
-        self.main_batches = 0;
-        self.ambient = None;
-        self.probes.reset();
-        self.temporality.reset();
-        self.previous.clear();
-        self.palettes.reset();
-    }
-
     pub fn mesh(&mut self, vertices: &[crate::abi::Vertex]) -> Mesh {
         self.meshes.add(&self.queue, vertices)
     }
@@ -452,6 +437,7 @@ impl Renderer {
             "a skinned mesh of no vertex names no geometry",
         );
         self.meshes.update(&self.queue, mesh, vertices, Some(skin));
+        self.pick_frame = None;
     }
 
     pub fn texture(

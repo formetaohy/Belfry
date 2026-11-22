@@ -47,8 +47,6 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
 impl SceneComponent for Camera {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, field: &str) -> Option<Value> {
         Some(Value::Number(match field {
             "vertical_fov" => self.vertical_fov.to_degrees(),

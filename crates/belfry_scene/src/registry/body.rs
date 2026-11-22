@@ -83,8 +83,6 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
 impl SceneComponent for BodyRef {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, field: &str) -> Option<Value> {
         Some(match field {
             "kind" => Value::Text(String::from(self.kind.name())),

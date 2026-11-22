@@ -1,4 +1,5 @@
 use super::{Assets, SceneComponent};
+use crate::change::Changed;
 use crate::field::{Axis, no_axis, number};
 use crate::graph_library::GraphLibrary;
 use crate::node::AnimationRef;
@@ -185,6 +186,35 @@ impl SceneComponent for AnimationRef {
 
     fn references(&self, kind: ReferenceKind, id: &str) -> bool {
         kind == ReferenceKind::Graph && self.graph.as_str() == id
+    }
+
+    fn stale(&self, changed: &Changed) -> bool {
+        changed.holds(ReferenceKind::Graph) || changed.holds(ReferenceKind::Animation)
+    }
+
+    fn rebind(
+        &self,
+        scene: &Scene,
+        node: &str,
+        world: &mut World,
+        entity: Entity,
+        assets: &dyn Assets,
+    ) {
+        let graph = world
+            .resource::<GraphLibrary>()
+            .expect("a scene installs the animation graphs its players read")
+            .source(self.graph.as_str());
+        match world
+            .get::<AnimationMachine>(entity)
+            .filter(|held| held.graph().name() == self.graph.as_str())
+        {
+            Some(held) => {
+                let mut machine = held.clone();
+                machine.rebase(graph);
+                world.insert(entity, machine);
+            }
+            None => self.install(scene, node, world, entity, assets),
+        }
     }
 
     fn remap(&mut self, prefix: &str) {

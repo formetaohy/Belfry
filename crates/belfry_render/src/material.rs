@@ -291,7 +291,7 @@ impl MaterialLibrary {
         library
     }
 
-    pub(crate) fn reset(&mut self) {
+    fn reset(&mut self) {
         self.textures.reset(&self.white_srgb);
         self.samplers.reset(&self.clamp);
         self.texture_counts.fill(0);
@@ -302,12 +302,6 @@ impl MaterialLibrary {
         self.white_linear_index = self.textures.add(&self.white_linear);
         self.flat_normal_index = self.textures.add(&self.flat_normal);
         self.clamp_index = self.samplers.add(&self.clamp);
-        self.texture_counts[self.white_srgb_index as usize] = 1;
-        self.texture_counts[self.white_linear_index as usize] = 1;
-        self.texture_counts[self.flat_normal_index as usize] = 1;
-        self.sampler_counts[self.clamp_index as usize] = 1;
-        self.records.clear();
-        self.modes.clear();
     }
 
     pub(crate) fn add(&mut self, desc: MaterialDesc) -> Material {

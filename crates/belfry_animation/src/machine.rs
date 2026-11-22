@@ -44,6 +44,36 @@ impl AnimationMachine {
         &self.graph
     }
 
+    pub fn rebase(&mut self, graph: Arc<AnimationGraph>) {
+        let state = String::from(self.state().id());
+        let defaults = graph.defaults();
+        let mut values = defaults.clone();
+        for (index, (name, _)) in graph.parameters().enumerate() {
+            if let Some(value) = self.parameter(name)
+                && value.shares_kind(defaults[index])
+            {
+                values[index] = value;
+            }
+        }
+        self.values = values;
+        match graph.state(&state) {
+            Some(current) => {
+                self.player.rebase(&graph);
+                if self.player.layers().is_empty() {
+                    self.player = self.enterable(&graph, current);
+                } else {
+                    self.player.set_playing(self.playing);
+                }
+                self.current = current;
+            }
+            None => {
+                self.current = graph.entry();
+                self.player = self.enterable(&graph, self.current);
+            }
+        }
+        self.graph = graph;
+    }
+
     pub fn state(&self) -> &State {
         &self.graph.states()[self.current]
     }
@@ -165,5 +195,15 @@ impl AnimationMachine {
         );
         self.player.set_playing(self.playing);
         self.current = index;
+    }
+
+    fn enterable(&self, graph: &AnimationGraph, index: usize) -> AnimationPlayer {
+        let state = &graph.states()[index];
+        AnimationPlayer::new(
+            Arc::clone(state.source()),
+            state.speed(),
+            state.looped(),
+            self.playing,
+        )
     }
 }

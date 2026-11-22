@@ -1,6 +1,7 @@
 mod animation;
 mod animation_library;
 mod body;
+mod change;
 mod collider;
 mod deletion;
 mod delta;
@@ -46,6 +47,7 @@ pub use animation_library::AnimationLibrary;
 pub use belfry_render::environment::Atmosphere;
 pub use belfry_scene_macro::SceneComponent;
 pub use body::BodyRef;
+pub use change::Changed;
 pub use collider::{ColliderRef, ShapeKind};
 pub use delta::Delta;
 pub use edit::Edit;

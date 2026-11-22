@@ -1,7 +1,7 @@
 use belfry_ecs::{LocalTransform, Parent, World};
 use belfry_math::{Transform, Vec3};
 use belfry_render::SceneRevision;
-use belfry_scene::{Assets, Scene, SceneSync, SkinData, Target};
+use belfry_scene::{Assets, Changed, Scene, SceneSync, SkinData, Target};
 use std::sync::Arc;
 
 struct NoAssets;
@@ -55,7 +55,7 @@ fn a_scene_sync_follows_the_structure_it_edits() {
     let mut scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();
     let mut sync = SceneSync::new();
-    sync.sync(&scene, &mut world, &NoAssets, true);
+    sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
     let a = sync.id("a").expect("the sync holds the node a");
     let b = sync.id("b").expect("the sync holds the node b");
     world.insert(a, Ticks(7));
@@ -87,7 +87,7 @@ fn a_scene_sync_follows_the_structure_it_edits() {
     assert_eq!(scene.children(c_at).collect::<Vec<_>>(), [b_at]);
     assert_eq!(scene.subtree(c_at), [b_at, c_at]);
 
-    sync.sync(&scene, &mut world, &NoAssets, false);
+    sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
     assert_eq!(sync.id("a"), Some(a));
     assert_eq!(sync.id("b"), Some(b));
     assert_eq!(world.get::<Ticks>(a), Some(&Ticks(7)));
@@ -105,7 +105,7 @@ fn a_scene_sync_follows_the_structure_it_edits() {
         edit.remove(&Target::Node(String::from("b")))
     })
     .expect("the scene removes the node b");
-    sync.sync(&scene, &mut world, &NoAssets, false);
+    sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
     assert!(!world.is_alive(b));
 
     let a_at = scene.node_index("a").expect("the scene holds a");
@@ -148,14 +148,14 @@ fn a_shared_scene_snapshot_keeps_the_nodes_it_copied() {
     .expect("the scene moves the node a");
     let mut world = World::new();
     let mut sync = SceneSync::new();
-    sync.sync(&snapshot, &mut world, &NoAssets, false);
+    sync.sync(&snapshot, &mut world, &NoAssets, &Changed::none());
     let a = sync.id("a").expect("the sync holds the node a");
     assert_eq!(
         world.get::<LocalTransform>(a),
         Some(&LocalTransform(Transform::IDENTITY)),
         "an edited scene rewrites the snapshot it already copied",
     );
-    sync.sync(&scene, &mut world, &NoAssets, false);
+    sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
     assert_eq!(
         world.get::<LocalTransform>(a),
         Some(&LocalTransform(Transform::from_translation(Vec3::new(

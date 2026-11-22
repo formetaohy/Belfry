@@ -25,18 +25,23 @@ struct Playing {
     looping: bool,
     start: u64,
     priority: u8,
+    name: String,
     source: usize,
     pitch: f32,
 }
 
 impl Playing {
     fn plays(&self, source: &AudioSource) -> bool {
-        self.generation == source.generation()
+        self.rebinds(source) && self.source == source.source().identity()
+    }
+
+    fn rebinds(&self, source: &AudioSource) -> bool {
+        self.name == source.name()
+            && self.generation == source.generation()
             && self.bus == source.bus()
             && self.looping == source.looping()
             && self.priority == source.priority()
             && self.pitch == source.pitch()
-            && self.source == source.source().identity()
     }
 }
 
@@ -244,6 +249,7 @@ impl Audio {
                 looping: source.looping(),
                 start,
                 priority: source.priority(),
+                name: String::from(source.name()),
                 source: source.source().identity(),
                 pitch: source.pitch(),
             },
@@ -266,29 +272,47 @@ impl Audio {
     }
 
     fn ensure(&mut self, entity: Entity, source: &AudioSource, params: Params) {
-        let held = self
-            .voices
-            .get(&entity)
-            .map(|playing| (playing.voice, playing.last, playing.plays(source)));
+        let held = self.voices.get(&entity).map(|playing| {
+            (
+                playing.voice,
+                playing.last,
+                playing.plays(source),
+                playing.rebinds(source),
+            )
+        });
         match held {
-            Some((voice, last, true)) => {
+            Some((voice, last, true, _)) => {
                 if last != params {
-                    self.send(Command::Update {
-                        voice: VoiceId(voice),
-                        gain: params.gain,
-                        pan: params.pan,
-                        cutoff: params.cutoff,
-                    });
-                    if let Some(playing) = self.voices.get_mut(&entity) {
-                        playing.last = params;
-                    }
+                    self.update(entity, voice, params);
                 }
+            }
+            Some((voice, _, false, true)) => {
+                self.send(Command::Replace {
+                    voice: VoiceId(voice),
+                    source: source.source().clone(),
+                });
+                if let Some(playing) = self.voices.get_mut(&entity) {
+                    playing.source = source.source().identity();
+                }
+                self.update(entity, voice, params);
             }
             Some(_) => {
                 self.stop(entity);
                 self.start(entity, source, params, 0);
             }
             None => self.start(entity, source, params, 0),
+        }
+    }
+
+    fn update(&mut self, entity: Entity, voice: u32, params: Params) {
+        self.send(Command::Update {
+            voice: VoiceId(voice),
+            gain: params.gain,
+            pan: params.pan,
+            cutoff: params.cutoff,
+        });
+        if let Some(playing) = self.voices.get_mut(&entity) {
+            playing.last = params;
         }
     }
 

@@ -2,8 +2,8 @@ use belfry_animation::{AnimationMachine, Clip, Interpolation, Property, Track, a
 use belfry_ecs::{LocalTransform, World};
 use belfry_math::Mat4;
 use belfry_scene::{
-    Assets, NodeId, Scene, SceneNode, SkinData, Target, Value, observe_runtime,
-    read_runtime_property, set_runtime_property,
+    Assets, Changed, NodeId, ReferenceKind, Scene, SceneNode, SceneSync, SkinData, Target, Value,
+    observe_runtime, read_runtime_property, set_runtime_property,
 };
 use belfry_toml::Toml;
 use std::sync::Arc;
@@ -157,9 +157,10 @@ fn a_self_transition_is_refused_while_the_graph_is_authored() {
 fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
     let scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();
-    let entities = scene.install(&mut world, &Mock);
-    let joint = entities[0];
-    let holder = entities[1];
+    let mut sync = SceneSync::new();
+    sync.sync(&scene, &mut world, &Mock, &Changed::none());
+    let joint = sync.entity(0).expect("the sync spawns the joint");
+    let holder = sync.entity(1).expect("the sync spawns the holder");
     assert!(
         world
             .get::<belfry_render::Skin>(holder)
@@ -215,6 +216,26 @@ fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
     let observed = Toml::object([("nodes", observe_runtime(&world, scene.registry()))]);
     let text = observed.write();
     assert!(text.contains("state = \"walk\""));
+    let played = world
+        .get::<AnimationMachine>(holder)
+        .expect("the holder plays its graph");
+    let (state, time) = (String::from(played.state().id()), played.time());
+    let mut changed = Changed::none();
+    changed.insert(ReferenceKind::Animation, "rig_animation_1");
+    sync.sync(&scene, &mut world, &Mock, &changed);
+    let rebuilt = world
+        .get::<AnimationMachine>(holder)
+        .expect("the reloaded clip keeps its machine");
+    assert_eq!(
+        rebuilt.state().id(),
+        state,
+        "a reloaded clip keeps the state its machine played",
+    );
+    assert_eq!(
+        rebuilt.time(),
+        time,
+        "a reloaded clip keeps the time its machine reached",
+    );
     let written = scene.write();
     let parsed = Scene::parse(&written, ".", "the written scene");
     assert_eq!(parsed, scene);

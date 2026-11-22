@@ -306,7 +306,6 @@ impl SamplerTable {
         &self.device
     }
 
-    #[cfg(not(metal_backend))]
     pub(crate) fn entries(&self) -> impl Iterator<Item = &Sampler> {
         self.entries.iter()
     }

@@ -6,7 +6,7 @@ use belfry_gpu_device::{
 };
 use belfry_math::{Transform, Vec3};
 use belfry_render::{Camera, Lines, Renderer, Target};
-use belfry_scene::{Library, Registry, Scene, SceneSync, Watch};
+use belfry_scene::{Changed, Library, Registry, Scene, SceneSync, Watch};
 use belfry_window::{Event, Flow, Handler, Input, Window, WindowConfig, run as run_window};
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -139,7 +139,7 @@ impl LiveScene {
                 "the scene builds its assets: {}",
                 refresh.message(),
             );
-            sync.sync(&scene, world, &assets, true);
+            sync.sync(&scene, world, &assets, &Changed::none());
             (None, None)
         } else {
             assert!(assets.request(&scene), "a new library loads its scene");
@@ -228,10 +228,11 @@ impl LiveScene {
         if !refresh.errors.is_empty() {
             self.messages.push(refresh.message());
         }
-        let changed = self.sync.applied().is_none() || requested != self.scene || refresh.changed;
+        let changed =
+            self.sync.applied().is_none() || requested != self.scene || refresh.changed.any();
         if changed {
             self.sync
-                .sync(&requested, world, &self.assets, refresh.changed);
+                .sync(&requested, world, &self.assets, &refresh.changed);
             self.scene = requested;
         }
         self.assets.release(renderer);

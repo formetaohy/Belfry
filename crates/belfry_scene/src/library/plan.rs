@@ -360,19 +360,10 @@ pub(super) fn plan(job: Job) -> Prepared {
             entry.id.as_str()
         }),
     };
-    let changed = removed.any()
-        || !images.is_empty()
-        || !meshes.is_empty()
-        || !pending_materials.is_empty()
-        || !skins.is_empty()
-        || !animations.is_empty()
-        || !sounds.is_empty()
-        || !environments.is_empty();
     let applied = !errors.iter().any(|error| error.fatal);
 
     let mut prepared = Prepared {
         applied,
-        changed: applied && changed,
         errors,
         images: Vec::new(),
         materials: Vec::new(),

@@ -25,6 +25,10 @@ pub(crate) enum Command {
         pan: f32,
         cutoff: f32,
     },
+    Replace {
+        voice: VoiceId,
+        source: crate::source::Source,
+    },
     Stop {
         voice: VoiceId,
     },

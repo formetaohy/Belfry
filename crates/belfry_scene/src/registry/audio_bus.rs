@@ -77,8 +77,6 @@ impl AudioBusRef {
 impl SceneComponent for AudioBusRef {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, field: &str) -> Option<Value> {
         Some(match field {
             "parent" => Value::Text(

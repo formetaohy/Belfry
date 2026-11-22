@@ -333,8 +333,14 @@ fn a_derived_component_travels_through_every_layer() {
     );
     assert!(installed.contains::<Player>(entities[0]));
     let mut applied = World::new();
-    let applied_entity = applied.spawn();
-    scene.apply(&mut applied, applied_entity, 0, &NoAssets);
+    let mut sync = belfry_scene::SceneSync::new();
+    sync.sync(
+        &scene,
+        &mut applied,
+        &NoAssets,
+        &belfry_scene::Changed::none(),
+    );
+    let applied_entity = sync.entity(0).expect("the sync spawns the node");
     assert_eq!(
         applied
             .get::<Health>(applied_entity)

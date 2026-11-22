@@ -18,8 +18,6 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
 impl SceneComponent for Hidden {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, _field: &str) -> Option<Value> {
         None
     }

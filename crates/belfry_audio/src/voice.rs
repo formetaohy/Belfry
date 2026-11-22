@@ -24,6 +24,7 @@ pub(crate) struct Voice {
     input: Input,
     cursor: f64,
     step: f64,
+    pitch: f32,
     looping: bool,
     priority: i32,
     gain: f32,
@@ -50,6 +51,7 @@ impl Voice {
             input,
             cursor: settings.start as f64,
             step,
+            pitch,
             looping: settings.looping,
             priority: settings.priority,
             gain: finite(settings.gain, MIN_GAIN, MAX_GAIN, 0.0),
@@ -62,6 +64,15 @@ impl Voice {
             fade: 1.0,
             fading: false,
         }
+    }
+
+    pub(crate) fn replace(&mut self, input: Input, rate: u32) {
+        self.step = f64::from(input.sample_rate()) / f64::from(rate) * f64::from(self.pitch);
+        self.input = input;
+    }
+
+    pub(crate) fn looping(&self) -> bool {
+        self.looping
     }
 
     pub(crate) fn stop(&mut self) {

@@ -2,7 +2,6 @@ use crate::animation::AnimationEntry;
 use crate::environment::EnvironmentEntry;
 use crate::graph::GraphEntry;
 use crate::image::ImageEntry;
-use crate::install;
 use crate::library::{self, Library};
 use crate::material::MaterialEntry;
 use crate::mesh::MeshEntry;
@@ -14,7 +13,7 @@ use crate::schema::ReferenceKind;
 use crate::skin::SkinEntry;
 use crate::sound::SoundEntry;
 use crate::target::{Target, valid_id};
-use belfry_ecs::{Entity, World, propagate};
+use belfry_ecs::{Entity, World};
 use belfry_math::Transform;
 use belfry_render::Renderer;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -175,21 +174,8 @@ impl Scene {
 
     pub fn install(&self, world: &mut World, assets: &dyn Assets) -> Vec<Entity> {
         let mut sync = crate::SceneSync::new();
-        sync.sync(self, world, assets, true);
+        sync.sync(self, world, assets, &crate::Changed::none());
         sync.entities().to_vec()
-    }
-
-    pub fn apply(&self, world: &mut World, entity: Entity, index: usize, assets: &dyn Assets) {
-        assert!(
-            index < self.nodes.len(),
-            "the scene applies a node it holds",
-        );
-        for registration in self.registry.registrations() {
-            (registration.remove)(world, entity);
-        }
-        install::install_components(self, &self.nodes[index], world, entity, assets);
-        belfry_animation::settle(world);
-        propagate(world);
     }
 
     pub fn registry(&self) -> &Registry {

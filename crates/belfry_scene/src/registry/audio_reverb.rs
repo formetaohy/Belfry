@@ -79,8 +79,6 @@ impl AudioReverbRef {
 impl SceneComponent for AudioReverbRef {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, field: &str) -> Option<Value> {
         Some(match field {
             "enabled" => Value::Bool(self.enabled),

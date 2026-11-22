@@ -1,11 +1,13 @@
 use super::prepare::panic_message;
 use super::{AssetError, TextureKey};
+use crate::change::Changed;
 use crate::digest::Digest;
 use crate::environment::EnvironmentEntry;
 use crate::image::ImageEntry;
 use crate::material::MaterialEntry;
 use crate::mesh::MeshEntry;
 use crate::scene::Scene;
+use crate::schema::ReferenceKind;
 use crate::skin::{SkinData, SkinEntry};
 use crate::sound::SoundEntry;
 use crate::source::Sources;
@@ -47,7 +49,6 @@ pub(super) enum Outcome {
 
 pub(super) struct Prepared {
     pub(super) applied: bool,
-    pub(super) changed: bool,
     pub(super) errors: Vec<AssetError>,
     pub(super) images: Vec<PreparedImage>,
     pub(super) materials: Vec<PreparedMaterial>,
@@ -121,16 +122,6 @@ pub(super) struct Removed {
 }
 
 impl Removed {
-    pub(super) fn any(&self) -> bool {
-        !self.images.is_empty()
-            || !self.materials.is_empty()
-            || !self.meshes.is_empty()
-            || !self.skins.is_empty()
-            || !self.animations.is_empty()
-            || !self.sounds.is_empty()
-            || !self.environments.is_empty()
-    }
-
     pub(super) fn gpu(&self) -> bool {
         !self.materials.is_empty() || !self.meshes.is_empty() || !self.environments.is_empty()
     }
@@ -164,6 +155,53 @@ impl Prepared {
             || !self.materials.is_empty()
             || !self.meshes.is_empty()
             || !self.environments.is_empty()
+    }
+
+    pub(super) fn changed(&self) -> Changed {
+        let mut changed = Changed::none();
+        for item in &self.images {
+            changed.insert(ReferenceKind::Image, &item.entry.id);
+        }
+        for item in &self.materials {
+            changed.insert(ReferenceKind::Material, &item.entry.id);
+        }
+        for item in &self.meshes {
+            changed.insert(ReferenceKind::Mesh, &item.entry.id);
+        }
+        for item in &self.skins {
+            changed.insert(ReferenceKind::Skin, &item.entry.id);
+        }
+        for item in &self.animations {
+            changed.insert(ReferenceKind::Animation, &item.entry.id);
+        }
+        for item in &self.sounds {
+            changed.insert(ReferenceKind::Sound, &item.entry.id);
+        }
+        for item in &self.environments {
+            changed.insert(ReferenceKind::Environment, &item.entry.id);
+        }
+        for id in &self.removed.images {
+            changed.insert(ReferenceKind::Image, id);
+        }
+        for id in &self.removed.materials {
+            changed.insert(ReferenceKind::Material, id);
+        }
+        for id in &self.removed.meshes {
+            changed.insert(ReferenceKind::Mesh, id);
+        }
+        for id in &self.removed.skins {
+            changed.insert(ReferenceKind::Skin, id);
+        }
+        for id in &self.removed.animations {
+            changed.insert(ReferenceKind::Animation, id);
+        }
+        for id in &self.removed.sounds {
+            changed.insert(ReferenceKind::Sound, id);
+        }
+        for id in &self.removed.environments {
+            changed.insert(ReferenceKind::Environment, id);
+        }
+        changed
     }
 }
 

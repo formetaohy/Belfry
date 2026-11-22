@@ -21,8 +21,6 @@ pub struct AudioListenerRef;
 impl SceneComponent for AudioListenerRef {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, _field: &str) -> Option<Value> {
         None
     }

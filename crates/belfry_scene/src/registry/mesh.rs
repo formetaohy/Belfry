@@ -1,4 +1,5 @@
 use super::{Assets, SceneComponent};
+use crate::change::Changed;
 use crate::field::{Axis, non_negative, vector_toml, with_axis};
 use crate::node::MeshRef;
 use crate::reference::{MaterialId, MeshId};
@@ -176,6 +177,10 @@ impl SceneComponent for MeshRef {
     fn references(&self, kind: ReferenceKind, id: &str) -> bool {
         (kind == ReferenceKind::Mesh && self.mesh.as_str() == id)
             || (kind == ReferenceKind::Material && self.material.as_str() == id)
+    }
+
+    fn stale(&self, _changed: &Changed) -> bool {
+        false
     }
 
     fn write_world(

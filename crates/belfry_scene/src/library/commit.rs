@@ -53,7 +53,7 @@ impl Commit {
     pub(super) fn new(mut prepared: Prepared) -> Self {
         let refresh = Refresh {
             applied: prepared.applied,
-            changed: prepared.changed,
+            changed: prepared.changed(),
             errors: std::mem::take(&mut prepared.errors),
         };
         Self {
@@ -240,7 +240,7 @@ impl Commit {
     fn finish(&mut self) -> Refresh {
         Refresh {
             applied: self.refresh.applied,
-            changed: self.refresh.changed,
+            changed: std::mem::take(&mut self.refresh.changed),
             errors: std::mem::take(&mut self.refresh.errors),
         }
     }

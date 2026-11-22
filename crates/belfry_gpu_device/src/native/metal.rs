@@ -209,7 +209,7 @@ pub(crate) struct Sampler {
 
 pub(crate) struct TextureTable {
     encoder: Retained<ProtocolObject<dyn MTLArgumentEncoder>>,
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    staging: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
 
 unsafe impl Send for TextureTable {}
@@ -219,20 +219,31 @@ impl TextureTable {
     pub(crate) fn fill(&self, index: u32, texture: &crate::Texture) {
         let texture = native_texture(texture.native());
         unsafe {
-            self.encoder.setArgumentBuffer_offset(Some(&self.buffer), 0);
+            self.encoder
+                .setArgumentBuffer_offset(Some(&self.staging), 0);
             self.encoder
                 .setTexture_atIndex(Some(&texture.raw), index as usize);
         }
     }
 
-    pub(crate) fn buffer(&self) -> &ProtocolObject<dyn MTLBuffer> {
-        &self.buffer
+    fn snapshot<'a>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        textures: impl Iterator<Item = &'a crate::Texture>,
+    ) -> Snapshot {
+        let buffer = argument_buffer(device, self.encoder.encodedLength());
+        unsafe { self.encoder.setArgumentBuffer_offset(Some(&buffer), 0) };
+        for (index, texture) in textures.enumerate() {
+            let texture = native_texture(texture.native());
+            unsafe { self.encoder.setTexture_atIndex(Some(&texture.raw), index) };
+        }
+        Snapshot { buffer }
     }
 }
 
 pub(crate) struct SamplerTable {
     encoder: Retained<ProtocolObject<dyn MTLArgumentEncoder>>,
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    staging: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
 
 unsafe impl Send for SamplerTable {}
@@ -242,14 +253,76 @@ impl SamplerTable {
     pub(crate) fn fill(&self, index: u32, sampler: &crate::Sampler) {
         let sampler = native_sampler(sampler.native());
         unsafe {
-            self.encoder.setArgumentBuffer_offset(Some(&self.buffer), 0);
+            self.encoder
+                .setArgumentBuffer_offset(Some(&self.staging), 0);
             self.encoder
                 .setSamplerState_atIndex(Some(&sampler.raw), index as usize);
         }
     }
 
-    pub(crate) fn buffer(&self) -> &ProtocolObject<dyn MTLBuffer> {
-        &self.buffer
+    fn snapshot<'a>(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        samplers: impl Iterator<Item = &'a crate::Sampler>,
+    ) -> Snapshot {
+        let buffer = argument_buffer(device, self.encoder.encodedLength());
+        unsafe { self.encoder.setArgumentBuffer_offset(Some(&buffer), 0) };
+        for (index, sampler) in samplers.enumerate() {
+            let sampler = native_sampler(sampler.native());
+            unsafe {
+                self.encoder
+                    .setSamplerState_atIndex(Some(&sampler.raw), index)
+            };
+        }
+        Snapshot { buffer }
+    }
+}
+
+fn argument_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    length: usize,
+) -> Retained<ProtocolObject<dyn MTLBuffer>> {
+    device
+        .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
+        .expect("a Metal argument buffer holds a table")
+}
+
+pub(crate) struct Snapshot {
+    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+}
+
+pub(crate) struct Group {
+    snapshots: Vec<Option<Snapshot>>,
+}
+
+unsafe impl Send for Group {}
+unsafe impl Sync for Group {}
+
+impl Group {
+    fn of(device: &ProtocolObject<dyn MTLDevice>, resources: &[BoundResource]) -> Self {
+        Self {
+            snapshots: resources
+                .iter()
+                .map(|resource| match resource {
+                    BoundResource::TextureTable(table) => {
+                        let native = texture_table(table.native());
+                        Some(native.snapshot(device, table.entries()))
+                    }
+                    BoundResource::SamplerTable(table) => {
+                        let native = sampler_table(table.native());
+                        Some(native.snapshot(device, table.entries()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    fn buffer(&self, at: usize) -> &ProtocolObject<dyn MTLBuffer> {
+        &self.snapshots[at]
+            .as_ref()
+            .expect("a bound resource table owns its snapshot")
+            .buffer
     }
 }
 
@@ -262,6 +335,12 @@ fn texture_table(native: &crate::native::NativeTextureTable) -> &TextureTable {
 fn sampler_table(native: &crate::native::NativeSamplerTable) -> &SamplerTable {
     match native {
         crate::native::NativeSamplerTable::Metal(table) => table,
+    }
+}
+
+fn group(native: &NativeGroup) -> &Arc<Group> {
+    match native {
+        NativeGroup::Metal(group) => group,
     }
 }
 
@@ -357,7 +436,7 @@ fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
 
 fn claim_group(native: &NativeGroup) {
     match native {
-        NativeGroup::Metal => {}
+        NativeGroup::Metal(_) => {}
     }
 }
 
@@ -654,16 +733,16 @@ impl Device {
             .newArgumentEncoderWithArguments(&NSArray::from_retained_slice(&[descriptor]))
             .expect("a Metal argument encoder describes a texture table");
         let length = encoder.encodedLength();
-        let buffer = self
-            .raw
-            .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
-            .expect("a Metal argument buffer holds a texture table");
-        let table = TextureTable { encoder, buffer };
+        let buffer = argument_buffer(&self.raw, length);
+        let table = TextureTable {
+            encoder,
+            staging: buffer,
+        };
         let texture = native_texture(fallback.native());
         unsafe {
             table
                 .encoder
-                .setArgumentBuffer_offset(Some(&table.buffer), 0);
+                .setArgumentBuffer_offset(Some(&table.staging), 0);
             for index in 0..capacity as usize {
                 table.encoder.setTexture_atIndex(Some(&texture.raw), index);
             }
@@ -686,16 +765,16 @@ impl Device {
             .newArgumentEncoderWithArguments(&NSArray::from_retained_slice(&[descriptor]))
             .expect("a Metal argument encoder describes a sampler table");
         let length = encoder.encodedLength();
-        let buffer = self
-            .raw
-            .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
-            .expect("a Metal argument buffer holds a sampler table");
-        let table = SamplerTable { encoder, buffer };
+        let buffer = argument_buffer(&self.raw, length);
+        let table = SamplerTable {
+            encoder,
+            staging: buffer,
+        };
         let sampler = native_sampler(fallback.native());
         unsafe {
             table
                 .encoder
-                .setArgumentBuffer_offset(Some(&table.buffer), 0);
+                .setArgumentBuffer_offset(Some(&table.staging), 0);
             for index in 0..capacity as usize {
                 table
                     .encoder
@@ -809,6 +888,24 @@ impl Device {
                 depth: OnceLock::new(),
             }),
         }
+    }
+
+    pub(crate) fn create_group(
+        &self,
+        _pipeline: &Pipeline,
+        _group: u32,
+        resources: &[BoundResource],
+    ) -> Group {
+        Group::of(&self.raw, resources)
+    }
+
+    pub(crate) fn create_graphics_group(
+        &self,
+        _pipeline: &GraphicsPipeline,
+        _group: u32,
+        resources: &[BoundResource],
+    ) -> Group {
+        Group::of(&self.raw, resources)
     }
 
     pub(crate) fn compile_graphics(
@@ -1174,9 +1271,10 @@ impl Device {
                         let mut buffers = 0usize;
                         let mut textures = 0usize;
                         let mut samplers = 0usize;
-                        for group in &draw.groups {
-                            claim_group(&group.native);
-                            for resource in &group.resources {
+                        for bound in &draw.groups {
+                            claim_group(&bound.native);
+                            let tables = group(&bound.native);
+                            for (at, resource) in bound.resources.iter().enumerate() {
                                 match resource {
                                     BoundResource::Buffer(binding) => {
                                         let target = buffer(&binding.buffer);
@@ -1226,9 +1324,8 @@ impl Device {
                                         samplers += 1;
                                     }
                                     BoundResource::TextureTable(table) => {
-                                        let native = texture_table(table.native());
-                                        let key = native.buffer()
-                                            as *const ProtocolObject<dyn MTLBuffer>
+                                        let snapshot = tables.buffer(at);
+                                        let key = snapshot as *const ProtocolObject<dyn MTLBuffer>
                                             as usize;
                                         if declared.insert(key) {
                                             for texture in table.entries() {
@@ -1243,34 +1340,34 @@ impl Device {
                                         }
                                         unsafe {
                                             encoder.setVertexBuffer_offset_atIndex(
-                                                Some(native.buffer()),
+                                                Some(snapshot),
                                                 0,
                                                 buffers,
                                             );
                                             encoder.setFragmentBuffer_offset_atIndex(
-                                                Some(native.buffer()),
+                                                Some(snapshot),
                                                 0,
                                                 buffers,
                                             );
                                         }
-                                        frame.resources.push(Arc::new(table.clone()));
+                                        frame.resources.push(tables.clone());
                                         buffers += 1;
                                     }
-                                    BoundResource::SamplerTable(table) => {
-                                        let native = sampler_table(table.native());
+                                    BoundResource::SamplerTable(_) => {
+                                        let snapshot = tables.buffer(at);
                                         unsafe {
                                             encoder.setVertexBuffer_offset_atIndex(
-                                                Some(native.buffer()),
+                                                Some(snapshot),
                                                 0,
                                                 buffers,
                                             );
                                             encoder.setFragmentBuffer_offset_atIndex(
-                                                Some(native.buffer()),
+                                                Some(snapshot),
                                                 0,
                                                 buffers,
                                             );
                                         }
-                                        frame.resources.push(Arc::new(table.clone()));
+                                        frame.resources.push(tables.clone());
                                         buffers += 1;
                                     }
                                 }

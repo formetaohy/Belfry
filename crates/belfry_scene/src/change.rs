@@ -1,0 +1,38 @@
+use crate::schema::ReferenceKind;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Changed {
+    entries: BTreeMap<ReferenceKind, BTreeSet<String>>,
+}
+
+impl Changed {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, kind: ReferenceKind, id: &str) {
+        self.entries
+            .entry(kind)
+            .or_default()
+            .insert(String::from(id));
+    }
+
+    pub fn any(&self) -> bool {
+        self.entries.values().any(|ids| !ids.is_empty())
+    }
+
+    pub fn holds(&self, kind: ReferenceKind) -> bool {
+        self.entries.get(&kind).is_some_and(|ids| !ids.is_empty())
+    }
+
+    pub fn touches(&self, kind: ReferenceKind, id: &str) -> bool {
+        self.entries.get(&kind).is_some_and(|ids| ids.contains(id))
+    }
+
+    pub fn references(&self, held: impl Fn(ReferenceKind, &str) -> bool) -> bool {
+        self.entries
+            .iter()
+            .any(|(kind, ids)| ids.iter().any(|id| held(*kind, id)))
+    }
+}

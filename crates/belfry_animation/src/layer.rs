@@ -54,6 +54,15 @@ impl AnimationLayer {
         &self.source
     }
 
+    pub(crate) fn rebase(&mut self, source: Arc<ClipSource>, speed: f32, looped: bool) {
+        assert!(speed.is_finite(), "an animation speed of {speed} is finite");
+        let time = self.time;
+        self.source = source;
+        self.speed = speed;
+        self.looped = looped;
+        self.set_time(time);
+    }
+
     pub fn time(&self) -> f32 {
         self.time
     }

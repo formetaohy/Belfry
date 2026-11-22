@@ -418,6 +418,28 @@ impl SceneComponent for AudioSourceRef {
                 && self.bus.as_ref().is_some_and(|bus| bus.as_str() == id))
     }
 
+    fn rebind(
+        &self,
+        scene: &Scene,
+        node: &str,
+        world: &mut World,
+        entity: Entity,
+        assets: &dyn Assets,
+    ) {
+        let sound = assets.sound(self.sound.as_str());
+        match world
+            .get::<Playing>(entity)
+            .filter(|held| held.name() == self.sound.as_str())
+        {
+            Some(held) => {
+                let mut source = held.clone();
+                source.set_source(sound);
+                world.insert(entity, source);
+            }
+            None => self.install(scene, node, world, entity, assets),
+        }
+    }
+
     fn write_world(
         world: &mut World,
         entity: Entity,

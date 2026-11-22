@@ -18,6 +18,7 @@ mod skin;
 mod transform;
 
 use crate::body::BodyRef;
+use crate::change::Changed;
 use crate::collider::ColliderRef;
 use crate::field::Axis;
 use crate::joint::JointRef;
@@ -67,8 +68,6 @@ pub trait Assets {
 pub trait SceneComponent: Any + Clone + PartialEq + Send + Sync {
     const SPEC: &'static ComponentSpec;
 
-    const TIED_TO_ASSETS: bool = true;
-
     fn read(&self, field: &str) -> Option<Value>;
 
     fn write(&mut self, field: &str, axis: Option<Axis>, value: &Value) -> Result<Effect, String>;
@@ -92,6 +91,22 @@ pub trait SceneComponent: Any + Clone + PartialEq + Send + Sync {
 
     fn validate(&self, _scene: &Scene, _node: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    fn stale(&self, changed: &Changed) -> bool {
+        changed.references(|kind, id| self.references(kind, id))
+    }
+
+    fn rebind(
+        &self,
+        scene: &Scene,
+        node: &str,
+        world: &mut World,
+        entity: Entity,
+        assets: &dyn Assets,
+    ) {
+        Self::remove(world, entity);
+        self.install(scene, node, world, entity, assets);
     }
 
     fn create(scene: &Scene) -> Result<Self, String>;
@@ -139,7 +154,11 @@ pub(crate) trait ErasedComponent: Send + Sync {
 
     fn runtime(&self) -> Toml;
 
-    fn install(
+    fn validate(&self, scene: &Scene, node: &str) -> Result<(), String>;
+
+    fn stale(&self, changed: &Changed) -> bool;
+
+    fn rebind(
         &self,
         scene: &Scene,
         node: &str,
@@ -147,8 +166,6 @@ pub(crate) trait ErasedComponent: Send + Sync {
         entity: Entity,
         assets: &dyn Assets,
     );
-
-    fn validate(&self, scene: &Scene, node: &str) -> Result<(), String>;
 
     fn as_any(&self) -> &dyn Any;
 
@@ -195,7 +212,15 @@ impl<T: SceneComponent> ErasedComponent for T {
         SceneComponent::runtime(self)
     }
 
-    fn install(
+    fn validate(&self, scene: &Scene, node: &str) -> Result<(), String> {
+        SceneComponent::validate(self, scene, node)
+    }
+
+    fn stale(&self, changed: &Changed) -> bool {
+        SceneComponent::stale(self, changed)
+    }
+
+    fn rebind(
         &self,
         scene: &Scene,
         node: &str,
@@ -203,11 +228,7 @@ impl<T: SceneComponent> ErasedComponent for T {
         entity: Entity,
         assets: &dyn Assets,
     ) {
-        SceneComponent::install(self, scene, node, world, entity, assets);
-    }
-
-    fn validate(&self, scene: &Scene, node: &str) -> Result<(), String> {
-        SceneComponent::validate(self, scene, node)
+        SceneComponent::rebind(self, scene, node, world, entity, assets)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -231,7 +252,6 @@ type WorldWriter = fn(&mut World, Entity, &str, Option<Axis>, &Value) -> Result<
 
 pub(crate) struct ComponentRegistration {
     pub(crate) spec: &'static ComponentSpec,
-    pub(crate) tied_to_assets: bool,
     create: fn(&Scene) -> Result<Box<dyn ErasedComponent>, String>,
     parse: fn(Toml, &str) -> Box<dyn ErasedComponent>,
     pub(crate) observe: fn(&World, Entity) -> Option<Box<dyn ErasedComponent>>,
@@ -264,7 +284,6 @@ impl Registry {
         );
         self.registrations.push(ComponentRegistration {
             spec,
-            tied_to_assets: T::TIED_TO_ASSETS,
             create: create::<T>,
             parse: parse::<T>,
             observe: observe::<T>,

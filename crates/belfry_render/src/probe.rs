@@ -36,12 +36,6 @@ impl Probes {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.textures.reset(&self.fallback_texture);
-        self.samplers.reset(&self.fallback_sampler);
-        self.identities.clear();
-    }
-
     pub(crate) fn prepare(
         &mut self,
         device: &Device,

@@ -269,6 +269,17 @@ impl Mixer {
                     self.retire(assigned);
                 }
             }
+            Command::Replace { voice, source } => {
+                let rate = self.rate;
+                if let Some(held) = self.voice_mut(voice) {
+                    let position = held.position();
+                    let looping = held.looping();
+                    let input = source
+                        .open(looping, position)
+                        .unwrap_or_else(|error| panic!("{error}"));
+                    held.replace(input, rate);
+                }
+            }
             Command::Buses(layout) => {
                 self.used = layout.len();
                 for bus in &mut self.buses[..self.used] {
@@ -432,6 +443,46 @@ mod tests {
             .collect::<Vec<_>>();
         let layout = crate::graph::layout_of(&links).expect("the test buses hold a graph");
         Arc::new(layout)
+    }
+
+    #[test]
+    fn a_replaced_voice_continues_from_the_frame_it_reached() {
+        let (mut producer, command_consumer) = ring::channel(8);
+        let (event_producer, _events) = ring::channel(8);
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut mixer = Mixer::new(
+            48_000,
+            command_consumer,
+            event_producer,
+            Arc::clone(&active),
+        );
+        let ramp = || tone((0..4_800).map(|at| at as f32 / 1_000.0).collect());
+        let reloaded = || {
+            tone(
+                (0..4_800)
+                    .map(|at| (at as f32 + 1_000.0) / 2_000.0)
+                    .collect(),
+            )
+        };
+        producer
+            .send(command(1, ramp(), None))
+            .expect("the mixer accepts a voice");
+        let mut block = [0.0f32; 512];
+        mixer.render(&mut block);
+        producer
+            .send(Command::Replace {
+                voice: VoiceId(1),
+                source: crate::source::Source::decoded(reloaded()),
+            })
+            .expect("the mixer replaces the source of a voice");
+        let mut held = [0.0f32; 2];
+        mixer.render(&mut held);
+        let carried = (256.0 + 1_000.0) / 2_000.0 * std::f32::consts::FRAC_PI_4.cos();
+        assert!(
+            (held[0] - carried).abs() < 1e-2,
+            "a replaced voice continues at {carried} rather than {}",
+            held[0],
+        );
     }
 
     #[test]

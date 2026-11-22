@@ -45,8 +45,6 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
 impl SceneComponent for DirectionalLight {
     const SPEC: &'static ComponentSpec = &SPEC;
 
-    const TIED_TO_ASSETS: bool = false;
-
     fn read(&self, field: &str) -> Option<Value> {
         Some(match field {
             "color" => Value::Vector(self.color),

@@ -30,10 +30,6 @@ impl Palettes {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
-        *self = Self::new();
-    }
-
     pub(crate) fn begin(&mut self) {
         self.current.clear();
         self.staged.clear();

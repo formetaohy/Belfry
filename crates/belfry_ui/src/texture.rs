@@ -110,6 +110,7 @@ impl Textures {
             texture.write(&self.queue, &covered);
             self.table.set(self.atlas_index, &texture);
             self.atlas = Some(texture);
+            self.generation = self.generation.wrapping_add(1);
         }
         self.atlas_revision = Some(revision);
     }

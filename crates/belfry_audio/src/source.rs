@@ -17,6 +17,15 @@ pub(crate) enum Input {
     Stream(Streamed),
 }
 
+impl std::fmt::Debug for Source {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decoded(sound) => formatter.debug_tuple("Decoded").field(sound).finish(),
+            Self::Stream(stream) => formatter.debug_tuple("Stream").field(stream).finish(),
+        }
+    }
+}
+
 impl std::fmt::Debug for Input {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

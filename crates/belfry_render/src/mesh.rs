@@ -63,14 +63,6 @@ impl MeshLibrary {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.vertices.clear();
-        self.skins.truncate(INITIAL_SKINS as usize);
-        self.geometries.clear();
-        self.dead_vertices = 0;
-        self.dead_skins = 0;
-    }
-
     pub(crate) fn add(&mut self, queue: &Queue, vertices: &[Vertex]) -> Mesh {
         self.add_with_skin(queue, vertices, None)
     }

@@ -172,7 +172,7 @@ pub(crate) enum NativeGroup {
     #[cfg(vulkan_backend)]
     Vulkan(Arc<vulkan::Group>),
     #[cfg(metal_backend)]
-    Metal,
+    Metal(Arc<metal::Group>),
 }
 
 pub(crate) fn open(
@@ -567,8 +567,6 @@ impl NativeDevice {
         group: u32,
         resources: &[BoundResource],
     ) -> NativeGroup {
-        #[cfg(not(vulkan_backend))]
-        let _ = (group, resources);
         match (self, pipeline) {
             #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativeGraphicsPipeline::Vulkan(pipeline)) => {
@@ -577,7 +575,9 @@ impl NativeDevice {
                 ))
             }
             #[cfg(metal_backend)]
-            (Self::Metal(_), NativeGraphicsPipeline::Metal(_)) => NativeGroup::Metal,
+            (Self::Metal(device), NativeGraphicsPipeline::Metal(pipeline)) => NativeGroup::Metal(
+                Arc::new(device.create_graphics_group(pipeline, group, resources)),
+            ),
         }
     }
 
@@ -587,15 +587,15 @@ impl NativeDevice {
         group: u32,
         resources: &[BoundResource],
     ) -> NativeGroup {
-        #[cfg(not(vulkan_backend))]
-        let _ = (group, resources);
         match (self, pipeline) {
             #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
                 NativeGroup::Vulkan(Arc::new(device.create_group(pipeline, group, resources)))
             }
             #[cfg(metal_backend)]
-            (Self::Metal(_), NativePipeline::Metal(_)) => NativeGroup::Metal,
+            (Self::Metal(device), NativePipeline::Metal(pipeline)) => {
+                NativeGroup::Metal(Arc::new(device.create_group(pipeline, group, resources)))
+            }
         }
     }
 

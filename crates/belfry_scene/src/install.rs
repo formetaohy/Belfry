@@ -1,7 +1,4 @@
-use crate::node::Node;
-use crate::registry::Assets;
-use crate::scene::Scene;
-use belfry_ecs::{Entity, World};
+use belfry_ecs::Entity;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -17,19 +14,5 @@ impl NodeMap {
             .0
             .get(id)
             .unwrap_or_else(|| panic!("the scene holds no node {id}"))
-    }
-}
-
-pub(crate) fn install_components(
-    scene: &Scene,
-    node: &Node,
-    world: &mut World,
-    entity: Entity,
-    assets: &dyn Assets,
-) {
-    for component in scene.registry().components() {
-        if let Some(held) = node.component_by_name(component.name) {
-            held.install(scene, &node.id, world, entity, assets);
-        }
     }
 }

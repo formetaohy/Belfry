@@ -42,6 +42,10 @@ impl AudioSource {
         &self.source
     }
 
+    pub fn set_source(&mut self, source: Source) {
+        self.source = source;
+    }
+
     pub fn priority(&self) -> u8 {
         self.priority
     }
