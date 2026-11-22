@@ -1,0 +1,14 @@
+[package]
+name = "belfry_hierarchy"
+version.workspace = true
+edition.workspace = true
+description = "Parented transforms and their world propagation"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_ecs = { workspace = true }
+belfry_math = { workspace = true }

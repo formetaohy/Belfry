@@ -1,0 +1,13 @@
+[package]
+name = "belfry_png"
+version.workspace = true
+edition.workspace = true
+description = "Portable network graphics decoding and encoding to eight bit RGBA"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+flate2 = { workspace = true }

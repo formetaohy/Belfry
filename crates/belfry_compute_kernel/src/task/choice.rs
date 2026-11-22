@@ -1,0 +1,1437 @@
+use belfry_compute_profile::Geometry;
+use belfry_gpu_compiler::Compiler;
+
+pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
+    compiler.constant("SCRATCH_CHOICE", geometry.choice());
+    compiler.constant("SCRATCH_SAMPLE", 2u32 * geometry.workgroup());
+    compiler.constant(
+        "SCRATCH_UNION",
+        2u32 * geometry.workgroup() + 2u32 * belfry_compute_abi::CANDIDATES,
+    );
+    let layout = geometry.choice_layout();
+    compiler.constant("CHOICE_LOCAL", layout.local());
+    compiler.constant("CHOICE_OWNERS", layout.owners());
+    compiler.constant("CHOICE_ENTRIES", layout.entries());
+    compiler.constant("CHOICE_LEVELS", layout.levels());
+    compiler.constant("SORTED_WIDTH", layout.sorted_width());
+    compiler.constant("CANDIDATES", belfry_compute_abi::CANDIDATES);
+    compiler.constant("CHOICE_SECTIONS", belfry_compute_abi::CHOICE_SECTIONS);
+    compiler.constant("CHOICE_ROUND", belfry_compute_abi::CHOICE_ROUND);
+    compiler.constant("CHOICE_STREAM", belfry_compute_abi::CHOICE_STREAM);
+    let merge = 2u32 * geometry.workgroup()
+        + 2u32 * belfry_compute_abi::CANDIDATES
+        + 2u32 * layout.entries();
+    compiler.constant("SCRATCH_MERGE_VALUE", merge);
+    compiler.constant(
+        "SCRATCH_MERGE_INDEX",
+        merge + belfry_compute_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_WEIGHT",
+        merge + 2u32 * belfry_compute_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_CURSOR",
+        merge + 3u32 * belfry_compute_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_COUNT",
+        merge + 4u32 * belfry_compute_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_OUT",
+        merge + 5u32 * belfry_compute_abi::CHOICE_SECTIONS,
+    );
+    device::define(compiler);
+}
+
+#[belfry_gpu_compiler::module]
+mod device {
+    fn choice_precedes(value: f32, index: u32, other_value: f32, other_index: u32) -> bool {
+        if other_value > value {
+            return true;
+        }
+        return other_value == value && other_index < index;
+    }
+
+    fn workgroup_choice(lid: u32, value: f32, index: u32) -> u32 {
+        scratch[lid] = value;
+        scratch[SCRATCH_CHOICE + lid] = bitcast_f32(index);
+        workgroup_barrier();
+        let mut stride = WORKGROUP_SIZE / 2u32;
+        loop {
+            if stride == 0u32 {
+                break;
+            }
+            if lid < stride
+                && choice_precedes(
+                    scratch[lid],
+                    bitcast_u32(scratch[SCRATCH_CHOICE + lid]),
+                    scratch[lid + stride],
+                    bitcast_u32(scratch[SCRATCH_CHOICE + lid + stride]),
+                )
+            {
+                scratch[lid] = scratch[lid + stride];
+                scratch[SCRATCH_CHOICE + lid] = scratch[SCRATCH_CHOICE + lid + stride];
+            }
+            workgroup_barrier();
+            stride = stride / 2u32;
+        }
+        let chosen = bitcast_u32(scratch[SCRATCH_CHOICE]);
+        workgroup_barrier();
+        return chosen;
+    }
+
+    fn gumbel_noise(seed: u32, at: uvec4) -> f32 {
+        let mut hash = seed ^ (element_key(at) * 0x9e3779b9u32);
+        hash = hash ^ (hash >> 16u32);
+        hash = hash * 0x7feb352du32;
+        hash = hash ^ (hash >> 15u32);
+        hash = hash * 0x846ca68bu32;
+        hash = hash ^ (hash >> 16u32);
+        return -log(-log(f32(hash >> 8u32) * (1.0 / 16777216.0)));
+    }
+
+    fn sample_seed(task: Task, row: u32) -> u32 {
+        let value = values[task.b];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        return bitcast_u32(fetch(value, at));
+    }
+
+    fn sample_is_rowed(task: Task) -> bool {
+        let value = values[task.b];
+        return value.dims.z > 1u32;
+    }
+
+    fn sample_noise(seed: u32, per_row: bool, source: Value, row: u32, column: u32) -> f32 {
+        if per_row {
+            return gumbel_noise(seed, coordinates(column, source.dims));
+        }
+        return gumbel_noise(seed, coordinates(row * source.dims.w + column, source.dims));
+    }
+
+    fn choice_weight(
+        value: f32,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+        source: Value,
+        row: u32,
+        column: u32,
+    ) -> f32 {
+        if !noised {
+            return value;
+        }
+        return value + sample_noise(seed, per_row, source, row, column);
+    }
+
+    fn fold_row_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) -> u32 {
+        let mut local = max_identity();
+        let mut local_index = 0u32;
+        for column in stride(first + lid, last, WORKGROUP_SIZE) {
+            let weight = choice_weight(
+                read_flat(task, source, row * columns + column),
+                seed,
+                noised,
+                per_row,
+                source,
+                row,
+                column,
+            );
+            if weight > local {
+                local = weight;
+                local_index = column;
+            }
+        }
+        return workgroup_choice(lid, local, local_index);
+    }
+
+    fn fold_row_by_thread(
+        task: Task,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) -> u32 {
+        let mut local = max_identity();
+        let mut local_index = 0u32;
+        let streamed = first + (last - first) / CHOICE_STREAM * CHOICE_STREAM;
+        for base in stride(first, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                held[at] = choice_weight(
+                    read_flat(task, source, row * columns + column),
+                    seed,
+                    noised,
+                    per_row,
+                    source,
+                    row,
+                    column,
+                );
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                let weight = held[at];
+                if weight > local {
+                    local = weight;
+                    local_index = column;
+                }
+            }
+        }
+        for column in stride(streamed, last, 1u32) {
+            let weight = choice_weight(
+                read_flat(task, source, row * columns + column),
+                seed,
+                noised,
+                per_row,
+                source,
+                row,
+                column,
+            );
+            if weight > local {
+                local = weight;
+                local_index = column;
+            }
+        }
+        return local_index;
+    }
+
+    fn fold_rows_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
+        let output = values[task.out];
+        let columns = source.dims.w;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
+            let chosen = fold_row_by_workgroup(
+                task, lid, source, row, columns, 0u32, columns, seed, noised, per_row,
+            );
+            if lid == 0u32 {
+                publish(
+                    output,
+                    row,
+                    chained(task, coordinates(row, output.dims), f32(chosen)),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn fold_rows_by_thread(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
+        let output = values[task.out];
+        let columns = source.dims.w;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
+            publish(
+                output,
+                row,
+                chained(
+                    task,
+                    coordinates(row, output.dims),
+                    f32(fold_row_by_thread(
+                        task, source, row, columns, 0u32, columns, seed, noised, per_row,
+                    )),
+                ),
+            );
+        }
+    }
+
+    fn fold_section_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
+        let carried = values[task.out];
+        let rows = carried.dims.z;
+        let mut local = max_identity();
+        let mut local_index = 0u32;
+        for column in stride(first + lid, last, WORKGROUP_SIZE) {
+            let weight = choice_weight(
+                read_flat(task, source, row * columns + column),
+                seed,
+                noised,
+                per_row,
+                source,
+                row,
+                column,
+            );
+            if weight > local {
+                local = weight;
+                local_index = column;
+            }
+        }
+        let chosen = workgroup_choice(lid, local, local_index);
+        if lid == 0u32 {
+            let base = (task.section * rows + row) * 2u32;
+            publish(carried, base, scratch[0u32]);
+            publish(carried, base + 1u32, f32(chosen));
+        }
+        workgroup_barrier();
+    }
+
+    fn fold_sections_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
+        let columns = source.dims.w;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
+            fold_section_by_workgroup(
+                task, lid, source, row, columns, first, last, seed, noised, per_row,
+            );
+        }
+    }
+
+    fn run_choice_fold(task: Task, lid: u32) {
+        let carried = values[task.a];
+        let output = values[task.out];
+        let sections = task.splits;
+        let rows = carried.dims.z;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut best = max_identity();
+            let mut chosen = NO_VALUE;
+            for section in stride(0u32, sections, 1u32) {
+                let value = fetch(carried, (section * rows + row) * 2u32);
+                let index = u32(fetch(carried, (section * rows + row) * 2u32 + 1u32));
+                if better(value, index, best, chosen) {
+                    best = value;
+                    chosen = index;
+                }
+            }
+            publish(
+                output,
+                row,
+                chained(task, coordinates(row, output.dims), f32(chosen)),
+            );
+        }
+    }
+
+    fn run_argmax(task: Task, lid: u32) {
+        let source = values[task.a];
+        match task.geometry {
+            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, false, false),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    fold_sections_by_workgroup(task, lid, source, 0u32, false, false);
+                } else {
+                    fold_rows_by_workgroup(task, lid, source, 0u32, false, false);
+                }
+            }
+            _ => refuse(kind::ARGMAX, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn run_categorical(task: Task, lid: u32) {
+        let source = values[task.a];
+        let per_row = sample_is_rowed(task);
+        match task.geometry {
+            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, true, per_row),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    fold_sections_by_workgroup(task, lid, source, 0u32, true, per_row);
+                } else {
+                    fold_rows_by_workgroup(task, lid, source, 0u32, true, per_row);
+                }
+            }
+            _ => refuse(kind::CATEGORICAL, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn sample_after(value: f32, column: u32, previous_value: f32, previous_index: u32) -> bool {
+        if previous_index == NO_VALUE {
+            return true;
+        }
+        if value < previous_value {
+            return true;
+        }
+        return value == previous_value && column > previous_index;
+    }
+
+    fn better(value: f32, index: u32, other_value: f32, other_index: u32) -> bool {
+        if other_index == NO_VALUE {
+            return true;
+        }
+        if value > other_value {
+            return true;
+        }
+        return value == other_value && index < other_index;
+    }
+
+    fn sorted_before(value: f32, index: u32, other_value: f32, other_index: u32) -> bool {
+        if value < other_value {
+            return true;
+        }
+        if value > other_value {
+            return false;
+        }
+        return index > other_index;
+    }
+
+    fn rank_sorted(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
+        let span = last - first;
+        if span == 0u32 {
+            return 0u32;
+        }
+        for slot in stride(lid, SORTED_WIDTH, WORKGROUP_SIZE) {
+            let inside = slot < span;
+            let column = first + min(slot, span - 1u32);
+            scratch[SCRATCH_UNION + slot] = select(
+                max_identity(),
+                read_flat(task, source, row * columns + column),
+                inside,
+            );
+            scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot] =
+                bitcast_f32(select(NO_VALUE, column, inside));
+        }
+        workgroup_barrier();
+        let mut size = 2u32;
+        loop {
+            if size > SORTED_WIDTH {
+                break;
+            }
+            let mut step = size / 2u32;
+            loop {
+                if step == 0u32 {
+                    break;
+                }
+                for slot in stride(lid, SORTED_WIDTH, WORKGROUP_SIZE) {
+                    let partner = slot ^ step;
+                    if partner > slot {
+                        let ascending = (slot & size) == 0u32;
+                        let value = scratch[SCRATCH_UNION + slot];
+                        let index = bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot]);
+                        let other = scratch[SCRATCH_UNION + partner];
+                        let other_index =
+                            bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + partner]);
+                        let before = sorted_before(value, index, other, other_index);
+                        let after = sorted_before(other, other_index, value, index);
+                        if select(before, after, ascending) {
+                            scratch[SCRATCH_UNION + slot] = other;
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot] =
+                                bitcast_f32(other_index);
+                            scratch[SCRATCH_UNION + partner] = value;
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + partner] = bitcast_f32(index);
+                        }
+                    }
+                }
+                workgroup_barrier();
+                step = step / 2u32;
+            }
+            size = size * 2u32;
+        }
+        let count = min(keep, min(span, SORTED_WIDTH));
+        for candidate in stride(lid, count, WORKGROUP_SIZE) {
+            let at = SORTED_WIDTH - 1u32 - candidate;
+            scratch[SCRATCH_SAMPLE + candidate] = scratch[SCRATCH_UNION + at];
+            scratch[SCRATCH_SAMPLE + CANDIDATES + candidate] =
+                scratch[SCRATCH_UNION + CHOICE_ENTRIES + at];
+        }
+        workgroup_barrier();
+        return count;
+    }
+
+    fn rank_band(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
+        if last - first <= SORTED_WIDTH {
+            return rank_sorted(task, lid, source, row, columns, first, last, keep);
+        }
+        return rank_row(task, lid, source, row, columns, first, last, keep);
+    }
+
+    fn rank_row(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
+        let mut count = 0u32;
+        let mut previous_value = max_identity();
+        let mut previous_index = NO_VALUE;
+        let span = last - first;
+        loop {
+            if count >= keep {
+                break;
+            }
+            let mut local_value = scalar_array(max_identity(), CHOICE_LOCAL);
+            let mut local_index = scalar_array(NO_VALUE, CHOICE_LOCAL);
+            if lid < CHOICE_OWNERS {
+                for base in stride(lid, span, CHOICE_OWNERS * 4u32) {
+                    let mut held = scalar_array(max_identity(), 4u32);
+                    for at in unroll(0u32, 4u32, 1u32) {
+                        let column = first + base + at * CHOICE_OWNERS;
+                        held[at] = select(
+                            max_identity(),
+                            read_flat(task, source, row * columns + min(column, columns - 1u32)),
+                            column < last,
+                        );
+                    }
+                    for at in unroll(0u32, 4u32, 1u32) {
+                        let column = first + base + at * CHOICE_OWNERS;
+                        let value = held[at];
+                        if column < last
+                            && sample_after(value, column, previous_value, previous_index)
+                            && better(
+                                value,
+                                column,
+                                local_value[CHOICE_LOCAL - 1u32],
+                                local_index[CHOICE_LOCAL - 1u32],
+                            )
+                        {
+                            let mut held_value = value;
+                            let mut held_index = column;
+                            for seat in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                                if better(
+                                    held_value,
+                                    held_index,
+                                    local_value[seat],
+                                    local_index[seat],
+                                ) {
+                                    let swap_value = local_value[seat];
+                                    let swap_index = local_index[seat];
+                                    local_value[seat] = held_value;
+                                    local_index[seat] = held_index;
+                                    held_value = swap_value;
+                                    held_index = swap_index;
+                                }
+                            }
+                        }
+                    }
+                }
+                for seat in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                    scratch[SCRATCH_UNION + lid * CHOICE_LOCAL + seat] = local_value[seat];
+                    scratch[SCRATCH_UNION + CHOICE_ENTRIES + lid * CHOICE_LOCAL + seat] =
+                        bitcast_f32(local_index[seat]);
+                }
+            }
+            workgroup_barrier();
+            let mut distance = 1u32;
+            for level in unroll(0u32, CHOICE_LEVELS, 1u32) {
+                let slot = lid * 2u32 * distance;
+                if slot + 2u32 * distance <= CHOICE_OWNERS {
+                    let mut carried = scalar_array(max_identity(), CHOICE_LOCAL);
+                    let mut carried_index = scalar_array(NO_VALUE, CHOICE_LOCAL);
+                    for half in unroll(0u32, 2u32, 1u32) {
+                        for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                            let seat = slot + half * distance;
+                            let mut held_value = scratch[SCRATCH_UNION + seat * CHOICE_LOCAL + at];
+                            let mut held_index = bitcast_u32(
+                                scratch[SCRATCH_UNION + CHOICE_ENTRIES + seat * CHOICE_LOCAL + at],
+                            );
+                            for place in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                                if better(
+                                    held_value,
+                                    held_index,
+                                    carried[place],
+                                    carried_index[place],
+                                ) {
+                                    let swap_value = carried[place];
+                                    let swap_index = carried_index[place];
+                                    carried[place] = held_value;
+                                    carried_index[place] = held_index;
+                                    held_value = swap_value;
+                                    held_index = swap_index;
+                                }
+                            }
+                        }
+                    }
+                    for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                        scratch[SCRATCH_UNION + slot * CHOICE_LOCAL + at] = carried[at];
+                        scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot * CHOICE_LOCAL + at] =
+                            bitcast_f32(carried_index[at]);
+                    }
+                }
+                workgroup_barrier();
+                distance = distance * 2u32;
+            }
+            let taken = min(keep - count, CHOICE_LOCAL);
+            let mut last_value = previous_value;
+            let mut last_index = previous_index;
+            for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                if at < taken {
+                    let index = bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + at]);
+                    if index != NO_VALUE {
+                        last_value = scratch[SCRATCH_UNION + at];
+                        last_index = index;
+                    }
+                }
+            }
+            if lid == 0u32 {
+                for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                    if at < taken {
+                        scratch[SCRATCH_SAMPLE + count + at] = scratch[SCRATCH_UNION + at];
+                        scratch[SCRATCH_SAMPLE + CANDIDATES + count + at] =
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + at];
+                    }
+                }
+            }
+            previous_value = last_value;
+            previous_index = last_index;
+            count = count + taken;
+            workgroup_barrier();
+        }
+        return count;
+    }
+
+    fn rank_round_by_thread(
+        source: Value,
+        row: u32,
+        columns: u32,
+        previous_value: f32,
+        previous_index: u32,
+    ) -> uvec4 {
+        let mut local_value = scalar_array(max_identity(), CHOICE_ROUND);
+        let mut local_index = scalar_array(NO_VALUE, CHOICE_ROUND);
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                held[at] = fetch(source, row * columns + base + at);
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                let value = held[at];
+                if sample_after(value, column, previous_value, previous_index)
+                    && better(
+                        value,
+                        column,
+                        local_value[CHOICE_ROUND - 1u32],
+                        local_index[CHOICE_ROUND - 1u32],
+                    )
+                {
+                    let mut carried_value = value;
+                    let mut carried_index = column;
+                    for seat in unroll(0u32, CHOICE_ROUND, 1u32) {
+                        if better(
+                            carried_value,
+                            carried_index,
+                            local_value[seat],
+                            local_index[seat],
+                        ) {
+                            let swapped_value = local_value[seat];
+                            let swapped_index = local_index[seat];
+                            local_value[seat] = carried_value;
+                            local_index[seat] = carried_index;
+                            carried_value = swapped_value;
+                            carried_index = swapped_index;
+                        }
+                    }
+                }
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            let value = fetch(source, row * columns + column);
+            if sample_after(value, column, previous_value, previous_index)
+                && better(
+                    value,
+                    column,
+                    local_value[CHOICE_ROUND - 1u32],
+                    local_index[CHOICE_ROUND - 1u32],
+                )
+            {
+                let mut carried_value = value;
+                let mut carried_index = column;
+                for seat in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    if better(
+                        carried_value,
+                        carried_index,
+                        local_value[seat],
+                        local_index[seat],
+                    ) {
+                        let swapped_value = local_value[seat];
+                        let swapped_index = local_index[seat];
+                        local_value[seat] = carried_value;
+                        local_index[seat] = carried_index;
+                        carried_value = swapped_value;
+                        carried_index = swapped_index;
+                    }
+                }
+            }
+        }
+        return uvec4(
+            local_index[0u32],
+            local_index[1u32],
+            local_index[2u32],
+            local_index[3u32],
+        );
+    }
+
+    fn top_k_rows_by_thread(task: Task, lid: u32, source: Value, keep: u32) {
+        let kept_values = values[task.out];
+        let kept_indices = values[task.extra];
+        let columns = source.dims.w;
+        let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut previous_value = max_identity();
+            let mut previous_index = NO_VALUE;
+            for round in stride(0u32, rounds, 1u32) {
+                let held =
+                    rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    let column = held[at];
+                    let kept = column != NO_VALUE;
+                    let slot = round * CHOICE_ROUND + at;
+                    if slot < keep {
+                        publish(
+                            kept_values,
+                            row * keep + slot,
+                            select(
+                                max_identity(),
+                                fetch(source, row * columns + min(column, columns - 1u32)),
+                                kept,
+                            ),
+                        );
+                        publish(kept_indices, row * keep + slot, f32(column));
+                    }
+                    if kept {
+                        previous_value = fetch(source, row * columns + column);
+                        previous_index = column;
+                    }
+                }
+            }
+        }
+    }
+
+    fn sample_largest_by_thread(source: Value, row: u32, columns: u32) -> f32 {
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        let mut largest = max_identity();
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                largest = max(largest, fetch(source, row * columns + base + at));
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            largest = max(largest, fetch(source, row * columns + column));
+        }
+        return largest;
+    }
+
+    fn sample_mass_by_thread(source: Value, row: u32, columns: u32, largest: f32) -> f32 {
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        let mut mass = 0.0;
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                held[at] = softmax_exp(fetch(source, row * columns + base + at) - largest);
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                mass = mass + held[at];
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            mass = mass + softmax_exp(fetch(source, row * columns + column) - largest);
+        }
+        return mass;
+    }
+
+    fn sample_rows_by_thread(task: Task, lid: u32, source: Value, per_row: bool) {
+        let output = values[task.out];
+        let columns = source.dims.w;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let seed = sample_seed(task, row);
+            let keep = sample_keep_row(task, row);
+            let cumulative = sample_cumulative_row(task, row);
+            let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
+            let largest = sample_largest_by_thread(source, row, columns);
+            let total = sample_mass_by_thread(source, row, columns, largest);
+            let mut previous_value = max_identity();
+            let mut previous_index = NO_VALUE;
+            let mut kept_mass = 0.0;
+            let mut ranked = 0u32;
+            for round in stride(0u32, rounds, 1u32) {
+                let held =
+                    rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    let column = held[at];
+                    if ranked + at < keep && column != NO_VALUE {
+                        previous_value = fetch(source, row * columns + column);
+                        previous_index = column;
+                        kept_mass = kept_mass + softmax_exp(previous_value - largest);
+                    }
+                }
+                ranked = ranked + min(keep - ranked, CHOICE_ROUND);
+            }
+            previous_value = max_identity();
+            previous_index = NO_VALUE;
+            let mut running = 0.0;
+            let mut best = max_identity();
+            let mut chosen = NO_VALUE;
+            let mut open = true;
+            let mut drawn = 0u32;
+            for round in stride(0u32, rounds, 1u32) {
+                if open {
+                    let held =
+                        rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                    for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                        let column = held[at];
+                        if open && drawn + at < keep && column != NO_VALUE {
+                            let value = fetch(source, row * columns + column);
+                            previous_value = value;
+                            previous_index = column;
+                            running = running + softmax_exp(value - largest);
+                            let weight = value + sample_noise(seed, per_row, source, row, column);
+                            if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
+                                best = weight;
+                                chosen = column;
+                            }
+                            if running + total - kept_mass >= cumulative * total {
+                                open = false;
+                            }
+                        }
+                    }
+                    drawn = drawn + min(keep - drawn, CHOICE_ROUND);
+                }
+            }
+            if chosen == NO_VALUE {
+                chosen = 0u32;
+            }
+            publish(
+                output,
+                row,
+                chained(task, coordinates(row, output.dims), f32(chosen)),
+            );
+        }
+    }
+
+    fn sample_mass(lid: u32, max_value: f32, total: f32) -> f32 {
+        scratch[lid] = max_value;
+        scratch[SCRATCH_CHOICE + lid] = total;
+        workgroup_barrier();
+        let mut stride = WORKGROUP_SIZE / 2u32;
+        loop {
+            if stride == 0u32 {
+                break;
+            }
+            if lid < stride {
+                let left_max = scratch[lid];
+                let left_total = scratch[SCRATCH_CHOICE + lid];
+                let right_max = scratch[lid + stride];
+                let right_total = scratch[SCRATCH_CHOICE + lid + stride];
+                let merged_max = max(left_max, right_max);
+                let mut merged_total = 0.0;
+                if left_total > 0.0 || right_total > 0.0 {
+                    merged_total = left_total * softmax_exp(left_max - merged_max)
+                        + right_total * softmax_exp(right_max - merged_max);
+                }
+                scratch[lid] = merged_max;
+                scratch[SCRATCH_CHOICE + lid] = merged_total;
+            }
+            workgroup_barrier();
+            stride = stride / 2u32;
+        }
+        return scratch[SCRATCH_CHOICE];
+    }
+
+    fn row_mass(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+    ) -> f32 {
+        let mut local_max = max_identity();
+        let mut local_total = 0.0;
+        for base in stride(lid, last - first, WORKGROUP_SIZE * 4u32) {
+            let mut held = scalar_array(max_identity(), 4u32);
+            for at in unroll(0u32, 4u32, 1u32) {
+                let column = first + base + at * WORKGROUP_SIZE;
+                held[at] = select(
+                    max_identity(),
+                    read_flat(task, source, row * columns + min(column, columns - 1u32)),
+                    column < last,
+                );
+            }
+            for at in unroll(0u32, 4u32, 1u32) {
+                let column = first + base + at * WORKGROUP_SIZE;
+                let value = held[at];
+                if column < last {
+                    if local_max == max_identity() {
+                        local_max = value;
+                        local_total = select(0.0, 1.0, value > max_identity());
+                    } else {
+                        if value > local_max {
+                            local_total = local_total * softmax_exp(local_max - value) + 1.0;
+                            local_max = value;
+                        } else {
+                            local_total = local_total + softmax_exp(value - local_max);
+                        }
+                    }
+                }
+            }
+        }
+        return sample_mass(lid, local_max, local_total);
+    }
+
+    fn sample_row(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        keep: u32,
+        cumulative: f32,
+        per_row: bool,
+    ) -> u32 {
+        if keep == 1u32 && cumulative == 1.0 {
+            return fold_row_by_workgroup(
+                task, lid, source, row, columns, 0u32, columns, 0u32, false, false,
+            );
+        }
+        let seed = sample_seed(task, row);
+        let total = row_mass(task, lid, source, row, columns, 0u32, columns);
+        let row_max = scratch[0u32];
+        workgroup_barrier();
+        let count = rank_row(task, lid, source, row, columns, 0u32, columns, keep);
+        workgroup_barrier();
+        let mut chosen = NO_VALUE;
+        if lid == 0u32 {
+            let mut mass = 0.0;
+            for candidate in stride(0u32, count, 1u32) {
+                if bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]) != NO_VALUE {
+                    mass = mass + softmax_exp(scratch[SCRATCH_SAMPLE + candidate] - row_max);
+                }
+            }
+            let tail = total - mass;
+            let threshold = cumulative * total;
+            let mut boundary = count;
+            let mut running = 0.0;
+            for candidate in stride(0u32, count, 1u32) {
+                if bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]) != NO_VALUE {
+                    running = running + softmax_exp(scratch[SCRATCH_SAMPLE + candidate] - row_max);
+                    if running + tail >= threshold && candidate + 1u32 < boundary {
+                        boundary = candidate + 1u32;
+                    }
+                }
+            }
+            let mut best = max_identity();
+            for candidate in stride(0u32, boundary, 1u32) {
+                let value = scratch[SCRATCH_SAMPLE + candidate];
+                let column = bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]);
+                let weight = value + sample_noise(seed, per_row, source, row, column);
+                if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
+                    best = weight;
+                    chosen = column;
+                }
+            }
+        }
+        if chosen == NO_VALUE {
+            chosen = 0u32;
+        }
+        return chosen;
+    }
+
+    fn sample_keep_row(task: Task, row: u32) -> u32 {
+        let value = values[task.c];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        let declared = fetch(value, at);
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
+            return 1u32;
+        }
+        return u32(declared);
+    }
+
+    fn sample_cumulative_row(task: Task, row: u32) -> f32 {
+        let value = values[task.d];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        let cumulative = fetch(value, at);
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 1u32);
+            return 1.0;
+        }
+        return cumulative;
+    }
+
+    fn sample_keep_group(task: Task, lid: u32, row: u32) -> u32 {
+        let value = values[task.c];
+        if lid == 0u32 {
+            let at = select(0u32, row, value.dims.z > 1u32);
+            scratch[SCRATCH_SAMPLE] = fetch(value, at);
+        }
+        let declared = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE]);
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
+            return 1u32;
+        }
+        return u32(declared);
+    }
+
+    fn sample_cumulative_group(task: Task, lid: u32, row: u32) -> f32 {
+        let value = values[task.d];
+        if lid == 0u32 {
+            let at = select(0u32, row, value.dims.z > 1u32);
+            scratch[SCRATCH_SAMPLE + 1u32] = fetch(value, at);
+        }
+        let cumulative = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE + 1u32]);
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 1u32);
+            return 1.0;
+        }
+        return cumulative;
+    }
+
+    fn sample_chunk(task: Task, lid: u32, source: Value, per_row: bool) {
+        let kept_values = values[task.out];
+        let carried = values[task.extra];
+        let columns = source.dims.w;
+        let rows = kept_values.dims.z;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let seed = sample_seed(task, row);
+            let keep = sample_keep_group(task, lid, row);
+            let cumulative = sample_cumulative_group(task, lid, row);
+            let total = row_mass(task, lid, source, row, columns, first, last);
+            let row_max = scratch[0u32];
+            workgroup_barrier();
+            let count = rank_band(task, lid, source, row, columns, first, last, keep);
+            let base = (task.section * rows + row) * (2u32 * CANDIDATES + 4u32);
+            if lid == 0u32 {
+                publish(carried, base + 2u32 * CANDIDATES, f32(count));
+                publish(carried, base + 2u32 * CANDIDATES + 1u32, row_max);
+                publish(carried, base + 2u32 * CANDIDATES + 2u32, total);
+            }
+            for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+                let index = bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]);
+                let inside = candidate < count;
+                let value = scratch[SCRATCH_SAMPLE + candidate];
+                let column = min(index, columns - 1u32);
+                publish(
+                    kept_values,
+                    (task.section * rows + row) * CANDIDATES + candidate,
+                    select(max_identity(), value, inside),
+                );
+                publish(
+                    carried,
+                    base + 2u32 * candidate,
+                    f32(select(NO_VALUE, index, inside)),
+                );
+                publish(
+                    carried,
+                    base + 2u32 * candidate + 1u32,
+                    value + sample_noise(seed, per_row, source, row, column),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn sample_rows(task: Task, lid: u32, source: Value, per_row: bool) {
+        let output = values[task.out];
+        let columns = source.dims.w;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let keep = sample_keep_group(task, lid, row);
+            let cumulative = sample_cumulative_group(task, lid, row);
+            let chosen = sample_row(task, lid, source, row, columns, keep, cumulative, per_row);
+            if lid == 0u32 {
+                publish(
+                    output,
+                    row,
+                    chained(task, coordinates(row, output.dims), f32(chosen)),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn run_sample(task: Task, lid: u32) {
+        let source = values[task.a];
+        let per_row = sample_is_rowed(task);
+        match task.geometry {
+            strategy::THREAD_ROW => sample_rows_by_thread(task, lid, source, per_row),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    sample_chunk(task, lid, source, per_row);
+                } else {
+                    sample_rows(task, lid, source, per_row);
+                }
+            }
+            _ => refuse(kind::SAMPLE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn merge_row(
+        lid: u32,
+        values_in: Value,
+        carriers: Value,
+        pair_stride: u32,
+        weight_offset: u32,
+        block: u32,
+        rows: u32,
+        sections: u32,
+        keep: u32,
+        row: u32,
+    ) -> u32 {
+        if lid != 0u32 {
+            return 0u32;
+        }
+        for section in stride(0u32, sections, 1u32) {
+            let base = (section * rows + row) * block;
+            let count = u32(fetch(carriers, base + block - 4u32));
+            let inside = count > 0u32;
+            scratch[SCRATCH_MERGE_VALUE + section] = select(
+                max_identity(),
+                fetch(values_in, (section * rows + row) * CANDIDATES),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_WEIGHT + section] = select(
+                max_identity(),
+                fetch(carriers, base + weight_offset),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_INDEX + section] =
+                bitcast_f32(select(NO_VALUE, u32(fetch(carriers, base)), inside));
+            scratch[SCRATCH_MERGE_CURSOR + section] = bitcast_f32(0u32);
+            scratch[SCRATCH_MERGE_COUNT + section] = bitcast_f32(count);
+        }
+        let mut count = 0u32;
+        let mut slot = 0u32;
+        loop {
+            if slot >= keep {
+                break;
+            }
+            let mut best_value = max_identity();
+            let mut best_index = NO_VALUE;
+            let mut best_section = NO_VALUE;
+            let mut base_section = 0u32;
+            loop {
+                if base_section >= sections {
+                    break;
+                }
+                let mut held_value = scalar_array(max_identity(), 4u32);
+                let mut held_index = scalar_array(NO_VALUE, 4u32);
+                let mut held_section = scalar_array(0u32, 4u32);
+                for at in unroll(0u32, 4u32, 1u32) {
+                    let probe = base_section + at;
+                    if probe < sections {
+                        held_index[at] = bitcast_u32(scratch[SCRATCH_MERGE_INDEX + probe]);
+                        held_value[at] = scratch[SCRATCH_MERGE_VALUE + probe];
+                        held_section[at] = probe;
+                    }
+                }
+                for at in unroll(0u32, 4u32, 1u32) {
+                    if held_index[at] != NO_VALUE
+                        && better(held_value[at], held_index[at], best_value, best_index)
+                    {
+                        best_value = held_value[at];
+                        best_index = held_index[at];
+                        best_section = held_section[at];
+                    }
+                }
+                base_section = base_section + 4u32;
+            }
+            if best_index == NO_VALUE {
+                break;
+            }
+            scratch[SCRATCH_MERGE_OUT + slot] = best_value;
+            scratch[SCRATCH_MERGE_OUT + CANDIDATES + slot] = bitcast_f32(best_index);
+            scratch[SCRATCH_MERGE_OUT + 2u32 * CANDIDATES + slot] =
+                scratch[SCRATCH_MERGE_WEIGHT + best_section];
+            slot = slot + 1u32;
+            count = count + 1u32;
+            let position = bitcast_u32(scratch[SCRATCH_MERGE_CURSOR + best_section]);
+            let limit = bitcast_u32(scratch[SCRATCH_MERGE_COUNT + best_section]);
+            let held = min(position + 1u32, CANDIDATES - 1u32);
+            let inside = position + 1u32 < limit;
+            let base = (best_section * rows + row) * block;
+            let head = (best_section * rows + row) * CANDIDATES;
+            scratch[SCRATCH_MERGE_VALUE + best_section] =
+                select(max_identity(), fetch(values_in, head + held), inside);
+            scratch[SCRATCH_MERGE_WEIGHT + best_section] = select(
+                max_identity(),
+                fetch(carriers, base + held * pair_stride + weight_offset),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_INDEX + best_section] = bitcast_f32(select(
+                NO_VALUE,
+                u32(fetch(carriers, base + held * pair_stride)),
+                inside,
+            ));
+            scratch[SCRATCH_MERGE_CURSOR + best_section] = bitcast_f32(position + 1u32);
+        }
+        return count;
+    }
+
+    fn run_top_k_fold(task: Task, lid: u32) {
+        let values_in = values[task.a];
+        let carried = values[task.b];
+        let out_values = values[task.out];
+        let out_indices = values[task.extra];
+        let keep = task.keep;
+        let sections = task.splits;
+        let rows = out_values.dims.z;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = merge_row(
+                lid,
+                values_in,
+                carried,
+                1u32,
+                0u32,
+                CANDIDATES + 4u32,
+                rows,
+                sections,
+                keep,
+                row,
+            );
+            if lid == 0u32 {
+                for slot in stride(0u32, keep, 1u32) {
+                    let inside = slot < count;
+                    publish(
+                        out_values,
+                        row * keep + slot,
+                        select(max_identity(), scratch[SCRATCH_MERGE_OUT + slot], inside),
+                    );
+                    publish(
+                        out_indices,
+                        row * keep + slot,
+                        select(
+                            -1.0,
+                            f32(bitcast_u32(scratch[SCRATCH_MERGE_OUT + CANDIDATES + slot])),
+                            inside,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    fn run_sample_fold(task: Task, lid: u32) {
+        let values_in = values[task.a];
+        let seed = bitcast_u32(fetch(values[task.b], 0u32));
+        let declared = fetch(values[task.c], 0u32);
+        let cumulative = fetch(values[task.d], 0u32);
+        let candidates = values[task.e];
+        let output = values[task.out];
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE_FOLD, refusal::SAMPLE, 0u32);
+            return;
+        }
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE_FOLD, refusal::SAMPLE, 1u32);
+            return;
+        }
+        let keep = u32(declared);
+        let sections = task.splits;
+        let rows = output.dims.z;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = merge_row(
+                lid,
+                values_in,
+                candidates,
+                2u32,
+                1u32,
+                2u32 * CANDIDATES + 4u32,
+                rows,
+                sections,
+                keep,
+                row,
+            );
+            if lid == 0u32 {
+                let mut row_max = max_identity();
+                for section in stride(0u32, sections, 1u32) {
+                    row_max = max(
+                        row_max,
+                        fetch(
+                            candidates,
+                            (section * rows + row) * (2u32 * CANDIDATES + 4u32)
+                                + 2u32 * CANDIDATES
+                                + 1u32,
+                        ),
+                    );
+                }
+                let mut total = 0.0;
+                for section in stride(0u32, sections, 1u32) {
+                    let base =
+                        (section * rows + row) * (2u32 * CANDIDATES + 4u32) + 2u32 * CANDIDATES;
+                    let section_max = fetch(candidates, base + 1u32);
+                    let section_total = fetch(candidates, base + 2u32);
+                    total = total + section_total * softmax_exp(section_max - row_max);
+                }
+                let mut mass = 0.0;
+                for candidate in stride(0u32, count, 1u32) {
+                    mass = mass + softmax_exp(scratch[SCRATCH_MERGE_OUT + candidate] - row_max);
+                }
+                let tail = total - mass;
+                let threshold = cumulative * total;
+                let mut boundary = count;
+                let mut running = 0.0;
+                for candidate in stride(0u32, count, 1u32) {
+                    running =
+                        running + softmax_exp(scratch[SCRATCH_MERGE_OUT + candidate] - row_max);
+                    if running + tail >= threshold && candidate + 1u32 < boundary {
+                        boundary = candidate + 1u32;
+                    }
+                }
+                let mut best = max_identity();
+                let mut chosen = NO_VALUE;
+                for candidate in stride(0u32, boundary, 1u32) {
+                    let weight = scratch[SCRATCH_MERGE_OUT + 2u32 * CANDIDATES + candidate];
+                    let column = bitcast_u32(scratch[SCRATCH_MERGE_OUT + CANDIDATES + candidate]);
+                    if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
+                        best = weight;
+                        chosen = column;
+                    }
+                }
+                if chosen == NO_VALUE {
+                    chosen = 0u32;
+                }
+                publish(
+                    output,
+                    row,
+                    chained(task, coordinates(row, output.dims), f32(chosen)),
+                );
+            }
+        }
+    }
+
+    fn top_k_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) {
+        let kept_values = values[task.out];
+        let kept_indices = values[task.extra];
+        rank_row(task, lid, source, row, columns, 0u32, columns, keep);
+        for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+            publish(
+                kept_values,
+                row * keep + candidate,
+                scratch[SCRATCH_SAMPLE + candidate],
+            );
+            publish(
+                kept_indices,
+                row * keep + candidate,
+                f32(bitcast_u32(
+                    scratch[SCRATCH_SAMPLE + CANDIDATES + candidate],
+                )),
+            );
+        }
+    }
+
+    fn top_k_chunk(task: Task, lid: u32) {
+        let source = values[task.a];
+        let kept_values = values[task.out];
+        let carried = values[task.extra];
+        let keep = task.keep;
+        let columns = source.dims.w;
+        let rows = kept_values.dims.z;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = rank_band(task, lid, source, row, columns, first, last, keep);
+            let base = (task.section * rows + row) * (CANDIDATES + 4u32);
+            if lid == 0u32 {
+                publish(carried, base + CANDIDATES, f32(count));
+            }
+            for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+                publish(
+                    kept_values,
+                    (task.section * rows + row) * CANDIDATES + candidate,
+                    scratch[SCRATCH_SAMPLE + candidate],
+                );
+                publish(
+                    carried,
+                    base + candidate,
+                    f32(bitcast_u32(
+                        scratch[SCRATCH_SAMPLE + CANDIDATES + candidate],
+                    )),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn run_top_k(task: Task, lid: u32) {
+        let source = values[task.a];
+        let keep = task.keep;
+        let columns = source.dims.w;
+        match task.geometry {
+            strategy::THREAD_ROW => top_k_rows_by_thread(task, lid, source, keep),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    top_k_chunk(task, lid);
+                } else {
+                    for row in stride(task.first, task.first + task.count, 1u32) {
+                        top_k_row(task, lid, source, row, columns, keep);
+                        workgroup_barrier();
+                    }
+                }
+            }
+            _ => refuse(kind::TOP_K, refusal::GEOMETRY, task.geometry),
+        }
+    }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "belfry_gltf"
+version.workspace = true
+edition.workspace = true
+description = "Three dimensional models read from the glTF interchange format"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_animation = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jpeg-decoder = { workspace = true }
+belfry_math = { workspace = true }
+belfry_png = { workspace = true }
+belfry_render = { workspace = true }

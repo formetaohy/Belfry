@@ -1,0 +1,88 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+description = "An ECS-driven, GPU-driven game engine"
+license = "MIT"
+repository = "https://github.com/formetaohy/BelfryDev"
+
+[workspace.dependencies]
+ab_glyph = "0.2"
+ash = "0.38"
+bitflags = "2"
+bytemuck = { version = "1", features = ["derive"] }
+flate2 = "1"
+half = "2"
+jpeg-decoder = "0.3"
+lewton = "0.10"
+libloading = "0.8"
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+proc-macro2 = "1"
+quote = "1"
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit-mut", "extra-traits"] }
+swash = "0.2"
+slotmap = "1"
+toml = { version = "1", features = ["preserve_order"] }
+windows = "0.62"
+winit = { version = "0.30.13", default-features = false }
+belfry_animation = { version = "0.1.0", path = "crates/belfry_animation" }
+belfry_app = { version = "0.1.0", path = "crates/belfry_app" }
+belfry_asset = { version = "0.1.0", path = "crates/belfry_asset" }
+belfry_audio = { version = "0.1.0", path = "crates/belfry_audio" }
+belfry_audio_device = { version = "0.1.0", path = "crates/belfry_audio_device" }
+belfry_compute = { version = "0.1.0", path = "crates/belfry_compute" }
+belfry_compute_abi = { version = "0.1.0", path = "crates/belfry_compute_abi" }
+belfry_compute_kernel = { version = "0.1.0", path = "crates/belfry_compute_kernel" }
+belfry_compute_pointwise = { version = "0.1.0", path = "crates/belfry_compute_pointwise" }
+belfry_compute_profile = { version = "0.1.0", path = "crates/belfry_compute_profile" }
+belfry_ecs = { version = "0.1.0", path = "crates/belfry_ecs" }
+belfry_editor = { version = "0.1.0", path = "crates/belfry_editor" }
+belfry_environment = { version = "0.1.0", path = "crates/belfry_environment" }
+belfry_gltf = { version = "0.1.0", path = "crates/belfry_gltf" }
+belfry_gpu = { version = "0.1.0", path = "crates/belfry_gpu" }
+belfry_gpu_ast = { version = "0.1.0", path = "crates/belfry_gpu_ast" }
+belfry_gpu_compiler = { version = "0.1.0", path = "crates/belfry_gpu_compiler" }
+belfry_gpu_device = { version = "0.1.0", path = "crates/belfry_gpu_device" }
+belfry_gpu_layout = { version = "0.1.0", path = "crates/belfry_gpu_layout" }
+belfry_gpu_macro = { version = "0.1.0", path = "crates/belfry_gpu_macro" }
+belfry_gpu_shader = { version = "0.1.0", path = "crates/belfry_gpu_shader" }
+belfry_hierarchy = { version = "0.1.0", path = "crates/belfry_hierarchy" }
+belfry_image = { version = "0.1.0", path = "crates/belfry_image" }
+belfry_math = { version = "0.1.0", path = "crates/belfry_math" }
+belfry_physics = { version = "0.1.0", path = "crates/belfry_physics" }
+belfry_png = { version = "0.1.0", path = "crates/belfry_png" }
+belfry_radiance = { version = "0.1.0", path = "crates/belfry_radiance" }
+belfry_render = { version = "0.1.0", path = "crates/belfry_render" }
+belfry_render_abi = { version = "0.1.0", path = "crates/belfry_render_abi" }
+belfry_scene = { version = "0.1.0", path = "crates/belfry_scene" }
+belfry_scene_macro = { version = "0.1.0", path = "crates/belfry_scene_macro" }
+belfry_text = { version = "0.1.0", path = "crates/belfry_text" }
+belfry_toml = { version = "0.1.0", path = "crates/belfry_toml" }
+belfry_ui = { version = "0.1.0", path = "crates/belfry_ui" }
+belfry_ui_window = { version = "0.1.0", path = "crates/belfry_ui_window" }
+belfry_window = { version = "0.1.0", path = "crates/belfry_window" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+
+[profile.test]
+opt-level = 1
+debug = 0

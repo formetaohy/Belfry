@@ -1,0 +1,27 @@
+[package]
+name = "belfry_app"
+version.workspace = true
+edition.workspace = true
+description = "The application loop of the Belfry engine"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_animation = { workspace = true }
+belfry_audio = { workspace = true }
+belfry_ecs = { workspace = true }
+belfry_gpu_device = { workspace = true }
+belfry_hierarchy = { workspace = true }
+belfry_math = { workspace = true }
+belfry_physics = { workspace = true }
+belfry_png = { workspace = true }
+belfry_render = { workspace = true }
+belfry_scene = { workspace = true }
+belfry_window = { workspace = true }

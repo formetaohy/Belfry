@@ -1,0 +1,65 @@
+[package]
+name = "belfry_gpu_device"
+version.workspace = true
+edition.workspace = true
+description = "Native DX12, Vulkan and Metal devices, memory, pipelines and submissions"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+belfry_gpu_shader = { workspace = true }
+raw-window-handle = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
+ash = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Dxc",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
+objc2-core-foundation = { workspace = true }
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer"] }
+objc2-metal = { workspace = true, features = [
+    "MTLAllocation",
+    "MTLArgument",
+    "MTLArgumentEncoder",
+    "MTLDataType",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLDrawable",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLSampler",
+    "MTLTypes",
+    "objc2-core-foundation",
+] }
+
+[dev-dependencies]
+bytemuck = { workspace = true }
+belfry_gpu_compiler = { workspace = true }

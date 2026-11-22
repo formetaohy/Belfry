@@ -1,0 +1,13 @@
+[package]
+name = "belfry_image"
+version.workspace = true
+edition.workspace = true
+description = "Mip chains of eight bit RGBA images"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

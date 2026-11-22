@@ -1,0 +1,15 @@
+[package]
+name = "belfry"
+version.workspace = true
+edition.workspace = true
+description = "The Belfry engine executable"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_app = { workspace = true }
+belfry_editor = { workspace = true }

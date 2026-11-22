@@ -1,0 +1,16 @@
+pub mod split {
+    pub const RANGE: u32 = 0;
+    pub const UNIFORM: u32 = 1;
+    pub const PLANE: u32 = 2;
+    pub const SEGMENT: u32 = 3;
+    pub const RAGGED: u32 = 4;
+}
+
+pub mod measure {
+    pub const ELEMENTS: u32 = 0;
+    pub const ROWS: u32 = 1;
+    pub const WORDS: u32 = 2;
+    pub const TOKENS: u32 = 3;
+    pub const TILES: u32 = 4;
+    pub const GROUPS: u32 = 5;
+}

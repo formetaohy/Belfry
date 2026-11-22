@@ -1,0 +1,14 @@
+[package]
+name = "belfry_gpu_layout"
+version.workspace = true
+edition.workspace = true
+description = "Device element formats, record layouts and the layout a record declares"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true

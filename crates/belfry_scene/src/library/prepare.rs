@@ -1,0 +1,721 @@
+use super::AssetError;
+use crate::animation::AnimationEntry;
+use crate::collider::{ColliderRef, ShapeKind};
+use crate::environment::{EnvironmentEntry, EnvironmentSource};
+use crate::image::{ImageEntry, ImageSource};
+use crate::material::MaterialEntry;
+use crate::mesh::{Geometry, MeshEntry};
+use crate::scene::Scene;
+use crate::skin::{SkinData, SkinEntry};
+use crate::sound::SoundEntry;
+use belfry_animation::{Clip, Track};
+use belfry_asset::{Digest, DigestBuilder, Sources};
+use belfry_audio::Sound;
+use belfry_environment::{Atmosphere, Panorama};
+use belfry_gltf::Model;
+use belfry_math::Mat4;
+use belfry_physics::TriangleMesh;
+use belfry_png::Image;
+use belfry_radiance::Radiance;
+use belfry_render::{AddressMode, Filter, SamplerDesc, SkinVertexRecord, Vertex};
+use std::any::Any;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+const ATMOSPHERE_WIDTH: u32 = 1024;
+
+pub(super) struct ImageBytes {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) rgba: Vec<u8>,
+}
+
+pub(super) struct MeshData {
+    pub(super) vertices: Vec<Vertex>,
+    pub(super) skin: Option<Vec<SkinVertexRecord>>,
+    pub(super) shape: Option<Arc<TriangleMesh>>,
+}
+
+pub(super) struct Models<'a> {
+    scene: &'a Scene,
+    loaded: HashMap<String, Result<Model, String>>,
+    digests: HashMap<(String, Scope), Result<Digest, String>>,
+    cache: HashMap<String, CachedModel>,
+}
+
+#[derive(Clone)]
+pub(super) struct CachedModel {
+    path: PathBuf,
+    file: Digest,
+    buffers: Vec<PathBuf>,
+    images: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Scope {
+    Geometry,
+    Image,
+}
+
+pub(super) struct Prepare<'scene> {
+    pub(super) images: ImageCache,
+    pub(super) models: Models<'scene>,
+    pub(super) sources: Sources,
+}
+
+pub(super) type ImageCache = HashMap<String, Arc<ImageBytes>>;
+
+impl<'scene> Prepare<'scene> {
+    pub(super) fn new(
+        scene: &'scene Scene,
+        sources: Sources,
+        cache: HashMap<String, CachedModel>,
+    ) -> Self {
+        Self {
+            images: ImageCache::new(),
+            models: Models::new(scene, cache),
+            sources,
+        }
+    }
+}
+
+impl Models<'_> {
+    fn new(scene: &Scene, cache: HashMap<String, CachedModel>) -> Models<'_> {
+        Models {
+            scene,
+            loaded: HashMap::new(),
+            digests: HashMap::new(),
+            cache,
+        }
+    }
+
+    pub(super) fn take_cache(&mut self) -> HashMap<String, CachedModel> {
+        std::mem::take(&mut self.cache)
+    }
+
+    pub(super) fn retain(&mut self) {
+        let held = self
+            .scene
+            .models()
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<HashSet<_>>();
+        self.cache.retain(|id, _| held.contains(id.as_str()));
+    }
+
+    pub(super) fn digest(
+        &mut self,
+        id: &str,
+        scope: Scope,
+        sources: &mut Sources,
+        files: &mut BTreeSet<PathBuf>,
+    ) -> Result<Digest, String> {
+        let key = (String::from(id), scope);
+        if let Some(held) = self.digests.get(&key) {
+            return held.clone();
+        }
+        let held = self.digest_uncached(id, scope, sources, files);
+        self.digests.insert(key, held.clone());
+        held
+    }
+
+    fn digest_uncached(
+        &mut self,
+        id: &str,
+        scope: Scope,
+        sources: &mut Sources,
+        files: &mut BTreeSet<PathBuf>,
+    ) -> Result<Digest, String> {
+        let entry = self
+            .scene
+            .model(id)
+            .ok_or_else(|| format!("the scene holds no model {id}"))?;
+        let path = self.scene.root().join(&entry.path);
+        files.insert(path.clone());
+        let file = sources.digest(&path)?;
+        let external = match self.cache.get(id) {
+            Some(held) if held.path == path && held.file == file => {
+                (held.buffers.clone(), held.images.clone())
+            }
+            _ => {
+                let held = Model::sources(&path);
+                self.cache.insert(
+                    String::from(id),
+                    CachedModel {
+                        path: path.clone(),
+                        file,
+                        buffers: held.buffers.clone(),
+                        images: held.images.clone(),
+                    },
+                );
+                (held.buffers, held.images)
+            }
+        };
+        let mut digest = Digest::builder();
+        digest
+            .text("model")
+            .text(match scope {
+                Scope::Geometry => "geometry",
+                Scope::Image => "image",
+            })
+            .text(id)
+            .text(&path.to_string_lossy())
+            .digest(file);
+        for source in external.0 {
+            files.insert(source.clone());
+            digest.digest(sources.digest(&source)?);
+        }
+        if scope == Scope::Image {
+            for source in external.1 {
+                files.insert(source.clone());
+                digest.digest(sources.digest(&source)?);
+            }
+        }
+        Ok(digest.finish())
+    }
+
+    pub(super) fn load(&mut self, id: &str, sources: &mut Sources) -> Result<&Model, String> {
+        if !self.loaded.contains_key(id) {
+            let held = self.load_uncached(id, sources);
+            self.loaded.insert(String::from(id), held);
+        }
+        match self
+            .loaded
+            .get(id)
+            .expect("a loaded model keeps the slot it was asked for")
+        {
+            Ok(model) => Ok(model),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    fn load_uncached(&self, id: &str, sources: &mut Sources) -> Result<Model, String> {
+        let entry = self
+            .scene
+            .model(id)
+            .ok_or_else(|| format!("the scene holds no model {id}"))?;
+        let path = self.scene.root().join(&entry.path);
+        let (_, bytes) = sources.read(&path)?;
+        catch_unwind(AssertUnwindSafe(|| Model::parse(&bytes, &path)))
+            .map_err(|payload| panic_message(payload.as_ref()))
+    }
+}
+
+pub(super) fn validate_material(entry: &MaterialEntry) -> Result<(), String> {
+    let asset = &entry.asset;
+    let unit = |value: f32| (0.0..=1.0).contains(&value);
+    if !unit(asset.base_color.x) || !unit(asset.base_color.y) || !unit(asset.base_color.z) {
+        return Err(format!(
+            "the material {} holds the base color {:?} outside the unit cube",
+            entry.id, asset.base_color,
+        ));
+    }
+    if !unit(asset.alpha) {
+        return Err(format!(
+            "the material {} holds the alpha {} outside the unit range",
+            entry.id, asset.alpha,
+        ));
+    }
+    if !unit(asset.alpha_cutoff) {
+        return Err(format!(
+            "the material {} holds the alpha cutoff {} outside the unit range",
+            entry.id, asset.alpha_cutoff,
+        ));
+    }
+    if !unit(asset.metallic) {
+        return Err(format!(
+            "the material {} holds the metallic {} outside the unit range",
+            entry.id, asset.metallic,
+        ));
+    }
+    if !(asset.roughness > 0.0 && asset.roughness <= 1.0) {
+        return Err(format!(
+            "the material {} holds the roughness {} outside the scatter range",
+            entry.id, asset.roughness,
+        ));
+    }
+    if !(asset.normal_scale.is_finite() && asset.normal_scale >= 0.0) {
+        return Err(format!(
+            "the material {} holds the normal scale {} outside the scale range",
+            entry.id, asset.normal_scale,
+        ));
+    }
+    if !unit(asset.occlusion_strength) {
+        return Err(format!(
+            "the material {} holds the occlusion strength {} outside the unit range",
+            entry.id, asset.occlusion_strength,
+        ));
+    }
+    if !asset.emissive.x.is_finite()
+        || !asset.emissive.y.is_finite()
+        || !asset.emissive.z.is_finite()
+        || asset.emissive.x < 0.0
+        || asset.emissive.y < 0.0
+        || asset.emissive.z < 0.0
+    {
+        return Err(format!(
+            "the material {} emits the light {:?}",
+            entry.id, asset.emissive,
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn image_source(
+    entry: &ImageEntry,
+    scene: &Scene,
+    sources: &mut Sources,
+    files: &mut BTreeSet<PathBuf>,
+    models: &mut Models<'_>,
+) -> Result<Digest, String> {
+    match &entry.source {
+        ImageSource::Path(path) => {
+            let file = scene.root().join(path);
+            files.insert(file.clone());
+            sources.digest(&file)
+        }
+        ImageSource::Model { model, .. } => {
+            models.digest(model.as_str(), Scope::Image, sources, files)
+        }
+    }
+}
+
+pub(super) fn image_data_of(
+    scene: &Scene,
+    id: &str,
+    images: &mut ImageCache,
+    models: &mut Models<'_>,
+    sources: &mut Sources,
+) -> Result<Arc<ImageBytes>, String> {
+    if let Some(held) = images.get(id) {
+        return Ok(Arc::clone(held));
+    }
+    let entry = scene
+        .image(id)
+        .ok_or_else(|| format!("the scene holds no image {id}"))?;
+    let bytes = match &entry.source {
+        ImageSource::Path(path) => {
+            let file = scene.root().join(path);
+            let (_, bytes) = sources.read(&file)?;
+            let decoded = catch_unwind(AssertUnwindSafe(|| {
+                Image::decode(&bytes, &format!("the image {id}"))
+            }))
+            .map_err(|payload| panic_message(payload.as_ref()))?;
+            ImageBytes {
+                width: decoded.width(),
+                height: decoded.height(),
+                rgba: decoded.rgba().to_vec(),
+            }
+        }
+        ImageSource::Model { model, image } => {
+            let held = models.load(model.as_str(), sources)?;
+            let image = held.images.get(*image as usize).ok_or_else(|| {
+                format!("the image {id} reads the image {image} of the model {model}")
+            })?;
+            ImageBytes {
+                width: image.width(),
+                height: image.height(),
+                rgba: image.rgba().to_vec(),
+            }
+        }
+    };
+    if bytes.width == 0 || bytes.height == 0 {
+        return Err(format!("the image {id} spans no texel"));
+    }
+    let bytes = Arc::new(bytes);
+    images.insert(String::from(id), Arc::clone(&bytes));
+    Ok(bytes)
+}
+
+pub(super) fn mesh_data(
+    entry: &MeshEntry,
+    wanted: bool,
+    models: &mut Models<'_>,
+    sources: &mut Sources,
+) -> Result<MeshData, String> {
+    let (vertices, skin) = match &entry.asset.geometry {
+        Geometry::Shape(shape) => (shape.vertices(), None),
+        Geometry::Vertices(vertices) => (vertices.clone(), None),
+        Geometry::Model {
+            model,
+            mesh,
+            primitive,
+        } => {
+            let held = models.load(model.as_str(), sources)?;
+            let mesh = held.meshes.get(*mesh as usize).ok_or_else(|| {
+                format!(
+                    "the mesh {} reads the mesh {mesh} of the model {model}",
+                    entry.id
+                )
+            })?;
+            let primitive = mesh.primitives.get(*primitive as usize).ok_or_else(|| {
+                format!(
+                    "the mesh {} reads the primitive {primitive} of the model {model}",
+                    entry.id,
+                )
+            })?;
+            (primitive.vertices.clone(), primitive.skin.clone())
+        }
+    };
+    if vertices.is_empty() {
+        return Err(format!("the mesh {} holds no vertex", entry.id));
+    }
+    let shape = if wanted {
+        let points = positions(&vertices);
+        Some(Arc::new(
+            catch_unwind(AssertUnwindSafe(|| TriangleMesh::from_positions(&points)))
+                .map_err(|payload| panic_message(payload.as_ref()))?,
+        ))
+    } else {
+        None
+    };
+    Ok(MeshData {
+        vertices,
+        skin,
+        shape,
+    })
+}
+
+pub(super) fn skin_data(entry: &SkinEntry, model: &Model) -> Result<SkinData, String> {
+    let held = model
+        .skins
+        .get(entry.asset.index() as usize)
+        .ok_or_else(|| {
+            format!(
+                "the skin {} reads the skin {} of the model {}",
+                entry.id,
+                entry.asset.index(),
+                entry.asset.model_of(),
+            )
+        })?;
+    if held.inverse_binds.len() != entry.asset.joints().len() {
+        return Err(format!(
+            "the skin {} maps {} joints onto a model skin of {}",
+            entry.id,
+            entry.asset.joints().len(),
+            held.inverse_binds.len(),
+        ));
+    }
+    let inverse_binds: Arc<[Mat4]> = Arc::from(held.inverse_binds.clone());
+    Ok(SkinData::new(entry.asset.joints().to_vec(), inverse_binds))
+}
+
+pub(super) fn animation_data(entry: &AnimationEntry, model: &Model) -> Result<Arc<Clip>, String> {
+    let held = model
+        .animations
+        .get(entry.asset.index() as usize)
+        .ok_or_else(|| {
+            format!(
+                "the animation {} reads the animation {} of the model {}",
+                entry.id,
+                entry.asset.index(),
+                entry.asset.model_of(),
+            )
+        })?;
+    if held.channels.len() != entry.asset.targets().len() {
+        return Err(format!(
+            "the animation {} maps {} channels to {} targets",
+            entry.id,
+            held.channels.len(),
+            entry.asset.targets().len(),
+        ));
+    }
+    let tracks = catch_unwind(AssertUnwindSafe(|| {
+        held.channels
+            .iter()
+            .zip(entry.asset.targets())
+            .map(|(channel, target)| {
+                Track::new(
+                    target.as_str(),
+                    channel.property,
+                    channel.interpolation,
+                    channel.times.clone(),
+                    channel.values.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    }))
+    .map_err(|payload| panic_message(payload.as_ref()))?;
+    if tracks.is_empty() {
+        return Err(format!("the animation {} holds no track", entry.id));
+    }
+    Ok(Arc::new(Clip::new(tracks)))
+}
+
+pub(super) fn sound_data(
+    scene: &Scene,
+    entry: &SoundEntry,
+    sources: &mut Sources,
+) -> Result<belfry_audio::Source, String> {
+    let file = scene.root().join(&entry.path);
+    if entry.stream {
+        return catch_unwind(AssertUnwindSafe(|| belfry_audio::Source::stream(file)))
+            .map_err(|payload| panic_message(payload.as_ref()))?;
+    }
+    let (_, bytes) = sources.read(&file)?;
+    let sound = catch_unwind(AssertUnwindSafe(|| {
+        Sound::decode(&bytes, &format!("the sound {}", file.display()))
+    }))
+    .map_err(|payload| panic_message(payload.as_ref()))?;
+    Ok(belfry_audio::Source::decoded(Arc::new(sound)))
+}
+
+pub(super) fn environment_data(
+    scene: &Scene,
+    entry: &EnvironmentEntry,
+    sources: &mut Sources,
+) -> Result<belfry_environment::Prefiltered, String> {
+    match &entry.source {
+        EnvironmentSource::Panorama(path) => {
+            let file = scene.root().join(path);
+            let (_, bytes) = sources.read(&file)?;
+            let radiance = catch_unwind(AssertUnwindSafe(|| {
+                Radiance::decode(&bytes, &format!("the environment {}", file.display()))
+            }))
+            .map_err(|payload| panic_message(payload.as_ref()))?;
+            let panorama = Panorama::new(radiance.width(), radiance.height(), radiance.rgb());
+            catch_unwind(AssertUnwindSafe(|| belfry_environment::filter(&panorama)))
+                .map_err(|payload| panic_message(payload.as_ref()))
+        }
+        EnvironmentSource::Atmosphere(atmosphere) => atmosphere_data(atmosphere),
+    }
+}
+
+fn atmosphere_data(atmosphere: &Atmosphere) -> Result<belfry_environment::Prefiltered, String> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let (radiance, sky) = atmosphere.panoramas(ATMOSPHERE_WIDTH);
+        belfry_environment::filter_with_sky(&radiance, &sky)
+    }))
+    .map_err(|payload| panic_message(payload.as_ref()))
+}
+
+pub(super) fn atmosphere_fingerprint(atmosphere: &Atmosphere) -> Digest {
+    let mut fingerprint = Digest::builder();
+    fingerprint
+        .text("atmosphere")
+        .number(u64::from(belfry_environment::MODEL_VERSION))
+        .number(atmosphere.sun_elevation.to_bits() as u64)
+        .number(atmosphere.sun_azimuth.to_bits() as u64)
+        .number(atmosphere.sun_intensity.to_bits() as u64)
+        .number(atmosphere.rayleigh.to_bits() as u64)
+        .number(atmosphere.mie.to_bits() as u64)
+        .number(atmosphere.mie_anisotropy.to_bits() as u64)
+        .number(atmosphere.ozone.to_bits() as u64)
+        .number(atmosphere.ground_albedo.x.to_bits() as u64)
+        .number(atmosphere.ground_albedo.y.to_bits() as u64)
+        .number(atmosphere.ground_albedo.z.to_bits() as u64)
+        .number(atmosphere.altitude.to_bits() as u64);
+    fingerprint.finish()
+}
+
+pub(super) fn environment_fingerprint(entry: &EnvironmentEntry, digest: Option<Digest>) -> Digest {
+    let mut fingerprint = Digest::builder();
+    fingerprint.text("environment").text(&entry.id);
+    if let Some(path) = entry.panorama() {
+        fingerprint.text(&path.to_string_lossy());
+    }
+    match digest {
+        Some(digest) => fingerprint.digest(digest),
+        None => fingerprint.number(0),
+    };
+    fingerprint.finish()
+}
+
+pub(super) fn collided_meshes(scene: &Scene) -> HashSet<String> {
+    scene
+        .nodes()
+        .iter()
+        .filter_map(|node| node.component::<ColliderRef>())
+        .filter(|collider| collider.shape == ShapeKind::Mesh)
+        .filter_map(|collider| collider.mesh.as_ref())
+        .map(|mesh| String::from(mesh.as_str()))
+        .collect()
+}
+
+fn positions(vertices: &[Vertex]) -> Vec<[f32; 3]> {
+    vertices.iter().map(|vertex| vertex.position).collect()
+}
+
+pub(super) fn fail(
+    errors: &mut Vec<AssetError>,
+    kind: &'static str,
+    id: &str,
+    message: String,
+    fatal: bool,
+) {
+    errors.push(AssetError {
+        kind,
+        id: String::from(id),
+        message,
+        fatal,
+    });
+}
+
+pub(super) fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return String::from(*text);
+    }
+    String::from("the asset fails")
+}
+
+pub(super) fn image_fingerprint(entry: &ImageEntry, source: Option<Digest>) -> Digest {
+    let mut digest = Digest::builder();
+    digest.text("image").text(&entry.id);
+    match source {
+        Some(source) => digest.digest(source),
+        None => digest.number(0),
+    };
+    sampler_digest(&mut digest, entry.sampler);
+    digest.finish()
+}
+
+pub(super) fn material_fingerprint(entry: &MaterialEntry, images: &[Digest]) -> Digest {
+    let asset = &entry.asset;
+    let mut digest = Digest::builder();
+    digest.text("material").text(&entry.id);
+    digest
+        .number(asset.base_color.x.to_bits() as u64)
+        .number(asset.base_color.y.to_bits() as u64)
+        .number(asset.base_color.z.to_bits() as u64)
+        .number(asset.alpha.to_bits() as u64)
+        .text(asset.alpha_mode.name())
+        .number(asset.alpha_cutoff.to_bits() as u64)
+        .number(asset.metallic.to_bits() as u64)
+        .number(asset.roughness.to_bits() as u64)
+        .number(asset.normal_scale.to_bits() as u64)
+        .number(asset.occlusion_strength.to_bits() as u64)
+        .number(asset.emissive.x.to_bits() as u64)
+        .number(asset.emissive.y.to_bits() as u64)
+        .number(asset.emissive.z.to_bits() as u64);
+    for image in asset.images() {
+        match image {
+            Some(image) => digest.text(image.as_str()),
+            None => digest.number(0),
+        };
+    }
+    for image in images {
+        digest.digest(*image);
+    }
+    digest.finish()
+}
+
+pub(super) fn mesh_fingerprint(entry: &MeshEntry, model: Option<Digest>, wanted: bool) -> Digest {
+    let mut digest = Digest::builder();
+    digest.text("mesh").text(&entry.id);
+    match &entry.asset.geometry {
+        Geometry::Shape(shape) => {
+            digest.text("shape").text(shape.name());
+        }
+        Geometry::Vertices(vertices) => {
+            digest.text("vertices").number(vertices.len() as u64);
+            for vertex in vertices {
+                vertex_digest(&mut digest, vertex);
+            }
+        }
+        Geometry::Model {
+            model,
+            mesh,
+            primitive,
+        } => {
+            digest
+                .text("model")
+                .text(model.as_str())
+                .number(*mesh as u64)
+                .number(*primitive as u64);
+        }
+    }
+    match model {
+        Some(model) => digest.digest(model),
+        None => digest.number(0),
+    };
+    digest.number(wanted as u64).finish()
+}
+
+pub(super) fn skin_fingerprint(entry: &SkinEntry, model: Option<Digest>) -> Digest {
+    let mut digest = Digest::builder();
+    digest
+        .text("skin")
+        .text(&entry.id)
+        .text(entry.asset.model_of().as_str())
+        .number(entry.asset.index() as u64);
+    for joint in entry.asset.joints() {
+        digest.text(joint.as_str());
+    }
+    match model {
+        Some(model) => digest.digest(model),
+        None => digest.number(0),
+    };
+    digest.finish()
+}
+
+pub(super) fn animation_fingerprint(entry: &AnimationEntry, model: Option<Digest>) -> Digest {
+    let mut digest = Digest::builder();
+    digest
+        .text("animation")
+        .text(&entry.id)
+        .text(entry.asset.model_of().as_str())
+        .number(entry.asset.index() as u64);
+    for target in entry.asset.targets() {
+        digest.text(target.as_str());
+    }
+    match model {
+        Some(model) => digest.digest(model),
+        None => digest.number(0),
+    };
+    digest.finish()
+}
+
+pub(super) fn sound_fingerprint(entry: &SoundEntry, digest: Option<Digest>) -> Digest {
+    let mut fingerprint = Digest::builder();
+    fingerprint
+        .text("sound")
+        .text(&entry.id)
+        .text(&entry.path.to_string_lossy())
+        .number(u64::from(entry.stream));
+    match digest {
+        Some(digest) => fingerprint.digest(digest),
+        None => fingerprint.number(0),
+    };
+    fingerprint.finish()
+}
+
+fn sampler_digest(digest: &mut DigestBuilder, sampler: SamplerDesc) {
+    digest
+        .number(filter_code(sampler.min_filter))
+        .number(filter_code(sampler.mag_filter))
+        .number(filter_code(sampler.mip_filter))
+        .number(address_code(sampler.address_u))
+        .number(address_code(sampler.address_v));
+}
+
+fn filter_code(filter: Filter) -> u64 {
+    match filter {
+        Filter::Nearest => 0,
+        Filter::Linear => 1,
+    }
+}
+
+fn address_code(mode: AddressMode) -> u64 {
+    match mode {
+        AddressMode::ClampToEdge => 0,
+        AddressMode::Repeat => 1,
+        AddressMode::MirrorRepeat => 2,
+    }
+}
+
+fn vertex_digest(digest: &mut DigestBuilder, vertex: &Vertex) {
+    for value in vertex.position {
+        digest.number(value.to_bits() as u64);
+    }
+    for value in vertex.normal {
+        digest.number(value.to_bits() as u64);
+    }
+    for value in vertex.uv {
+        digest.number(value.to_bits() as u64);
+    }
+}

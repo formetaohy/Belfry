@@ -1,0 +1,17 @@
+[package]
+name = "belfry_compute_profile"
+version.workspace = true
+edition.workspace = true
+description = "Compute workgroup and matrix tile configurations"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_compute_abi = { workspace = true }

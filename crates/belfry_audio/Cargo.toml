@@ -1,0 +1,16 @@
+[package]
+name = "belfry_audio"
+version.workspace = true
+edition.workspace = true
+description = "Mixes decoded sounds through a bus graph, spatializes them and plays them through the native audio device"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_audio_device = { workspace = true }
+belfry_ecs = { workspace = true }
+belfry_math = { workspace = true }
+lewton = { workspace = true }

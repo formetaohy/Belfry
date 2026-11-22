@@ -1,0 +1,26 @@
+[package]
+name = "belfry_editor"
+version.workspace = true
+edition.workspace = true
+description = "The Belfry scene editor"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_animation = { workspace = true }
+belfry_ecs = { workspace = true }
+belfry_gpu_device = { workspace = true }
+belfry_hierarchy = { workspace = true }
+belfry_math = { workspace = true }
+belfry_physics = { workspace = true }
+belfry_png = { workspace = true }
+belfry_render = { workspace = true }
+belfry_text = { workspace = true }
+belfry_toml = { workspace = true }
+belfry_scene = { workspace = true }
+belfry_ui = { workspace = true }
+belfry_ui_window = { workspace = true }
+belfry_window = { workspace = true }

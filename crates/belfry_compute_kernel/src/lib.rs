@@ -1,0 +1,484 @@
+mod authored;
+mod dot;
+mod dot_pair;
+mod dot_quad;
+mod fetch;
+mod pointwise;
+mod scheduler;
+mod substrate;
+mod tables;
+mod task;
+
+use belfry_compute_abi::{
+    DeviceModule, Distribution, Element, FP4_BLOCK, INT4_BLOCK, Kind, MEASURE, NO_VALUE, PATCH,
+    PLACEMENT, RECORDS, Refusal, TENSOR, control, measure, refusal, split, store, strategy,
+};
+use belfry_compute_profile::{CLAIM_BYTES, Geometry};
+use belfry_gpu_compiler::{Compiler, ast};
+use belfry_gpu_shader::{BindingKind, BindingSpec, ComputeProgram, ShaderBinding};
+use tables::{MEASURE_WORDS, PATCH_WORDS, field_word};
+
+pub use tables::Tables;
+
+pub const TASKS: u32 = 0;
+pub const VALUES: u32 = 1;
+pub const HEAP: u32 = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Banks {
+    count: u32,
+    shift: u32,
+}
+
+impl Banks {
+    pub const SINGLE: Self = Self { count: 1, shift: 0 };
+
+    pub fn of(count: u32, shift: u32) -> Self {
+        assert!(count >= 1, "a heap spans no bank");
+        if count == 1 {
+            return Self::SINGLE;
+        }
+        assert!(
+            shift < 32,
+            "a bank of {} words beyond the device word address splits no address",
+            1u64 << shift,
+        );
+        Self { count, shift }
+    }
+
+    pub const fn count(self) -> u32 {
+        self.count
+    }
+
+    pub const fn shift(self) -> u32 {
+        self.shift
+    }
+}
+
+pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
+pub const BINDINGS_OF_PAGES: u32 = 1;
+
+pub const fn binding_count(banks: Banks, paged: bool) -> u32 {
+    BINDINGS_WITHOUT_HEAP + banks.count() + paged as u32 * BINDINGS_OF_PAGES
+}
+
+pub const fn pages(banks: Banks) -> u32 {
+    HEAP + banks.count()
+}
+
+pub const fn state(banks: Banks, paged: bool) -> u32 {
+    pages(banks) + paged as u32
+}
+
+pub const fn steps(banks: Banks, paged: bool) -> u32 {
+    state(banks, paged) + 1
+}
+
+pub const fn segments(banks: Banks, paged: bool) -> u32 {
+    steps(banks, paged) + 1
+}
+
+pub const fn successors(banks: Banks, paged: bool) -> u32 {
+    segments(banks, paged) + 1
+}
+
+pub const fn tables(banks: Banks, paged: bool) -> u32 {
+    successors(banks, paged) + 1
+}
+
+pub const fn bank_ceiling(slots: u32) -> u32 {
+    slots.saturating_sub(BINDINGS_WITHOUT_HEAP)
+}
+
+const _: () = assert!(binding_count(Banks::SINGLE, false) == tables(Banks::SINGLE, false) + 1);
+const _: () = assert!(binding_count(Banks::SINGLE, true) == tables(Banks::SINGLE, true) + 1);
+
+pub struct KernelBinding {
+    pub binding: u32,
+    pub kind: BindingKind,
+    pub name: String,
+    pub element: &'static str,
+    pub array: bool,
+}
+
+fn binding(
+    binding: u32,
+    kind: BindingKind,
+    name: &str,
+    element: &'static str,
+    array: bool,
+) -> KernelBinding {
+    KernelBinding {
+        binding,
+        kind,
+        name: name.to_owned(),
+        element,
+        array,
+    }
+}
+
+pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding> {
+    let records = if authored {
+        BindingKind::TableStorage
+    } else {
+        BindingKind::ReadOnlyStorage
+    };
+    let mut list = vec![
+        binding(TASKS, records, "tasks", "Task", true),
+        binding(VALUES, records, "values", "Value", true),
+    ];
+    for bank in 0..banks.count() {
+        list.push(binding(
+            HEAP + bank,
+            BindingKind::ReadWriteStorage,
+            &format!("heap{bank}"),
+            "f32",
+            true,
+        ));
+    }
+    if paged {
+        list.push(binding(
+            pages(banks),
+            BindingKind::ReadOnlyStorage,
+            "pages",
+            "u32",
+            true,
+        ));
+    }
+    list.push(binding(
+        state(banks, paged),
+        BindingKind::ReadWriteStorage,
+        "state",
+        "AtomicU32",
+        true,
+    ));
+    list.push(binding(
+        steps(banks, paged),
+        BindingKind::ReadOnlyStorage,
+        "steps",
+        "Step",
+        true,
+    ));
+    list.push(binding(
+        segments(banks, paged),
+        BindingKind::ReadOnlyStorage,
+        "segments",
+        "Segment",
+        true,
+    ));
+    list.push(binding(
+        successors(banks, paged),
+        BindingKind::ReadOnlyStorage,
+        "successors",
+        "u32",
+        true,
+    ));
+    list.push(binding(
+        tables(banks, paged),
+        records,
+        "tables",
+        "u32",
+        true,
+    ));
+    let slots = binding_count(banks, paged);
+    assert_eq!(
+        list.len() as u32,
+        slots,
+        "a program binds the {slots} storage buffers its slots name",
+    );
+    list
+}
+
+pub struct Kernel {
+    kinds: Vec<Kind>,
+    geometry: Geometry,
+    paged: bool,
+    program: ComputeProgram,
+}
+
+pub struct KernelRequest<'a> {
+    pub kinds: &'a [Kind],
+    pub elements: &'a [Element],
+    pub matmul_elements: &'a [Element],
+    pub geometry: Geometry,
+    pub strategies: u32,
+    pub authored: bool,
+    pub banks: Banks,
+    pub paged: bool,
+    pub gated: bool,
+    pub tables: Tables,
+}
+
+impl Kernel {
+    pub fn assemble(request: KernelRequest<'_>) -> Self {
+        let KernelRequest {
+            kinds,
+            elements,
+            matmul_elements,
+            geometry,
+            strategies,
+            authored,
+            banks,
+            paged,
+            gated,
+            tables,
+        } = request;
+        assert!(
+            !kinds.is_empty(),
+            "a device program with no task has nothing to run"
+        );
+        assert!(
+            !elements.is_empty(),
+            "a device program with no tensor has nothing to address"
+        );
+        let mut compiler = Compiler::empty();
+        for record in RECORDS {
+            compiler.record(*record);
+        }
+        compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
+        compiler.constant("SCHEDULER_GATED", u32::from(gated));
+        compiler.constant("NO_VALUE", NO_VALUE);
+        compiler.constant("NO_SLOT", belfry_compute_abi::NO_SLOT);
+        compiler.constant("EXACT_WALK_LIMIT", belfry_compute_abi::EXACT_WALK_LIMIT);
+        compiler.constant("INT4_BLOCK", INT4_BLOCK);
+        compiler.constant("FP4_BLOCK", FP4_BLOCK);
+        compiler.constant("PAGE_SHIFT", belfry_compute_abi::PAGE_SHIFT);
+        compiler.constant("PAGE_MASK", belfry_compute_abi::PAGE_MASK as u32);
+        compiler.constant("NO_PAGE", belfry_compute_abi::NO_PAGE);
+        compiler.constant("refusal::TENSOR", TENSOR);
+        compiler.constant("refusal::KIND_BITS", refusal::KIND_BITS);
+        compiler.constant("refusal::CODE_BITS", refusal::CODE_BITS);
+        for refusal in Refusal::ALL {
+            compiler.constant(
+                &format!("refusal::{}", refusal.name().to_uppercase()),
+                refusal.code(),
+            );
+        }
+        compiler.constant("store::TENSORS", store::TENSORS);
+        compiler.constant("store::WEIGHTS", store::WEIGHTS);
+        for (name, value) in [
+            ("PLACEMENT_FIRST", tables.placement()),
+            ("PLACEMENT_TENSORS", field_word(&PLACEMENT, "tensors")),
+            ("PLACEMENT_WEIGHTS", field_word(&PLACEMENT, "weights")),
+            ("EXTENTS_FIRST", tables.extents()),
+            ("MEASURES_FIRST", tables.measures_first()),
+            ("PATCHES_FIRST", tables.patches_first()),
+            ("PATCH_LIST_FIRST", tables.list_first()),
+            ("MEASURE_WORDS", MEASURE_WORDS),
+            ("PATCH_WORDS", PATCH_WORDS),
+            ("MEASURE_KIND", field_word(&MEASURE, "kind")),
+            ("MEASURE_VALUE", field_word(&MEASURE, "value")),
+            ("MEASURE_ROWS", field_word(&MEASURE, "rows")),
+            ("MEASURE_COLUMNS", field_word(&MEASURE, "columns")),
+            ("PATCH_SLOTS", field_word(&PATCH, "slots")),
+            ("PATCH_SLOTS_COUNT", field_word(&PATCH, "slots_count")),
+            ("PATCH_COUNT", field_word(&PATCH, "count")),
+            ("PATCH_SEGMENT", field_word(&PATCH, "segment")),
+            ("PATCH_VALUES", field_word(&PATCH, "values")),
+            ("PATCH_VALUES_COUNT", field_word(&PATCH, "values_count")),
+            ("PATCH_TASKS", field_word(&PATCH, "tasks")),
+            ("PATCH_TASKS_COUNT", field_word(&PATCH, "tasks_count")),
+        ] {
+            compiler.constant(name, value);
+        }
+        for element in Element::ALL {
+            compiler.constant(element.symbol(), element.code());
+        }
+        for (name, value) in [
+            ("strategy::THREAD_ROW", strategy::THREAD_ROW),
+            ("strategy::WORKGROUP_ROW", strategy::WORKGROUP_ROW),
+            ("strategy::THREAD_ELEMENT", strategy::THREAD_ELEMENT),
+            ("strategy::WEIGHT_CHUNK", strategy::WEIGHT_CHUNK),
+            ("strategy::WEIGHT_FOLD", strategy::WEIGHT_FOLD),
+            ("strategy::FRAME", strategy::FRAME),
+            ("strategy::INDEX", strategy::INDEX),
+            ("strategy::INPUT_CHUNK", strategy::INPUT_CHUNK),
+            ("strategy::INPUT_FOLD", strategy::INPUT_FOLD),
+            ("strategy::WORKGROUP_SPREAD", strategy::WORKGROUP_SPREAD),
+        ] {
+            compiler.constant(name, value);
+        }
+        for (name, value) in [
+            ("measure::ELEMENTS", measure::ELEMENTS),
+            ("measure::ROWS", measure::ROWS),
+            ("measure::GROUPS", measure::GROUPS),
+            ("measure::WORDS", measure::WORDS),
+            ("measure::TOKENS", measure::TOKENS),
+            ("measure::TILES", measure::TILES),
+            ("split::RANGE", split::RANGE),
+            ("split::UNIFORM", split::UNIFORM),
+            ("split::PLANE", split::PLANE),
+            ("split::SEGMENT", split::SEGMENT),
+            ("split::RAGGED", split::RAGGED),
+        ] {
+            compiler.constant(name, value);
+        }
+        for (name, value) in [
+            ("control::REFUSAL", control::REFUSAL),
+            ("control::CURSOR", control::CURSOR),
+            ("control::TAIL", control::TAIL),
+            ("control::COUNT", control::COUNT),
+            ("control::FIRST", control::FIRST),
+            ("control::QUEUE", control::QUEUE),
+            ("control::GENERATION", control::GENERATION),
+            ("control::WAVES", control::WAVES),
+            ("control::WAVE_TABLE", control::WAVE_TABLE),
+            ("control::PREFIX", control::PREFIX),
+            ("control::PREFIX_LOCK", control::PREFIX_LOCK),
+            ("control::COUNTERS", control::COUNTERS),
+            ("control::ENTRY_SHIFT", control::ENTRY_SHIFT),
+            ("control::ENTRY_MASK", control::ENTRY_MASK),
+        ] {
+            compiler.constant(name, value);
+        }
+        for kind in Kind::ALL {
+            compiler.constant(kind.symbol(), kind.code());
+        }
+        for distribution in Distribution::ALL {
+            compiler.constant(distribution.symbol(), distribution.code());
+        }
+        for binding in bindings(authored, banks, paged) {
+            let spec = BindingSpec {
+                group: 0,
+                binding: binding.binding,
+                kind: binding.kind,
+                count: 1,
+            };
+            if binding.array {
+                compiler.storage_array(&binding.name, binding.element, spec);
+            } else {
+                compiler.storage_record(&binding.name, binding.element, spec);
+            }
+        }
+        compiler.workgroup_bytes("claim", "u32", CLAIM_BYTES);
+        let scratch = geometry.scratch_bytes(kinds);
+        if scratch > 0 {
+            compiler.workgroup_bytes("scratch", "f32", scratch);
+        }
+        let half = geometry.scratch_half_bytes();
+        if half > 0 {
+            compiler.workgroup_bytes("scratch_half", "f16", half);
+        }
+        authored::install(&mut compiler, authored);
+        scheduler::install(&mut compiler);
+        substrate::install(&mut compiler, banks, paged);
+        fetch::install(&mut compiler, elements);
+        dot::install(&mut compiler, matmul_elements);
+        pointwise::install(&mut compiler);
+        task::rope::install(&mut compiler);
+        task::clear::install(&mut compiler);
+        task::norm::install(&mut compiler);
+        for module in DeviceModule::ALL {
+            if kinds.iter().any(|kind| kind.carries(*module)) {
+                install(&mut compiler, *module, elements, &geometry, strategies);
+            }
+        }
+        for kind in Kind::ALL {
+            compiler.insert_case(
+                "run_task",
+                ast::Arm {
+                    pattern: ast::Pattern::Constant(kind.symbol().to_owned()),
+                    body: vec![ast::Statement::Expression(ast::Expression::call(
+                        kind.entry(),
+                        vec![ast::Expression::name("task"), ast::Expression::name("lid")],
+                    ))],
+                },
+            );
+        }
+        let enabled = kinds
+            .iter()
+            .map(|kind| kind.symbol().to_owned())
+            .collect::<Vec<_>>();
+        compiler.retain_cases("run_task", &enabled);
+        let declared = compiler.declared_workgroup_bytes();
+        assert_eq!(
+            declared,
+            geometry.workgroup_bytes(kinds),
+            "a device program declares {declared} bytes of workgroup scratch where its geometry accounts for {}",
+            geometry.workgroup_bytes(kinds),
+        );
+        assert!(
+            declared <= geometry.budget(),
+            "a device program of {} kinds declares {declared} bytes of workgroup scratch beyond the {} its profile offers",
+            kinds.len(),
+            geometry.budget(),
+        );
+        let program = compiler.finish(
+            &format!(
+                "belfry kernel {} threads over {} tiles and {} kinds",
+                geometry.workgroup(),
+                geometry.walked().len(),
+                kinds.len()
+            ),
+            scheduler::ENTRY,
+            geometry.workgroup(),
+        );
+        for (expected, reflected) in bindings(authored, banks, paged)
+            .iter()
+            .zip(program.reflected())
+        {
+            assert_eq!(
+                expected.name, reflected.name,
+                "a device binding has an incorrect name"
+            );
+        }
+        Self {
+            kinds: kinds.to_vec(),
+            geometry,
+            paged,
+            program,
+        }
+    }
+
+    pub fn kinds(&self) -> &[Kind] {
+        &self.kinds
+    }
+
+    pub fn paged(&self) -> bool {
+        self.paged
+    }
+
+    pub fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
+    pub fn bindings(&self) -> &[ShaderBinding] {
+        self.program.reflected()
+    }
+
+    pub fn workgroup_size(&self) -> u32 {
+        self.program.workgroup_size()
+    }
+
+    pub fn program(&self) -> ComputeProgram {
+        self.program.clone()
+    }
+}
+
+fn install(
+    compiler: &mut Compiler,
+    module: DeviceModule,
+    elements: &[Element],
+    geometry: &Geometry,
+    strategies: u32,
+) {
+    match module {
+        DeviceModule::Matmul => task::matmul::install(compiler),
+        DeviceModule::MatmulTiles => task::matmul::install_tiles(compiler, geometry),
+        DeviceModule::MatmulWeight => task::matmul_weight::install(compiler, geometry),
+        DeviceModule::Attention => task::attention::install(compiler, geometry),
+        DeviceModule::Reduce => task::reduce::install(compiler, strategies),
+        DeviceModule::Softmax => task::softmax::install(compiler),
+        DeviceModule::Choice => task::choice::install(compiler, geometry),
+        DeviceModule::Select => task::select::install(compiler),
+        DeviceModule::Conv => task::conv::install(compiler, geometry),
+        DeviceModule::Scatter => task::scatter::install(compiler, elements),
+        DeviceModule::Layout => task::layout::install(compiler),
+        DeviceModule::Pool => task::pool::install(compiler),
+        DeviceModule::Convert => task::convert::install(compiler, elements),
+        DeviceModule::Scan => task::scan::install(compiler),
+        DeviceModule::Rows => task::rows::install(compiler),
+        DeviceModule::Noise => task::noise::install(compiler),
+        DeviceModule::Delta => task::delta::install(compiler),
+    }
+}

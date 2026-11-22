@@ -1,0 +1,200 @@
+use belfry_gpu_compiler::Compiler;
+
+pub(crate) fn install(compiler: &mut Compiler) {
+    device::define(compiler);
+}
+
+#[belfry_gpu_compiler::module]
+mod device {
+    fn rope_position(task: Task, at: uvec4) -> u32 {
+        if task.origin == NO_VALUE {
+            return 0u32;
+        }
+        let cursor = values[task.origin];
+        let held = uvec4(
+            select(0u32, at.x, cursor.dims.x > 1u32),
+            select(0u32, at.y, cursor.dims.y > 1u32),
+            0u32,
+            0u32,
+        );
+        let raw = fetch(cursor, read_address(held, cursor.strides));
+        if trunc(raw) != raw || !(raw >= 0.0) || !(raw < 4294967296.0) {
+            refuse(task.kind, refusal::ORIGIN, 0u32);
+            return 0u32;
+        }
+        return u32(raw);
+    }
+
+    fn rope_base(task: Task) -> f32 {
+        if task.knob == NO_VALUE {
+            return 10000.0;
+        }
+        let base = fetch(values[task.knob], 0u32);
+        if !finite(base) || !(base > 1.0) {
+            refuse(task.kind, refusal::KNOB, 0u32);
+            return 10000.0;
+        }
+        return base;
+    }
+
+    fn rope_channel(at: uvec4) -> u32 {
+        return at.w / 2u32;
+    }
+
+    fn rope_pair(at: uvec4, high: bool) -> uvec4 {
+        return uvec4(at.x, at.y, at.z, select(at.w + 1u32, at.w - 1u32, high));
+    }
+
+    fn rope_angle(position: u32, channel: u32, width: u32, base: f32) -> f32 {
+        return f32(position) * pow(base, -2.0 * f32(channel) / f32(width));
+    }
+
+    fn run_rope(task: Task, lid: u32) {
+        let source = values[task.a];
+        let output = values[task.out];
+        let dims = output.dims;
+        let base = rope_base(task);
+        if task.segment != NO_VALUE {
+            if task.count == 0u32 {
+                return;
+            }
+            let start = axis_start(values[task.segment], task.plane, dims.z + 1u32, kind::ROPE);
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                for column in stride(lid, dims.w, WORKGROUP_SIZE) {
+                    let at = uvec4(0u32, 0u32, start + row, column);
+                    let high = (column & 1u32) == 1u32;
+                    let angle = rope_angle(
+                        rope_position(task, at) + row,
+                        rope_channel(at),
+                        dims.w,
+                        base,
+                    );
+                    let value = fetch(source, read_address(at, source.strides));
+                    let pair = rope_pair(at, high);
+                    let partner = fetch(source, read_address(pair, source.strides));
+                    let cosine = cos(angle);
+                    let sine = sin(angle);
+                    publish(
+                        output,
+                        read_address(at, output.strides),
+                        chained(
+                            task,
+                            at,
+                            select(
+                                value * cosine - partner * sine,
+                                value * cosine + partner * sine,
+                                high,
+                            ),
+                        ),
+                    );
+                }
+            }
+            return;
+        }
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let at = coordinates(index, dims);
+            let high = (at.w & 1u32) == 1u32;
+            let angle = rope_angle(
+                rope_position(task, at) + at.z,
+                rope_channel(at),
+                dims.w,
+                base,
+            );
+            let value = fetch(source, read_address(at, source.strides));
+            let pair = rope_pair(at, high);
+            let partner = fetch(source, read_address(pair, source.strides));
+            let cosine = cos(angle);
+            let sine = sin(angle);
+            publish(
+                output,
+                index,
+                chained(
+                    task,
+                    at,
+                    select(
+                        value * cosine - partner * sine,
+                        value * cosine + partner * sine,
+                        high,
+                    ),
+                ),
+            );
+        }
+    }
+
+    fn run_rope_grad(task: Task, lid: u32) {
+        let source = values[task.a];
+        let output = values[task.out];
+        let dims = output.dims;
+        let base = rope_base(task);
+        if task.segment != NO_VALUE {
+            if task.count == 0u32 {
+                return;
+            }
+            let start = axis_start(
+                values[task.segment],
+                task.plane,
+                dims.z + 1u32,
+                kind::ROPE_GRAD,
+            );
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                for column in stride(lid, dims.w, WORKGROUP_SIZE) {
+                    let at = uvec4(0u32, 0u32, start + row, column);
+                    let high = (column & 1u32) == 1u32;
+                    let angle = rope_angle(
+                        rope_position(task, at) + row,
+                        rope_channel(at),
+                        dims.w,
+                        base,
+                    );
+                    let value = fetch(source, read_address(at, source.strides));
+                    let pair = rope_pair(at, high);
+                    let partner = fetch(source, read_address(pair, source.strides));
+                    let cosine = cos(angle);
+                    let sine = sin(angle);
+                    publish(
+                        output,
+                        read_address(at, output.strides),
+                        chained(
+                            task,
+                            at,
+                            select(
+                                value * cosine + partner * sine,
+                                value * cosine - partner * sine,
+                                high,
+                            ),
+                        ),
+                    );
+                }
+            }
+            return;
+        }
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let at = coordinates(index, dims);
+            let high = (at.w & 1u32) == 1u32;
+            let angle = rope_angle(
+                rope_position(task, at) + at.z,
+                rope_channel(at),
+                dims.w,
+                base,
+            );
+            let value = fetch(source, read_address(at, source.strides));
+            let pair = rope_pair(at, high);
+            let partner = fetch(source, read_address(pair, source.strides));
+            let cosine = cos(angle);
+            let sine = sin(angle);
+            publish(
+                output,
+                index,
+                chained(
+                    task,
+                    at,
+                    select(
+                        value * cosine + partner * sine,
+                        value * cosine - partner * sine,
+                        high,
+                    ),
+                ),
+            );
+        }
+    }
+}

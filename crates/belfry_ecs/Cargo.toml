@@ -1,0 +1,10 @@
+[package]
+name = "belfry_ecs"
+version.workspace = true
+edition.workspace = true
+description = "Entities, component columns and systems"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

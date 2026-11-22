@@ -1,0 +1,15 @@
+[package]
+name = "belfry_physics"
+version.workspace = true
+edition.workspace = true
+description = "Rigid bodies, their convex colliders and the solver a world steps through"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+belfry_ecs = { workspace = true }
+belfry_hierarchy = { workspace = true }
+belfry_math = { workspace = true }

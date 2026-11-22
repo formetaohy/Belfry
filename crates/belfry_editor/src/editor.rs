@@ -1,0 +1,1038 @@
+use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command as Process};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use belfry_gpu_device::{GpuContext, GpuRequest, Submission, WindowHandle};
+use belfry_math::{Quat, Rect, Transform, Vec2, Vec3};
+use belfry_scene::{
+    MaterialAsset, MaterialEntry, MeshAsset, MeshEntry, Node, Registry, Scene, Shape, Target,
+    Value, Watch,
+};
+use belfry_window::{
+    Event, Flow, Handler, KeyCode, ModifiersState, MouseButton, Window, WindowConfig,
+    run as run_window,
+};
+
+use crate::camera::{self, Orbit};
+use crate::gizmo::{self, Grip, Mode, Space};
+use crate::history::History;
+use crate::message::Message;
+use crate::panel::Panels;
+use crate::preview::Preview;
+use crate::session::Session;
+use crate::shell::{self, View};
+
+const SCENE_CLEAR: [f32; 4] = [0.055, 0.068, 0.095, 1.0];
+
+pub struct EditorConfig {
+    pub window: WindowConfig,
+    pub scene: PathBuf,
+    pub registry: Arc<Registry>,
+    pub debug: bool,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            window: WindowConfig::new("Belfry Editor", 1440, 900),
+            scene: PathBuf::from("scene.toml"),
+            registry: Arc::new(Registry::default()),
+            debug: false,
+        }
+    }
+}
+
+pub fn run(config: EditorConfig) {
+    let mut config = config;
+    config.window.minimum_size.get_or_insert((720, 480));
+    let window = config.window.clone();
+    run_window(window, Editor::new(config));
+}
+
+struct DragState {
+    drag: gizmo::Drag,
+    node: usize,
+    before: Scene,
+    started: bool,
+}
+
+pub struct Editor {
+    scene: Scene,
+    path: PathBuf,
+    selected: Option<Target>,
+    dirty: bool,
+    status: String,
+    error: Option<String>,
+    child: Option<Child>,
+    orbit: Orbit,
+    mode: Mode,
+    space: Space,
+    debug: bool,
+    panels: Panels,
+    collapsed: HashSet<String>,
+    session: Option<Session>,
+    history: History,
+    drag: Option<DragState>,
+    camera_drag: Option<MouseButton>,
+    viewport: Rect,
+    pointer: Vec2,
+    import: String,
+    prefab: String,
+    watch: Option<Watch>,
+    modifiers: ModifiersState,
+    origin: Instant,
+    hover: Option<Grip>,
+    viewport_texture: Option<belfry_gpu_device::Texture>,
+}
+
+impl Editor {
+    fn new(config: EditorConfig) -> Self {
+        let path = config.scene;
+        let registry = config.registry;
+        let exists = path.exists();
+        let scene = if exists {
+            Scene::load_with(&path, registry.clone())
+        } else {
+            crate::default::scene(&path, registry.clone())
+        };
+        let selected = scene
+            .nodes()
+            .iter()
+            .find(|node| node.has_component("mesh"))
+            .or_else(|| scene.nodes().first())
+            .map(|node| Target::Node(node.id.clone()));
+        let watch = Watch::new(&path, &scene);
+        Self {
+            scene,
+            path,
+            selected,
+            dirty: !exists,
+            status: if exists {
+                String::from("Loaded")
+            } else {
+                String::from("New scene")
+            },
+            error: None,
+            child: None,
+            orbit: Orbit::default(),
+            mode: Mode::Translate,
+            space: Space::World,
+            debug: config.debug,
+            panels: Panels::default(),
+            collapsed: HashSet::new(),
+            session: None,
+            history: History::default(),
+            drag: None,
+            camera_drag: None,
+            viewport: Rect::ZERO,
+            pointer: Vec2::ZERO,
+            import: String::new(),
+            prefab: String::new(),
+            watch: Some(watch),
+            modifiers: ModifiersState::default(),
+            origin: Instant::now(),
+            hover: None,
+            viewport_texture: None,
+        }
+    }
+
+    fn open(&mut self, window: &Window) {
+        let request = GpuRequest {
+            surface: Some(WindowHandle::of(
+                window.window_handle(),
+                window.display_handle(),
+            )),
+            ..Default::default()
+        };
+        let context = GpuContext::open(&request)
+            .unwrap_or_else(|error| panic!("the editor opens its render device: {error}"));
+        let (width, height) = window.size();
+        assert!(
+            width > 0 && height > 0,
+            "a window of {width} by {height} presents no surface"
+        );
+        let surface = context.device().surface(width, height);
+        let mut preview = Preview::new(&context, &self.scene);
+        preview.set_debug(self.debug);
+        self.session = Some(Session::new(context, surface, preview));
+        window.set_title(&format!("Belfry Editor - {}", self.path.display()));
+    }
+
+    fn selected_node(&self) -> Option<usize> {
+        match self.selected.as_ref()? {
+            Target::Node(id) => self.scene.node_index(id),
+            _ => None,
+        }
+    }
+
+    fn selection_origin(&self) -> Vec3 {
+        self.selected_node()
+            .map(|index| self.scene.world_transform(index).translation)
+            .unwrap_or(Vec3::ZERO)
+    }
+
+    fn basis(&self, index: usize) -> [Vec3; 3] {
+        let rotation = if self.mode == Mode::Scale || self.space == Space::Local {
+            self.scene.world_transform(index).rotation
+        } else {
+            Quat::IDENTITY
+        };
+        [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| rotation.rotate_vec3(axis))
+    }
+
+    fn target(&self) -> gizmo::Target {
+        gizmo::Target {
+            camera: camera::editor(),
+            view: self.orbit.view(),
+            viewport: self.viewport,
+        }
+    }
+
+    fn save(&mut self) {
+        self.scene.save(&self.path);
+        self.watch = Some(Watch::new(&self.path, &self.scene));
+        self.dirty = false;
+        self.status = format!("Saved {}", self.path.display());
+    }
+
+    fn reload(&mut self) {
+        let registry = self.scene.registry_arc();
+        let loaded = catch_unwind(AssertUnwindSafe(|| Scene::load_with(&self.path, registry)));
+        match loaded {
+            Ok(scene) => {
+                self.scene = scene;
+                self.history.reset();
+                self.dirty = false;
+                self.status = format!("Reloaded {}", self.path.display());
+                self.watch = Some(Watch::new(&self.path, &self.scene));
+                self.clamp();
+                self.refresh_preview();
+            }
+            Err(_) => {
+                self.error = Some(format!("{} holds no readable scene", self.path.display()));
+            }
+        }
+    }
+
+    fn reload_if_changed(&mut self) {
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        let Some(change) = watch.changed() else {
+            return;
+        };
+        if change.scene {
+            let registry = self.scene.registry_arc();
+            if let Ok(scene) =
+                catch_unwind(AssertUnwindSafe(|| Scene::load_with(&self.path, registry)))
+            {
+                self.scene = scene;
+                self.history.reset();
+                self.dirty = false;
+                self.status = String::from("Reloaded from disk");
+                self.clamp();
+                self.refresh_preview();
+            }
+        } else if change.model {
+            self.refresh_preview();
+        }
+        self.watch = Some(Watch::new(&self.path, &self.scene));
+    }
+
+    fn clamp(&mut self) {
+        let held = self.selected.clone();
+        if let Some(target) = held
+            && !self.scene.holds(&target)
+        {
+            self.selected = None;
+        }
+    }
+
+    fn apply_edit(&mut self, target: &Target) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        match target {
+            Target::Node(id) => match self.scene.node_index(id) {
+                Some(index) => session.preview.apply(&self.scene, index),
+                None => {
+                    session.preview.refresh(&self.scene);
+                }
+            },
+            _ => {
+                session.preview.refresh(&self.scene);
+            }
+        }
+    }
+
+    fn refresh_preview(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.preview.refresh(&self.scene);
+            session.register_textures();
+        }
+    }
+
+    fn record(&mut self, before: Scene) {
+        if self.scene != before {
+            self.history.record(before, self.scene.clone());
+            self.dirty = true;
+        }
+    }
+
+    fn undo(&mut self) {
+        self.drag = None;
+        if self.history.undo(&mut self.scene) {
+            self.dirty = true;
+            self.status = String::from("Undo");
+            self.clamp();
+            self.refresh_preview();
+        }
+    }
+
+    fn redo(&mut self) {
+        self.drag = None;
+        if self.history.redo(&mut self.scene) {
+            self.dirty = true;
+            self.status = String::from("Redo");
+            self.clamp();
+            self.refresh_preview();
+        }
+    }
+
+    fn play(&mut self) {
+        if self.child.is_some() {
+            return;
+        }
+        self.save();
+        let scene = self.path.canonicalize().unwrap_or_else(|error| {
+            panic!(
+                "the scene {} resolves no path: {error}",
+                self.path.display()
+            )
+        });
+        let executable = std::env::current_exe().expect("the editor names its own executable");
+        let mut process = Process::new(executable);
+        process.arg("--play").arg(&scene);
+        if self.debug {
+            process.arg("--debug");
+        }
+        let child = process
+            .spawn()
+            .unwrap_or_else(|error| panic!("the editor starts its player: {error}"));
+        self.child = Some(child);
+        self.status = String::from("Playing");
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.status = String::from("Stopped");
+        }
+    }
+
+    fn poll(&mut self) {
+        let exited = self
+            .child
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_some());
+        if exited {
+            self.child = None;
+            self.status = String::from("Player exited");
+        }
+    }
+
+    fn add_node(&mut self, kind: &str) {
+        if !matches!(kind, "mesh" | "camera" | "sun" | "lamp" | "empty") {
+            self.error = Some(format!("the editor adds no {kind}"));
+            return;
+        }
+        let before = self.scene.clone();
+        if kind == "mesh" {
+            if self.scene.meshes().is_empty() {
+                let id = unique_asset(&self.scene, "mesh", "cube");
+                self.scene
+                    .meshes_mut()
+                    .push(MeshEntry::new(id, MeshAsset::shape(Shape::Cube)));
+            }
+            if self.scene.materials().is_empty() {
+                let id = unique_asset(&self.scene, "material", "grey");
+                self.scene
+                    .materials_mut()
+                    .push(MaterialEntry::new(id, MaterialAsset::grey()));
+            }
+        }
+        let mut node = match kind {
+            "mesh" => {
+                crate::default::mesh(&self.scene.meshes()[0].id, &self.scene.materials()[0].id)
+            }
+            "camera" => crate::default::camera(),
+            "sun" => crate::default::sun(),
+            "lamp" => crate::default::lamp(),
+            _ => Node::new(""),
+        };
+        let parent = match &self.selected {
+            Some(Target::Node(id)) if self.scene.node_index(id).is_some() => Some(id.clone()),
+            _ => None,
+        };
+        node.id = match &parent {
+            Some(parent) => self.scene.child_id(parent, kind),
+            None => unique_node(&self.scene, kind),
+        };
+        let target = match &parent {
+            Some(parent) => self.scene.insert_child(parent, node),
+            None => self.scene.insert_node(node),
+        };
+        match target {
+            Ok(target) => {
+                self.record(before);
+                self.selected = Some(target);
+                self.status = format!("Added {kind}");
+                self.refresh_preview();
+            }
+            Err(error) => {
+                self.scene = before;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn add_asset(&mut self, kind: &str) {
+        let before = self.scene.clone();
+        let created = match kind {
+            "mesh" => {
+                let id = unique_asset(&self.scene, "mesh", "mesh");
+                self.scene.add_mesh(&id, Shape::Cube)
+            }
+            "material" => {
+                let id = unique_asset(&self.scene, "material", "material");
+                self.scene.add_material(&id)
+            }
+            "graph" => {
+                let id = unique_asset(&self.scene, "graph", "graph");
+                self.scene.add_graph(&id)
+            }
+            "image" => {
+                let id = unique_asset(&self.scene, "image", "image");
+                self.scene.add_image(&id, &self.import)
+            }
+            "sound" => {
+                let id = unique_asset(&self.scene, "sound", "sound");
+                self.scene.add_sound(&id, &self.import)
+            }
+            "environment" => {
+                let id = unique_asset(&self.scene, "environment", "environment");
+                self.scene.add_environment(&id, &self.import)
+            }
+            other => {
+                self.error = Some(format!("the editor adds no {other} asset"));
+                return;
+            }
+        };
+        match created {
+            Ok(target) => {
+                self.record(before);
+                self.selected = Some(target);
+                self.status = format!("Added {kind}");
+                self.refresh_preview();
+            }
+            Err(error) => {
+                self.scene = before;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn import(&mut self, path: &str) {
+        if path.is_empty() {
+            self.error = Some(String::from("the editor imports no path"));
+            return;
+        }
+        let id = model_id(&self.scene, path);
+        let before = self.scene.clone();
+        match self.scene.import_model(&id, path, None) {
+            Ok(target) => {
+                self.record(before);
+                self.selected = Some(target);
+                self.status = format!("Imported {path}");
+                self.refresh_preview();
+            }
+            Err(error) => {
+                self.scene = before;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn prefab(&mut self, path: &str) {
+        if path.is_empty() {
+            self.error = Some(String::from("the editor instantiates no path"));
+            return;
+        }
+        let name = PathBuf::from(path)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.chars()
+                    .filter(|held| held.is_ascii_alphanumeric() || *held == '_' || *held == '-')
+                    .collect::<String>()
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| String::from("prefab"));
+        let parent = match &self.selected {
+            Some(Target::Node(id)) if self.scene.node_index(id).is_some() => Some(id.clone()),
+            _ => None,
+        };
+        let id = match &parent {
+            Some(parent) => self.scene.child_id(parent, &name),
+            None => unique_node(&self.scene, &name),
+        };
+        let before = self.scene.clone();
+        let inserted = match &parent {
+            Some(parent) => self.scene.insert_child(parent, Node::instance(&id, path)),
+            None => self.scene.add_instance(&id, path),
+        };
+        match inserted {
+            Ok(target) => {
+                self.record(before);
+                self.selected = Some(target);
+                self.status = format!("Instantiated {path}");
+                self.refresh_preview();
+            }
+            Err(error) => {
+                self.scene = before;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn remove(&mut self) {
+        let Some(target) = self.selected.clone() else {
+            return;
+        };
+        let parent = match &target {
+            Target::Node(id) => self
+                .scene
+                .node_index(id)
+                .and_then(|index| self.scene.parent_index(index))
+                .map(|index| Target::Node(self.scene.nodes()[index].id.clone())),
+            _ => None,
+        };
+        let before = self.scene.clone();
+        match self.scene.remove(&target) {
+            Ok(()) => {
+                self.record(before);
+                self.selected = parent;
+                self.status = format!("Removed {target}");
+                self.drag = None;
+                self.refresh_preview();
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn apply(&mut self, message: Message) {
+        self.error = None;
+        match message {
+            Message::Save => self.save(),
+            Message::Reload => self.reload(),
+            Message::Undo => self.undo(),
+            Message::Redo => self.redo(),
+            Message::Play => self.play(),
+            Message::Stop => self.stop(),
+            Message::Mode(mode) => self.mode = mode,
+            Message::ToggleSpace => self.space = self.space.toggled(),
+            Message::Focus => {
+                if let Some(index) = self.selected_node() {
+                    self.orbit
+                        .focus(self.scene.world_transform(index).translation);
+                    self.status = String::from("Focused");
+                }
+            }
+            Message::Select(target) => {
+                if self.scene.holds(&target) {
+                    self.selected = Some(target);
+                }
+            }
+            Message::AddNode(kind) => self.add_node(kind),
+            Message::AddAsset(kind) => self.add_asset(kind),
+            Message::Remove => self.remove(),
+            Message::AddComponent(target, name) => {
+                let before = self.scene.clone();
+                match self.scene.set_property(&target, &name, &Value::Bool(true)) {
+                    Ok(_) => {
+                        self.record(before);
+                        self.status = format!("Added {name}");
+                        self.refresh_preview();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::RemoveComponent(target, name) => {
+                let before = self.scene.clone();
+                match self.scene.set_property(&target, &name, &Value::Bool(false)) {
+                    Ok(_) => {
+                        self.record(before);
+                        self.status = format!("Removed {name}");
+                        self.refresh_preview();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::Property {
+                target,
+                path,
+                value,
+            } => {
+                let before = self.scene.clone();
+                match self.scene.set_property(&target, &path, &value) {
+                    Ok(_) => {
+                        self.record(before);
+                        self.apply_edit(&target);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::Import(path) => self.import(&path),
+            Message::Prefab(path) => self.prefab(&path),
+            Message::Pane(pane) => self.panels.toggle(pane),
+            Message::Debug(enabled) => {
+                self.debug = enabled;
+                if let Some(session) = &mut self.session {
+                    session.preview.set_debug(enabled);
+                }
+            }
+            Message::Expand(id) => {
+                self.collapsed.remove(&id);
+            }
+            Message::Collapse(id) => {
+                self.collapsed.insert(id);
+            }
+        }
+    }
+
+    fn frame(&mut self, window: &Window, real: Duration) -> Flow {
+        self.poll();
+        self.reload_if_changed();
+        let (width, height) = window.size();
+        if window.is_minimized() || width == 0 || height == 0 {
+            return Flow::Continue;
+        }
+        let scale = window.scale_factor() as f32;
+        let logical = Vec2::new(width as f32 / scale, height as f32 / scale);
+        let time = self.origin.elapsed().as_secs_f64();
+        let messages = {
+            let Some(session) = self.session.as_mut() else {
+                return Flow::Continue;
+            };
+            if session.preview.poll().is_some() {
+                session.register_textures();
+            }
+            session.preview.advance(real);
+            session.ui.update(logical, scale, time)
+        };
+        for message in messages {
+            self.apply(message);
+        }
+        let camera = self.orbit.view();
+        let origin = self.selection_origin();
+        let index = self.selected_node();
+        let basis = index.map_or([Vec3::X, Vec3::Y, Vec3::Z], |index| self.basis(index));
+        self.update_hover();
+        let view = View {
+            scene: &self.scene,
+            selected: self.selected.as_ref(),
+            path: &self.path,
+            status: &self.status,
+            dirty: self.dirty,
+            playing: self.child.is_some(),
+            mode: self.mode,
+            space: self.space,
+            panels: self.panels,
+            debug: self.debug,
+            import: &self.import,
+            prefab: &self.prefab,
+            collapsed: &self.collapsed,
+            camera,
+            origin,
+            basis,
+            hover: self.hover,
+            active: self.drag.as_ref().map(|drag| drag.drag.grip()),
+            error: self.error.as_deref(),
+        };
+        let viewport = {
+            let Some(session) = self.session.as_mut() else {
+                return Flow::Continue;
+            };
+            let element = {
+                let ctx = session.ui.build();
+                shell::shell(&ctx, &view)
+            };
+            session.ui.present(element);
+            session.ui.bounds("viewport").unwrap_or_default()
+        };
+        self.viewport = viewport;
+        if viewport.is_empty() {
+            return Flow::Continue;
+        }
+        let texture_width = (viewport.width() * scale).round().max(1.0) as u32;
+        let texture_height = (viewport.height() * scale).round().max(1.0) as u32;
+        let stale = self
+            .viewport_texture
+            .as_ref()
+            .is_none_or(|held| held.width() != texture_width || held.height() != texture_height);
+        let session = self
+            .session
+            .as_mut()
+            .expect("a drawn editor holds its session");
+        if stale {
+            self.viewport_texture = Some(belfry_gpu_device::Texture::new(
+                session.context.device(),
+                "belfry editor viewport",
+                texture_width,
+                texture_height,
+                1,
+                belfry_gpu_device::TextureFormat::Rgba8Unorm,
+                belfry_gpu_device::TextureUsages::RENDER_ATTACHMENT
+                    | belfry_gpu_device::TextureUsages::SAMPLED,
+            ));
+        }
+        let scene = self
+            .viewport_texture
+            .as_ref()
+            .expect("a drawn editor holds its viewport texture");
+        let highlight = index.and_then(|index| session.preview.entity(index));
+        session.preview.set_camera(camera);
+        session.preview.render(scene, SCENE_CLEAR, highlight);
+        if session.surface.width() != width || session.surface.height() != height {
+            session.surface.resize(width, height);
+        }
+        let Some(frame) = session.surface.acquire() else {
+            return Flow::Continue;
+        };
+        let Session {
+            context,
+            preview: _,
+            ui,
+            ..
+        } = session;
+        let mut submission = Submission::new(context.device(), "belfry editor");
+        ui.render(&mut submission, frame.texture(), Some(scene));
+        submission.present(frame);
+        submission.submit(context.queue());
+        Flow::Continue
+    }
+    fn update_hover(&mut self) {
+        let Some(index) = self.selected_node() else {
+            self.hover = None;
+            return;
+        };
+        if !self.viewport.contains(self.pointer) || self.drag.is_some() {
+            self.hover = None;
+            return;
+        }
+        let target = self.target();
+        let handles = target.handles(
+            self.scene.world_transform(index).translation,
+            self.basis(index),
+            self.mode,
+        );
+        self.hover = gizmo::hit(&handles, self.pointer);
+    }
+
+    fn pointer_viewport(&self, x: f32, y: f32, scale: f32) -> Option<Vec2> {
+        let point = Vec2::new(x / scale, y / scale);
+        self.viewport.contains(point).then_some(point)
+    }
+
+    fn gizmo_point(&mut self, point: Vec2) {
+        let Some(state) = self.drag.as_mut() else {
+            return;
+        };
+        let transform = state.drag.transform(point);
+        self.scene.set_transform(state.node, transform);
+        if self.scene != state.before {
+            if state.started {
+                self.history.amend(self.scene.clone());
+            } else {
+                self.history
+                    .record(state.before.clone(), self.scene.clone());
+                state.started = true;
+            }
+            self.dirty = true;
+            if let Some(session) = &mut self.session {
+                session.preview.apply(&self.scene, state.node);
+            }
+        }
+    }
+
+    fn press(&mut self, button: MouseButton, scale: f32) {
+        let Some(point) = self.pointer_viewport(self.pointer.x, self.pointer.y, scale) else {
+            return;
+        };
+        match button {
+            MouseButton::Left if self.modifiers.alt_key() => {
+                self.camera_drag = Some(MouseButton::Left);
+            }
+            MouseButton::Left => {
+                if let Some(index) = self.selected_node() {
+                    let target = self.target();
+                    let handles = target.handles(
+                        self.scene.world_transform(index).translation,
+                        self.basis(index),
+                        self.mode,
+                    );
+                    if let Some(grip) = gizmo::hit(&handles, point) {
+                        let handle = handles
+                            .iter()
+                            .find(|handle| handle.grip == grip)
+                            .expect("a hit gizmo holds its handle");
+                        let transform = self.scene.world_transform(index);
+                        let parent = self
+                            .scene
+                            .parent_index(index)
+                            .map_or(Transform::IDENTITY, |parent| {
+                                self.scene.world_transform(parent)
+                            });
+                        self.drag = Some(DragState {
+                            drag: gizmo::begin(target, handle, self.mode, transform, parent, point),
+                            node: index,
+                            before: self.scene.clone(),
+                            started: false,
+                        });
+                        return;
+                    }
+                }
+                self.pick(scale);
+            }
+            MouseButton::Middle => self.camera_drag = Some(MouseButton::Middle),
+            MouseButton::Right => self.camera_drag = Some(MouseButton::Right),
+            _ => {}
+        }
+    }
+
+    fn pick(&mut self, scale: f32) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let point = (self.pointer - self.viewport.min) * scale;
+        match session.preview.pick(point) {
+            Some(index) => {
+                if let Some(node) = self.scene.nodes().get(index) {
+                    self.selected = Some(Target::Node(node.id.clone()));
+                }
+            }
+            None => self.selected = None,
+        }
+    }
+
+    fn release(&mut self, button: MouseButton) {
+        if self.camera_drag == Some(button) {
+            self.camera_drag = None;
+        }
+        if button == MouseButton::Left && self.drag.is_some() {
+            self.drag = None;
+            self.refresh_preview();
+        }
+    }
+
+    fn moved(&mut self, delta: Vec2, scale: f32) {
+        let Some(point) = self.pointer_viewport(self.pointer.x, self.pointer.y, scale) else {
+            return;
+        };
+        if let Some(button) = self.camera_drag {
+            match button {
+                MouseButton::Middle => self.orbit.pan(delta),
+                _ => self.orbit.rotate(delta),
+            }
+            return;
+        }
+        if self.drag.is_some() {
+            self.gizmo_point(point);
+        }
+    }
+
+    fn wheel(&mut self, delta: f32, scale: f32) {
+        if self
+            .pointer_viewport(self.pointer.x, self.pointer.y, scale)
+            .is_some()
+        {
+            self.orbit.zoom(delta);
+        }
+    }
+
+    fn shortcut(&mut self, code: KeyCode, scale: f32) -> bool {
+        let command = self.modifiers.control_key() || self.modifiers.super_key();
+        match code {
+            KeyCode::KeyS if command => self.apply(Message::Save),
+            KeyCode::KeyZ if command => {
+                if self.modifiers.shift_key() {
+                    self.apply(Message::Redo);
+                } else {
+                    self.apply(Message::Undo);
+                }
+            }
+            KeyCode::KeyY if command => self.apply(Message::Redo),
+            KeyCode::F5 => {
+                if self.child.is_some() {
+                    self.apply(Message::Stop);
+                } else {
+                    self.apply(Message::Play);
+                }
+            }
+            KeyCode::KeyW => self.apply(Message::Mode(Mode::Translate)),
+            KeyCode::KeyE => self.apply(Message::Mode(Mode::Rotate)),
+            KeyCode::KeyR => self.apply(Message::Mode(Mode::Scale)),
+            KeyCode::KeyQ => self.apply(Message::ToggleSpace),
+            KeyCode::KeyF => self.apply(Message::Focus),
+            KeyCode::Delete => self.apply(Message::Remove),
+            _ => {
+                let _ = scale;
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Handler for Editor {
+    fn opened(&mut self, window: &Window) {
+        self.open(window);
+    }
+
+    fn frame(&mut self, window: &Window, real: Duration) -> Flow {
+        self.frame(window, real)
+    }
+
+    fn event(&mut self, window: &Window, event: Event) {
+        let scale = window.scale_factor() as f32;
+        match &event {
+            Event::Modifiers(state) => self.modifiers = *state,
+            Event::Resized { .. } | Event::ScaleFactorChanged { .. } => {
+                let (width, height) = window.size();
+                if let Some(session) = &mut self.session {
+                    session.surface.resize(width, height);
+                }
+            }
+            Event::Key {
+                code,
+                pressed: true,
+                ..
+            } => {
+                let editing = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.ui.editing());
+                if !editing {
+                    self.shortcut(*code, scale);
+                }
+            }
+            Event::CursorMoved { x, y } => {
+                let point = Vec2::new(*x / scale, *y / scale);
+                let delta = point - self.pointer;
+                self.pointer = point;
+                self.moved(delta, scale);
+            }
+            Event::Button { button, pressed } => {
+                if *pressed {
+                    self.press(*button, scale);
+                } else {
+                    self.release(*button);
+                }
+            }
+            Event::Wheel { lines, pixels } => {
+                let delta = if pixels[1] != 0.0 {
+                    -pixels[1] / scale
+                } else {
+                    -lines[1] * 40.0
+                };
+                self.wheel(delta, scale);
+            }
+            _ => {}
+        }
+        if let Some(session) = &mut self.session {
+            belfry_ui_window::handle(session.ui.input_mut(), &event, scale);
+        }
+    }
+
+    fn suspended(&mut self, _window: &Window) -> Flow {
+        Flow::Exit
+    }
+
+    fn closed(&mut self, _window: &Window) {
+        self.stop();
+        self.session = None;
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn unique_node(scene: &Scene, name: &str) -> String {
+    let mut index = 0usize;
+    loop {
+        let candidate = if index == 0 {
+            name.to_owned()
+        } else {
+            format!("{name}_{index}")
+        };
+        if scene.node_index(&candidate).is_none() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn model_id(scene: &Scene, path: &str) -> String {
+    let name = Path::new(path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.chars()
+                .map(|piece| {
+                    if piece.is_ascii_alphanumeric() || piece == '_' || piece == '-' {
+                        piece
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| String::from("model"));
+    unique_asset(scene, "model", &name)
+}
+
+fn unique_asset(scene: &Scene, kind: &str, name: &str) -> String {
+    let mut index = 0usize;
+    loop {
+        let candidate = if index == 0 {
+            name.to_owned()
+        } else {
+            format!("{name}_{index}")
+        };
+        let held = match kind {
+            "mesh" => scene.mesh_index(&candidate).is_some(),
+            "material" => scene.material_index(&candidate).is_some(),
+            "image" => scene.image_index(&candidate).is_some(),
+            "model" => scene.model_index(&candidate).is_some(),
+            "sound" => scene.sound_index(&candidate).is_some(),
+            "environment" => scene.environment_index(&candidate).is_some(),
+            "graph" => scene.graph_index(&candidate).is_some(),
+            other => panic!("the editor names no asset {other}"),
+        };
+        if !held {
+            return candidate;
+        }
+        index += 1;
+    }
+}

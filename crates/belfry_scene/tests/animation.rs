@@ -1,0 +1,198 @@
+use belfry_animation::{AnimationMachine, Clip, Interpolation, Property, Track, advance};
+use belfry_ecs::World;
+use belfry_hierarchy::LocalTransform;
+use belfry_math::Mat4;
+use belfry_scene::{
+    Assets, NodeId, Scene, SceneNode, SkinData, Target, Value, observe_runtime,
+    read_runtime_property, set_runtime_property,
+};
+use belfry_toml::Toml;
+use std::sync::Arc;
+
+struct Mock;
+
+impl Assets for Mock {
+    fn mesh(&self, _id: &str) -> belfry_render::Mesh {
+        panic!("a skinned scene renders no mesh")
+    }
+
+    fn material(&self, _id: &str) -> belfry_render::Material {
+        panic!("a skinned scene renders no material")
+    }
+
+    fn skin(&self, id: &str) -> SkinData {
+        assert_eq!(id, "rig_skin_0");
+        SkinData::new(vec![NodeId::new("joint")], Arc::from([Mat4::IDENTITY]))
+    }
+
+    fn animation(&self, id: &str) -> Arc<Clip> {
+        let (start, end) = match id {
+            "rig_animation_0" => (0.0, 1.0),
+            "rig_animation_1" => (10.0, 11.0),
+            other => panic!("the mock holds no animation {other}"),
+        };
+        Arc::new(Clip::new(vec![Track::new(
+            "joint",
+            Property::Translation,
+            Interpolation::Linear,
+            vec![0.0, 1.0],
+            vec![start, 0.0, 0.0, end, 0.0, 0.0],
+        )]))
+    }
+}
+
+const SCENE: &str = r#"format = "belfry_scene"
+images = []
+meshes = []
+materials = []
+
+[[models]]
+id = "rig"
+path = "rig.glb"
+
+[[skins]]
+id = "rig_skin_0"
+model = "rig"
+skin = 0
+joints = ["joint"]
+
+[[animations]]
+id = "rig_animation_0"
+model = "rig"
+animation = 0
+targets = ["joint"]
+
+[[animations]]
+id = "rig_animation_1"
+model = "rig"
+animation = 1
+targets = ["joint"]
+
+[[graphs]]
+id = "rig_graph"
+entry = "idle"
+
+[[graphs.parameters]]
+name = "walk"
+boolean = false
+
+[[graphs.states]]
+id = "idle"
+clip = "rig_animation_0"
+speed = 1.0
+looped = true
+
+[[graphs.states]]
+id = "walk"
+clip = "rig_animation_1"
+speed = 1.0
+looped = true
+
+[[graphs.transitions]]
+from = "idle"
+to = "walk"
+fade = 0.25
+exit = 0.0
+
+[[graphs.transitions.conditions]]
+parameter = "walk"
+comparison = "equal"
+boolean = true
+
+[[nodes]]
+id = "joint"
+
+[nodes.transform]
+translation = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[[nodes]]
+id = "holder"
+
+[nodes.transform]
+translation = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[nodes.skin]
+skin = "rig_skin_0"
+
+[nodes.animation]
+graph = "rig_graph"
+playing = true
+fade = 0.25
+"#;
+
+#[test]
+fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
+    let scene = Scene::parse(SCENE, ".", "the test scene");
+    let mut world = World::new();
+    let entities = scene.install(&mut world, &Mock);
+    let joint = entities[0];
+    let holder = entities[1];
+    assert!(
+        world
+            .get::<belfry_render::Skin>(holder)
+            .expect("the holder deforms its skin")
+            .joints()
+            .contains(&joint)
+    );
+    assert!(world.get::<AnimationMachine>(holder).is_some());
+    advance(&mut world, 0.5);
+    let held = world
+        .get::<LocalTransform>(joint)
+        .expect("the joint holds its sampled pose");
+    assert!((held.0.translation.x - 0.5).abs() < 1e-3);
+    let target = Target::Node(String::from("holder"));
+    assert_eq!(
+        read_runtime_property(
+            &world,
+            scene.registry(),
+            &target,
+            "animation.parameter.walk"
+        ),
+        Some(Value::Bool(false)),
+    );
+    let observed = Toml::object([("nodes", observe_runtime(&world, scene.registry()))]);
+    let text = observed.write();
+    assert!(text.contains("state = \"idle\""));
+    assert!(text.contains("time = 0.5"));
+    assert!(text.contains("walk = false"));
+    assert!(text.contains("skin = \"rig_skin_0\""));
+    set_runtime_property(
+        &mut world,
+        scene.registry(),
+        &target,
+        "animation.parameter.walk",
+        &Value::Bool(true),
+    )
+    .expect("the runtime raises the walk parameter");
+    advance(&mut world, 0.125);
+    let held = world
+        .get::<LocalTransform>(joint)
+        .expect("the joint holds its sampled pose");
+    assert!((held.0.translation.x - 0.625).abs() < 1e-3);
+    advance(&mut world, 0.125);
+    let held = world
+        .get::<LocalTransform>(joint)
+        .expect("the joint holds its blended pose");
+    assert!((held.0.translation.x - 5.4375).abs() < 1e-3);
+    advance(&mut world, 0.125);
+    let held = world
+        .get::<LocalTransform>(joint)
+        .expect("the joint holds its faded pose");
+    assert!((held.0.translation.x - 10.25).abs() < 1e-3);
+    let observed = Toml::object([("nodes", observe_runtime(&world, scene.registry()))]);
+    let text = observed.write();
+    assert!(text.contains("state = \"walk\""));
+    let written = scene.write();
+    let parsed = Scene::parse(&written, ".", "the written scene");
+    assert_eq!(parsed, scene);
+    assert!(parsed.graph("rig_graph").is_some());
+    assert!(
+        world
+            .iter::<SceneNode>()
+            .any(|(_, node)| node.id == "joint")
+    );
+}

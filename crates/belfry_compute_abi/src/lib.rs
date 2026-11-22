@@ -1,0 +1,52 @@
+pub mod control;
+pub mod digest;
+pub mod kind;
+pub mod noise;
+pub mod page;
+mod placement;
+mod record;
+pub mod refusal;
+pub mod span;
+pub mod store;
+pub mod strategy;
+
+pub use belfry_gpu_layout::{
+    Block, Element, FP4_BLOCK, FieldLayout, FieldType, FloatFormat, INT4_BLOCK, QUANT_BLOCK,
+    Record, RecordLayout, SUPER_BLOCK, SUPER_SCALE_BYTES, SUPER_SMALL_BLOCK, SUPER_SUB_BLOCK,
+    WORD_BYTES,
+};
+pub use digest::Digest;
+pub use kind::{DeviceModule, Geometry, KINDS, Kind, KindInfo};
+pub use noise::Distribution;
+pub use page::{NO_PAGE, PAGE_MASK, PAGE_SHIFT, PAGE_WORDS, pages_of};
+pub use placement::Placement;
+pub use record::{
+    MEASURE, MeasureFields, MeasureRecord, PATCH, PLACEMENT, PatchFields, PatchRecord,
+    PlacementFields, PlacementRecord, RECORDS, SegmentFields, SegmentRecord, StepFields,
+    StepRecord, TASK, TaskFields, TaskRecord, VALUE, ValueFields, ValueRecord,
+};
+pub use refusal::{Refusal, TENSOR};
+pub use span::{measure, split};
+pub use store::Store;
+
+pub const MAX_RANK: u32 = 4;
+pub const DELTA_WIDTH: u32 = 128;
+pub const EXACT_WALK_LIMIT: u32 = 1 << 24;
+pub const REFUSAL_WORDS: u32 = 1;
+pub const NO_VALUE: u32 = u32::MAX;
+pub const NO_SLOT: u32 = u8::MAX as u32;
+pub const CANDIDATES: u32 = 64;
+pub const CHOICE_ROUND: u32 = 4;
+pub const CHOICE_SECTIONS: u32 = 64;
+pub const CHOICE_STREAM: u32 = 4;
+pub const SOFTMAX_STREAM: u32 = 4;
+pub const CHOICE_MERGE_WORDS: u32 = 5 * CHOICE_SECTIONS + 3 * CANDIDATES;
+pub const NORM_RMS: u32 = 0;
+pub const NORM_L2: u32 = 1;
+pub const NORM_LAYER: u32 = 2;
+pub const NORM_GROUP: u32 = 3;
+
+const _: () = assert!(
+    CHOICE_ROUND == MAX_RANK,
+    "a round of the choice family hands back the lanes of one device vector",
+);
