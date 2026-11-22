@@ -177,7 +177,11 @@ pub(crate) fn record_of_cascade(cascade: &Cascade) -> CascadeRecord {
         split: cascade.split,
         texel: cascade.texel,
         depth_span: cascade.depth_span,
+        atlas_texel: cascade.atlas_texel,
         pad0: 0,
+        pad1: 0,
+        pad2: 0,
+        pad3: 0,
     }
 }
 

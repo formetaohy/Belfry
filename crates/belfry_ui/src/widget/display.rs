@@ -11,6 +11,24 @@ use crate::theme::{Level, Role, Theme};
 
 const HEADING_HEIGHT: f32 = 24.0;
 
+pub fn thumbnail<'a, A>(
+    theme: &Theme,
+    texture: &str,
+    width: Length,
+    height: Length,
+    corners: Corners,
+) -> Element<'a, A> {
+    let held = theme.surface(Role::Card, State::Rest);
+    Element::new(Layout {
+        size: Size::new(width, height),
+        ..Layout::row()
+    })
+    .background(held)
+    .view(String::from(texture), move |name, painter, info| {
+        painter.image(info.rect, corners, name, [0.0, 0.0, 1.0, 1.0], Color::WHITE);
+    })
+}
+
 pub fn card<'a, A>(
     theme: &Theme,
     role: Role,

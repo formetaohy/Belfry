@@ -16,6 +16,34 @@ pub(crate) struct Cascade {
     pub(crate) depth_span: f32,
     pub(crate) atlas_origin: Vec2,
     pub(crate) atlas_scale: f32,
+    pub(crate) atlas_texel: f32,
+}
+
+pub(crate) struct Travel {
+    travel: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+impl Travel {
+    pub(crate) fn of(light_transform: Transform) -> Self {
+        let travel = light_transform.rotation.rotate_vec3(-Vec3::Z).normalize();
+        let reference = if travel.y.abs() < REFERENCE_UP_LIMIT {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
+        let right = travel.cross(reference).normalize();
+        Self {
+            travel,
+            right,
+            up: right.cross(travel),
+        }
+    }
+
+    pub(crate) fn direction(&self) -> Vec3 {
+        self.travel
+    }
 }
 
 pub(crate) fn cascades(
@@ -23,7 +51,7 @@ pub(crate) fn cascades(
     transform: Transform,
     aspect: f32,
     light: DirectionalLight,
-    light_transform: Transform,
+    travel: &Travel,
     spheres: &[(Vec3, f32)],
     clip_space: ClipSpace,
 ) -> [Cascade; SHADOW_CASCADES as usize] {
@@ -36,14 +64,6 @@ pub(crate) fn cascades(
     let reach = camera.far.min(light.shadow_distance);
     let eye = transform.translation;
     let forward = transform.rotation.rotate_vec3(-Vec3::Z).normalize();
-    let travel = light_transform.rotation.rotate_vec3(-Vec3::Z).normalize();
-    let reference = if travel.y.abs() < REFERENCE_UP_LIMIT {
-        Vec3::Y
-    } else {
-        Vec3::Z
-    };
-    let right = travel.cross(reference).normalize();
-    let up = right.cross(travel);
     let mut splits = [0.0f32; SHADOW_CASCADES as usize + 1];
     splits[0] = camera.near;
     for (index, split) in splits.iter_mut().enumerate().skip(1) {
@@ -55,7 +75,6 @@ pub(crate) fn cascades(
     let tan_vertical = (camera.vertical_fov * 0.5).tan();
     let tan_horizontal = tan_vertical * aspect;
     let corner = (tan_vertical * tan_vertical + tan_horizontal * tan_horizontal).sqrt();
-    let scale = SHADOW_SIDE as f32 / SHADOW_ATLAS as f32;
     std::array::from_fn(|index| {
         let near = splits[index];
         let far = splits[index + 1];
@@ -68,60 +87,116 @@ pub(crate) fn cascades(
             radius > 0.0 && radius.is_finite(),
             "cascade {index} of {near} to {far} bounds no sphere",
         );
-        let texel = 2.0 * radius / (SHADOW_SIDE as f32 - 2.0);
-        let extent = radius + texel;
-        let center = eye + forward * center_depth;
-        let held_x = right.dot(center);
-        let held_y = up.dot(center);
-        let snapped_x = (held_x / texel).round() * texel;
-        let snapped_y = (held_y / texel).round() * texel;
-        let mut min_depth = f32::INFINITY;
-        let mut max_depth = f32::NEG_INFINITY;
-        for (sphere, sphere_radius) in spheres {
-            let x = right.dot(*sphere);
-            let y = up.dot(*sphere);
-            let depth = travel.dot(*sphere);
-            if x + sphere_radius >= snapped_x - extent
-                && x - sphere_radius <= snapped_x + extent
-                && y + sphere_radius >= snapped_y - extent
-                && y - sphere_radius <= snapped_y + extent
-            {
-                min_depth = min_depth.min(depth - sphere_radius);
-                max_depth = max_depth.max(depth + sphere_radius);
-            }
-        }
-        if min_depth > max_depth {
-            min_depth = travel.dot(center) - extent;
-            max_depth = travel.dot(center) + extent;
-        }
-        let margin = ((max_depth - min_depth) * DEPTH_MARGIN).max(texel);
-        let min_depth = min_depth - margin;
-        let max_depth = max_depth + margin;
-        let span = max_depth - min_depth;
-        assert!(
-            span > 0.0 && span.is_finite(),
-            "cascade {index} spans {span}"
-        );
-        let eye = center
-            - right * (held_x - snapped_x)
-            - up * (held_y - snapped_y)
-            - travel * (travel.dot(center) - min_depth);
-        let view = Mat4::look_at(eye, eye + travel, up);
-        let projection = Mat4::orthographic(-extent, extent, -extent, extent, 0.0, span);
-        let clip = projection * view;
-        let clip = match clip_space {
-            ClipSpace::YUp => clip,
-            ClipSpace::YDown => clip.flip_clip_y(),
-        };
         let column = index as u32 % SHADOW_ATLAS_COLUMNS;
         let row = index as u32 / SHADOW_ATLAS_COLUMNS;
-        Cascade {
-            clip,
-            split: far,
-            texel,
-            depth_span: span,
-            atlas_origin: Vec2::new(column as f32 * scale, row as f32 * scale),
-            atlas_scale: scale,
-        }
+        let scale = SHADOW_SIDE as f32 / SHADOW_ATLAS as f32;
+        fitted(
+            eye + forward * center_depth,
+            radius,
+            travel,
+            spheres,
+            clip_space,
+            Atlas {
+                origin: Vec2::new(column as f32 * scale, row as f32 * scale),
+                scale,
+            },
+            far,
+        )
     })
+}
+
+pub(crate) fn probe(
+    center: Vec3,
+    radius: f32,
+    travel: &Travel,
+    spheres: &[(Vec3, f32)],
+    clip_space: ClipSpace,
+    split: f32,
+) -> Cascade {
+    assert!(
+        radius > 0.0 && radius.is_finite(),
+        "a probe of radius {radius} bounds no shadow volume",
+    );
+    fitted(
+        center,
+        radius,
+        travel,
+        spheres,
+        clip_space,
+        Atlas {
+            origin: Vec2::ZERO,
+            scale: 1.0,
+        },
+        split,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Atlas {
+    pub(crate) origin: Vec2,
+    pub(crate) scale: f32,
+}
+
+fn fitted(
+    center: Vec3,
+    radius: f32,
+    travel: &Travel,
+    spheres: &[(Vec3, f32)],
+    clip_space: ClipSpace,
+    atlas: Atlas,
+    split: f32,
+) -> Cascade {
+    let texel = 2.0 * radius / (SHADOW_SIDE as f32 - 2.0);
+    let extent = radius + texel;
+    let held_x = travel.right.dot(center);
+    let held_y = travel.up.dot(center);
+    let snapped_x = (held_x / texel).round() * texel;
+    let snapped_y = (held_y / texel).round() * texel;
+    let mut min_depth = f32::INFINITY;
+    let mut max_depth = f32::NEG_INFINITY;
+    for (sphere, sphere_radius) in spheres {
+        let x = travel.right.dot(*sphere);
+        let y = travel.up.dot(*sphere);
+        let depth = travel.travel.dot(*sphere);
+        if x + sphere_radius >= snapped_x - extent
+            && x - sphere_radius <= snapped_x + extent
+            && y + sphere_radius >= snapped_y - extent
+            && y - sphere_radius <= snapped_y + extent
+        {
+            min_depth = min_depth.min(depth - sphere_radius);
+            max_depth = max_depth.max(depth + sphere_radius);
+        }
+    }
+    if min_depth > max_depth {
+        min_depth = travel.travel.dot(center) - extent;
+        max_depth = travel.travel.dot(center) + extent;
+    }
+    let margin = ((max_depth - min_depth) * DEPTH_MARGIN).max(texel);
+    let min_depth = min_depth - margin;
+    let max_depth = max_depth + margin;
+    let span = max_depth - min_depth;
+    assert!(
+        span > 0.0 && span.is_finite(),
+        "a shadow volume of radius {radius} spans {span}",
+    );
+    let eye = center
+        - travel.right * (held_x - snapped_x)
+        - travel.up * (held_y - snapped_y)
+        - travel.travel * (travel.travel.dot(center) - min_depth);
+    let view = Mat4::look_at(eye, eye + travel.travel, travel.up);
+    let projection = Mat4::orthographic(-extent, extent, -extent, extent, 0.0, span);
+    let clip = projection * view;
+    let clip = match clip_space {
+        ClipSpace::YUp => clip,
+        ClipSpace::YDown => clip.flip_clip_y(),
+    };
+    Cascade {
+        clip,
+        split,
+        texel,
+        depth_span: span,
+        atlas_origin: atlas.origin,
+        atlas_scale: atlas.scale,
+        atlas_texel: atlas.scale / SHADOW_SIDE as f32,
+    }
 }

@@ -135,6 +135,11 @@ impl Atmosphere {
         }
     }
 
+    pub(crate) fn extinction(&self) -> (Vec3, Vec3, Vec3) {
+        let held = self.parameters();
+        (held.rayleigh, held.mie, held.mie_absorption)
+    }
+
     fn record(&self, vertical: f32, disk: bool) -> AtmosphereRecord {
         let held = self.parameters();
         AtmosphereRecord {

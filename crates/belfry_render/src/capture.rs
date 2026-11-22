@@ -1,8 +1,12 @@
-use crate::abi::{AtlasRecord, DrawRecord, InstanceRecord, SkyRecord, ViewRecord};
+use crate::abi::{
+    AtlasRecord, CASCADE, CascadeRecord, DrawRecord, InstanceRecord, SHADOW_CASCADES, SHADOW_SIDE,
+    SkyRecord, ViewRecord,
+};
 use crate::environment::{BakeRequest, Baked, Environment};
-use crate::frame::{direction_record, record_of_view, vector};
+use crate::frame::{direction_record, record_of_cascade, record_of_view, vector};
 use crate::growing::Growing;
 use crate::program;
+use crate::shadow::Cascade;
 use crate::view::View;
 use belfry_ecs::{Entity, World};
 use belfry_gpu::Fvec4;
@@ -23,6 +27,7 @@ pub(crate) const PANORAMA_HEIGHT: u32 = PROBE_RESOLUTION * 2;
 const VIEW_BYTES: u64 = size_of::<ViewRecord>() as u64;
 const SKY_BYTES: u64 = size_of::<SkyRecord>() as u64;
 const DRAW_BYTES: u64 = size_of::<DrawRecord>() as u64;
+const CASCADE_BYTES: u64 = size_of::<CascadeRecord>() as u64;
 const SETUP_BYTES: u64 = size_of::<AtlasRecord>() as u64;
 const NEAR: f32 = 0.05;
 const FAR: f32 = 1_000.0;
@@ -88,6 +93,7 @@ pub(crate) struct CaptureFrame<'a> {
     pub(crate) clip_space: ClipSpace,
     pub(crate) rotation: Mat4,
     pub(crate) intensity: f32,
+    pub(crate) shadow: Cascade,
 }
 
 pub(crate) struct Pending {
@@ -102,10 +108,14 @@ pub(crate) struct Pending {
 
 pub(crate) struct Captures {
     pub(crate) atlas: Texture,
+    pub(crate) shadow: Texture,
+    pub(crate) shadow_sampler: Sampler,
     pub(crate) views: GpuBuffer,
     pub(crate) skies: GpuBuffer,
+    pub(crate) cascades: GpuBuffer,
     pub(crate) setup: GpuBuffer,
     pub(crate) drawn: Growing,
+    pub(crate) casters: Growing,
     pub(crate) convert: GraphicsPipeline,
     pub(crate) sampler: Sampler,
     slots: u32,
@@ -139,6 +149,25 @@ impl Captures {
                 TextureFormat::Rgba16Float,
                 attachment,
             ),
+            shadow: Texture::new(
+                device,
+                "belfry capture shadow",
+                SHADOW_SIDE,
+                SHADOW_SIDE,
+                1,
+                TextureFormat::R32Float,
+                attachment,
+            ),
+            shadow_sampler: Sampler::new(
+                device,
+                SamplerDesc {
+                    min_filter: Filter::Nearest,
+                    mag_filter: Filter::Nearest,
+                    mip_filter: Filter::Nearest,
+                    address_u: AddressMode::ClampToEdge,
+                    address_v: AddressMode::ClampToEdge,
+                },
+            ),
             views: GpuBuffer::new(
                 device,
                 "belfry capture views",
@@ -151,8 +180,15 @@ impl Captures {
                 u64::from(FACES) * SKY_BYTES,
                 storage,
             ),
+            cascades: GpuBuffer::new(
+                device,
+                "belfry capture cascades",
+                u64::from(SHADOW_CASCADES) * CASCADE_BYTES,
+                storage,
+            ),
             setup,
             drawn: Growing::new(device, "belfry capture drawn", storage),
+            casters: Growing::new(device, "belfry capture casters", storage),
             convert: GraphicsPipeline::new(
                 device,
                 program::capture_conversion(),
@@ -238,11 +274,23 @@ impl Captures {
         self.skies.binding(u64::from(face) * SKY_BYTES, SKY_BYTES)
     }
 
+    pub(crate) fn cascades(&self) -> BufferBinding<'_> {
+        self.cascades
+            .binding(0, u64::from(SHADOW_CASCADES) * CASCADE_BYTES)
+    }
+
     pub(crate) fn drawn(&self, face: u32, offset: u32, count: u32) -> BufferBinding<'_> {
         let base = u64::from(face) * u64::from(self.slots) + u64::from(offset);
         self.drawn
             .buffer()
             .binding(base * DRAW_BYTES, u64::from(count) * DRAW_BYTES)
+    }
+
+    pub(crate) fn casters(&self, offset: u32, count: u32) -> BufferBinding<'_> {
+        self.casters.buffer().binding(
+            u64::from(offset) * DRAW_BYTES,
+            u64::from(count) * DRAW_BYTES,
+        )
     }
 
     pub(crate) fn prepare(&mut self, frame: &CaptureFrame<'_>) {
@@ -268,6 +316,10 @@ impl Captures {
                     .collect::<Vec<_>>(),
             ),
         );
+        self.cascades.write(
+            &frame.queue,
+            bytemuck::cast_slice(&[record_of_cascade(&frame.shadow); SHADOW_CASCADES as usize]),
+        );
         let mut drawn = Vec::with_capacity(frame.records.len() * FACES as usize);
         for view in &views {
             for record in frame.records {
@@ -282,6 +334,19 @@ impl Captures {
             self.drawn
                 .buffer()
                 .write(&frame.queue, bytemuck::cast_slice(&drawn));
+        }
+        let shadow = View::of(frame.shadow.clip);
+        let casters = frame
+            .records
+            .iter()
+            .map(|record| drawn_of(record, &shadow))
+            .collect::<Vec<_>>();
+        self.casters
+            .fit(&frame.device, casters.len() as u64 * DRAW_BYTES);
+        if !casters.is_empty() {
+            self.casters
+                .buffer()
+                .write(&frame.queue, bytemuck::cast_slice(&casters));
         }
     }
 }
@@ -352,3 +417,8 @@ fn drawn_of(record: &InstanceRecord, view: &View) -> DrawRecord {
 fn vec4(value: Fvec4) -> Vec4 {
     Vec4::new(value.x, value.y, value.z, value.w)
 }
+
+const _: () = assert!(
+    CASCADE_BYTES == CASCADE.size as u64,
+    "the capture cascade record keeps the layout its shader reads",
+);

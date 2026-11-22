@@ -154,7 +154,7 @@ impl Editor {
         let surface = context.device().surface(width, height);
         let mut preview = Preview::new(&context, &self.scene);
         preview.set_debug(self.debug);
-        self.session = Some(Session::new(context, surface, preview));
+        self.session = Some(Session::new(context, surface, preview, &self.scene));
         window.set_title(&format!("Belfry Editor - {}", self.path.display()));
     }
 
@@ -275,7 +275,7 @@ impl Editor {
     fn refresh_preview(&mut self) {
         if let Some(session) = &mut self.session {
             session.preview.refresh(&self.scene);
-            session.register_textures();
+            session.register_textures(&self.scene);
         }
     }
 
@@ -629,9 +629,8 @@ impl Editor {
             let Some(session) = self.session.as_mut() else {
                 return Flow::Continue;
             };
-            if session.preview.poll().is_some() {
-                session.register_textures();
-            }
+            session.preview.poll();
+            session.register_textures(&self.scene);
             session.preview.advance(real);
             session.ui.update(logical, scale, time)
         };

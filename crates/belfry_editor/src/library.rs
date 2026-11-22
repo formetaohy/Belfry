@@ -1,5 +1,7 @@
 use belfry_scene::Target;
-use belfry_ui::{Align, BuildContext, Element, Icon, Key, Length, Role, State, TextStyle, widget};
+use belfry_ui::{
+    Align, BuildContext, Corners, Element, Icon, Key, Length, Role, State, TextStyle, widget,
+};
 
 use crate::message::Message;
 use crate::shell::{View, section, text};
@@ -74,6 +76,10 @@ fn assets(view: &View<'_>, asset: Asset) -> Vec<(String, Target)> {
             .map(|entry| (entry.id.clone(), Target::Graph(entry.id.clone())))
             .collect(),
     }
+}
+
+fn texture_of(target: &Target) -> Option<String> {
+    crate::shell::texture_of(target)
 }
 
 fn create<'a>(_ctx: &BuildContext<'_, Message>, _view: &View<'a>) -> Element<'a, Message> {
@@ -161,26 +167,40 @@ fn list<'a>(
         } else {
             belfry_ui::Surface::NONE
         };
+        let mut row = vec![text(
+            &id,
+            TextStyle::new(
+                theme.font(belfry_ui::Level::Caption),
+                if selected {
+                    palette.on_primary_container
+                } else {
+                    palette.on_surface
+                },
+            ),
+        )];
+        if let Some(texture) = texture_of(&target) {
+            row.insert(
+                0,
+                widget::thumbnail(
+                    theme,
+                    &texture,
+                    Length::Fixed(16.0),
+                    Length::Fixed(16.0),
+                    Corners::all(theme.metrics.corner_xs),
+                ),
+            );
+        }
         rows.push(
             Element::row()
                 .key(Key::new(format!("library.{id}")))
                 .width(Length::Fill)
                 .height(Length::Fixed(24.0))
                 .padding(belfry_ui::Edges::symmetric(6.0, 0.0))
+                .gap(6.0)
                 .align(Align::Center)
                 .background(background)
                 .hover_highlight(theme.surface(Role::Standard, State::Hover))
-                .children([text(
-                    &id,
-                    TextStyle::new(
-                        theme.font(belfry_ui::Level::Caption),
-                        if selected {
-                            palette.on_primary_container
-                        } else {
-                            palette.on_surface
-                        },
-                    ),
-                )])
+                .children(row)
                 .press(Message::Select(target)),
         );
     }

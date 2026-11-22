@@ -274,6 +274,14 @@ fn grip_code(grip: Grip) -> u8 {
     }
 }
 
+pub(crate) fn texture_of(target: &Target) -> Option<String> {
+    match target {
+        Target::Image(id) => Some(id.clone()),
+        Target::Environment(id) => Some(format!("environment.{id}")),
+        _ => None,
+    }
+}
+
 pub(crate) fn text(value: &str, style: TextStyle) -> Element<'static, Message> {
     belfry_ui::text(String::from(value), style)
 }

@@ -1,6 +1,7 @@
 use crate::message::Message;
 use crate::preview::Preview;
 use belfry_gpu_device::{GpuContext, Surface};
+use belfry_scene::Scene;
 use belfry_ui::Ui;
 
 pub(crate) struct Session {
@@ -11,9 +12,14 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(context: GpuContext, surface: Surface, preview: Preview) -> Self {
+    pub(crate) fn new(
+        context: GpuContext,
+        surface: Surface,
+        preview: Preview,
+        scene: &Scene,
+    ) -> Self {
         let mut ui = Ui::new(context.device(), context.queue(), surface.format());
-        preview.register_textures(&mut ui);
+        preview.register_textures(&mut ui, scene);
         Self {
             context,
             surface,
@@ -22,7 +28,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn register_textures(&mut self) {
-        self.preview.register_textures(&mut self.ui);
+    pub(crate) fn register_textures(&mut self, scene: &Scene) {
+        self.preview.register_textures(&mut self.ui, scene);
     }
 }

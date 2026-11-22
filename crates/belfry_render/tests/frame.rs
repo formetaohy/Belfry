@@ -1502,6 +1502,48 @@ fn ambient(backend: Backend) {
             );
         }
     }
+    world.despawn(sphere);
+    world.insert(sky_entity, Transform::IDENTITY);
+    let far = world.spawn();
+    world.insert(
+        far,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(20.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 0.0, -8.0),
+        ),
+    );
+    let diffuse = renderer.material(MaterialDesc::new(WHITE).roughness(0.95));
+    world.insert(
+        far,
+        MeshInstance {
+            mesh: quad,
+            material: diffuse,
+            tint: WHITE,
+        },
+    );
+    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    let plain = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    let mut dense = world
+        .get::<Environment>(sky_entity)
+        .expect("a lit world holds the environment it lights with")
+        .clone();
+    dense.atmosphere = Some(belfry_render::environment::Atmosphere {
+        rayleigh: 7_000.0,
+        mie: 7_000.0,
+        ..belfry_render::environment::Atmosphere::default()
+    });
+    world.insert(sky_entity, dense);
+    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    let fogged = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    assert!(
+        i32::from(fogged[2]) > i32::from(plain[2]) + 20,
+        "{backend:?} fades the far surface into the sky it stands under: {plain:?} became {fogged:?}",
+    );
+    assert!(
+        i32::from(fogged[0]) * 2 < i32::from(plain[0]),
+        "{backend:?} scatters the red of the far surface away: {plain:?} became {fogged:?}",
+    );
 }
 
 #[test]

@@ -18,6 +18,7 @@ mod post;
 mod probe;
 mod program;
 mod renderer;
+mod shading;
 mod shadow;
 mod skin;
 mod span;

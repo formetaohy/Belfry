@@ -27,6 +27,7 @@ pub use button::{
 pub use color::color_picker;
 pub use display::{
     card, card_title, combo, empty_state, form_row, group_card, group_surface, section_header,
+    thumbnail,
 };
 pub use field::text_field;
 pub use icon::icon;

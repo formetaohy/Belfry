@@ -7,7 +7,6 @@ use crate::abi::{
 };
 use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
 use crate::capture::{self, Capture, CaptureFrame, CaptureProbe, Captures, Probe, SceneRevision};
-use crate::environment::BRDF_SIZE;
 use crate::environment::{
     Atmosphere, AtmosphereBaker, AtmospherePanorama, BakeJob, BakeRequest, Baked, Baker,
     Environment,
@@ -29,7 +28,8 @@ use crate::pick::{PickBatch, PickFrame, PickResources, Picker};
 use crate::post::Post;
 use crate::probe::Probes;
 use crate::program;
-use crate::shadow;
+use crate::shading::Shading;
+use crate::shadow::{self, Travel};
 use crate::skin::Skin;
 use crate::span;
 use crate::temporality::{Frame, Pose, Temporality};
@@ -39,11 +39,10 @@ use belfry_ecs::{Entity, World};
 use belfry_gpu::Fvec4;
 use belfry_gpu_device::{
     AddressMode, BindGroup, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GpuContext,
-    GraphicsPipeline, PipelineHandle, PipelineState, Queue, Sampler, SamplerDesc, SamplerTable,
-    Submission, SurfaceFrame, Texture, TextureFormat, TextureTable, TextureUsages, Viewport,
+    GraphicsPipeline, PipelineHandle, PipelineState, Queue, Sampler, SamplerDesc, Submission,
+    SurfaceFrame, Texture, TextureFormat, TextureUsages, Viewport,
 };
 use belfry_math::{Mat4, Transform, Vec2, Vec3};
-use half::f16;
 use std::collections::HashMap;
 use std::mem::size_of;
 
@@ -69,6 +68,7 @@ struct CaptureInputs<'a> {
     records: &'a [InstanceRecord],
     batches: &'a [Batch],
     bases: &'a [u32],
+    spheres: &'a [(Vec3, f32)],
     slots: u32,
     opaque: u32,
     joint_bytes: u64,
@@ -114,10 +114,7 @@ pub struct Renderer {
     shadow_views: GpuBuffer,
     light: GpuBuffer,
     shadow_sampler: Sampler,
-    brdf: Texture,
-    brdf_sampler: Sampler,
-    radiance: Texture,
-    radiance_sampler: Sampler,
+    shading: Shading,
     baker: Baker,
     atmospheres: AtmosphereBaker,
     bakes: HashMap<usize, BakeJob>,
@@ -253,59 +250,8 @@ impl Renderer {
                 address_v: AddressMode::ClampToEdge,
             },
         );
-        let brdf = Texture::new(
-            &device,
-            "belfry brdf",
-            BRDF_SIZE,
-            BRDF_SIZE,
-            1,
-            TextureFormat::Rgba16Float,
-            TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-        );
-        let table = crate::environment::brdf(BRDF_SIZE);
-        let texels = table
-            .iter()
-            .flat_map(|texel| texel.iter())
-            .map(|value| f16::from_f32(*value).to_bits())
-            .collect::<Vec<u16>>();
-        brdf.write(&queue, bytemuck::cast_slice(&texels));
-        let brdf_sampler = Sampler::new(
-            &device,
-            SamplerDesc {
-                min_filter: Filter::Linear,
-                mag_filter: Filter::Linear,
-                mip_filter: Filter::Nearest,
-                address_u: AddressMode::ClampToEdge,
-                address_v: AddressMode::ClampToEdge,
-            },
-        );
-        let radiance = Texture::new(
-            &device,
-            "belfry radiance",
-            1,
-            1,
-            1,
-            TextureFormat::Rgba16Float,
-            TextureUsages::SAMPLED | TextureUsages::COPY_DST,
-        );
-        let clear = [0u16, 0u16, 0u16, f16::from_f32(1.0).to_bits()];
-        radiance.write(&queue, bytemuck::cast_slice(&clear));
-        let radiance_sampler = Sampler::new(
-            &device,
-            SamplerDesc {
-                min_filter: Filter::Linear,
-                mag_filter: Filter::Linear,
-                mip_filter: Filter::Linear,
-                address_u: AddressMode::Repeat,
-                address_v: AddressMode::ClampToEdge,
-            },
-        );
-        let ambient = Some((
-            radiance.identity(),
-            radiance.identity(),
-            radiance_sampler.identity(),
-        ));
-        let probes = Probes::new(&device, &radiance, &radiance_sampler);
+        let shading = Shading::new(&device, &queue);
+        let probes = Probes::new(&device, shading.fallback(), shading.sampler());
         let baker = Baker::new(context);
         let captures = Captures::new(context);
         let sky_record = GpuBuffer::new(
@@ -322,23 +268,10 @@ impl Renderer {
             )],
         );
         let shadows = (&shadow_map, &shadow_sampler);
-        let lut = (&brdf, &brdf_sampler);
         let probe_tables = (probes.textures(), probes.samplers());
-        let shade = Self::shaded_group(
-            &draw,
-            shadows,
-            (&radiance, &radiance_sampler),
-            lut,
-            probe_tables,
-        );
-        let transparent_shade = Self::shaded_group(
-            &transparent_draw,
-            shadows,
-            (&radiance, &radiance_sampler),
-            lut,
-            probe_tables,
-        );
-        let sky_shade = Self::sky_group(&sky, (&radiance, &radiance_sampler));
+        let shade = shading.group(&draw, shadows, probe_tables);
+        let transparent_shade = shading.group(&transparent_draw, shadows, probe_tables);
+        let sky_shade = shading.sky(&sky);
         let cull = context.declare(program::culling());
         let light_clusters = context.declare(program::clustering());
         let post = Post::new(&device, format);
@@ -409,15 +342,12 @@ impl Renderer {
             shadow_views,
             light,
             shadow_sampler,
-            brdf,
-            brdf_sampler,
-            radiance,
-            radiance_sampler,
+            shading,
             baker,
             atmospheres: AtmosphereBaker::new(context),
             bakes: HashMap::new(),
             next_bake: 0,
-            ambient,
+            ambient: None,
             cascades,
             instances,
             depth_drawn,
@@ -445,72 +375,20 @@ impl Renderer {
         }
     }
 
-    fn shaded_group(
-        pipeline: &GraphicsPipeline,
-        shadow: (&Texture, &Sampler),
-        radiance: (&Texture, &Sampler),
-        brdf: (&Texture, &Sampler),
-        probes: (&TextureTable, &SamplerTable),
-    ) -> BindGroup {
-        pipeline.bind_group(
-            2,
-            &[
-                Binding::texture(program::SHADOW_SHADOW, shadow.0),
-                Binding::sampler(program::SHADOW_SAMPLER, shadow.1),
-                Binding::texture(program::SHADE_RADIANCE, radiance.0),
-                Binding::sampler(program::SHADE_RADIANCE_SAMPLER, radiance.1),
-                Binding::texture(program::SHADE_BRDF, brdf.0),
-                Binding::sampler(program::SHADE_BRDF_SAMPLER, brdf.1),
-                Binding::texture_table(program::PROBE_TEXTURES, probes.0),
-                Binding::sampler_table(program::PROBE_SAMPLERS, probes.1),
-            ],
-        )
-    }
-
-    fn sky_group(sky: &GraphicsPipeline, panorama: (&Texture, &Sampler)) -> BindGroup {
-        sky.bind_group(
-            1,
-            &[
-                Binding::texture(program::SKY_RADIANCE, panorama.0),
-                Binding::sampler(program::SKY_SAMPLER, panorama.1),
-            ],
-        )
-    }
-
     fn refresh_ambient(&mut self, environment: Option<&Environment>) {
-        let (radiance, panorama, sampler) = match environment {
-            Some(held) => (
-                held.radiance.clone(),
-                held.panorama.clone(),
-                held.sampler.clone(),
-            ),
-            None => (
-                self.radiance.clone(),
-                self.radiance.clone(),
-                self.radiance_sampler.clone(),
-            ),
-        };
-        let identity = (radiance.identity(), panorama.identity(), sampler.identity());
-        if self.ambient == Some(identity) {
+        self.shading.follow(environment);
+        let identity = self.shading.identity();
+        if self.ambient == identity {
             return;
         }
         let shadow = (&self.shadow_map, &self.shadow_sampler);
-        let lut = (&self.brdf, &self.brdf_sampler);
         let probe_tables = (self.probes.textures(), self.probes.samplers());
-        let shade =
-            Self::shaded_group(&self.draw, shadow, (&radiance, &sampler), lut, probe_tables);
-        let transparent = Self::shaded_group(
-            &self.transparent_draw,
-            shadow,
-            (&radiance, &sampler),
-            lut,
-            probe_tables,
-        );
-        let sky = Self::sky_group(&self.sky, (&panorama, &sampler));
-        self.shade = shade;
-        self.transparent_shade = transparent;
-        self.sky_shade = sky;
-        self.ambient = Some(identity);
+        self.shade = self.shading.group(&self.draw, shadow, probe_tables);
+        self.transparent_shade = self
+            .shading
+            .group(&self.transparent_draw, shadow, probe_tables);
+        self.sky_shade = self.shading.sky(&self.sky);
+        self.ambient = identity;
     }
 
     pub fn reset(&mut self) {
@@ -900,16 +778,17 @@ impl Renderer {
                 )
             })
             .collect::<Vec<_>>();
+        let travel = Travel::of(light_transform);
         let cascades = shadow::cascades(
             camera,
             transform,
             aspect,
             light,
-            light_transform,
+            &travel,
             &spheres,
             self.device.clip_space(),
         );
-        let direction = light_transform.rotation.rotate_vec3(-Vec3::Z).normalize();
+        let direction = travel.direction();
         let radiance = light.color * light.intensity;
         let (hzb_levels, hzb_width, hzb_height) = if total == 0 {
             (0u32, 0.0, 0.0)
@@ -1003,6 +882,11 @@ impl Renderer {
         let irradiance = environment.map_or([Vec3::ZERO; 9], |held| held.irradiance);
         let intensity = environment.map_or(0.0, |held| held.intensity);
         let levels = environment.map_or(0.0, |held| (held.levels - 1) as f32);
+        let (rayleigh, mie, absorption) = environment
+            .and_then(|held| held.atmosphere)
+            .map_or((Vec3::ZERO, Vec3::ZERO, Vec3::ZERO), |held| {
+                held.extinction()
+            });
         let environment_rotation =
             Mat4::from_quat(environment_transform.rotation.normalize().inverse());
         self.light.write(
@@ -1022,14 +906,17 @@ impl Renderer {
                 environment0: vector(environment_rotation.col(0)),
                 environment1: vector(environment_rotation.col(1)),
                 environment2: vector(environment_rotation.col(2)),
+                rayleigh: vector(rayleigh.extend(0.0)),
+                mie: vector(mie.extend(0.0)),
+                absorption: vector(absorption.extend(0.0)),
                 intensity,
                 levels,
                 vertical,
-                texel: 1.0 / SHADOW_ATLAS as f32,
                 probes: probe_count,
                 pad0: 0,
                 pad1: 0,
                 pad2: 0,
+                pad3: 0,
             }),
         );
         let sky = environment.filter(|held| held.background);
@@ -1139,6 +1026,7 @@ impl Renderer {
                     records: &[],
                     batches: &[],
                     bases: &[],
+                    spheres: &[],
                     slots: 0,
                     opaque: 0,
                     joint_bytes: 0,
@@ -1146,6 +1034,7 @@ impl Renderer {
                     probe_count,
                     tables: None,
                 },
+                &travel,
                 capture_rotation,
                 capture_intensity,
             );
@@ -1487,6 +1376,7 @@ impl Renderer {
                 records: &records,
                 batches: &batches,
                 bases: &bases,
+                spheres: &spheres,
                 slots,
                 opaque: depth_batches,
                 joint_bytes,
@@ -1494,6 +1384,7 @@ impl Renderer {
                 probe_count,
                 tables: Some(tables.clone()),
             },
+            &travel,
             capture_rotation,
             capture_intensity,
         );
@@ -1523,12 +1414,22 @@ impl Renderer {
         world: &World,
         probe: Option<Probe>,
         inputs: &CaptureInputs<'_>,
+        travel: &Travel,
         rotation: Mat4,
         intensity: f32,
     ) {
         let Some(probe) = probe else {
             return;
         };
+        let radius = probe.transform.scale.length();
+        let shadow = shadow::probe(
+            probe.transform.translation,
+            radius,
+            travel,
+            inputs.spheres,
+            self.device.clip_space(),
+            radius,
+        );
         self.captures.prepare(&CaptureFrame {
             device: self.device.clone(),
             queue: self.queue.clone(),
@@ -1538,8 +1439,69 @@ impl Renderer {
             clip_space: self.device.clip_space(),
             rotation,
             intensity,
+            shadow,
         });
         let mut submission = Submission::new(&self.device, "belfry capture");
+        let capture_shade = self.shading.group(
+            &self.draw,
+            (&self.captures.shadow, &self.captures.shadow_sampler),
+            (self.probes.textures(), self.probes.samplers()),
+        );
+        let pipelines = Pipelines {
+            depth: &self.depth,
+            opaque: &self.draw,
+            blended: &self.transparent_draw,
+            motion: self.temporality.motion(),
+            shadow: &self.shadow,
+        };
+        let textures = self.materials.textures();
+        let samplers = self.materials.samplers();
+        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        if inputs.opaque > 0 {
+            let mut cast_groups = Vec::with_capacity(inputs.opaque as usize);
+            let mut first = 0u32;
+            for batch in inputs.batches.iter().take(inputs.opaque as usize) {
+                let geometry = self.meshes.geometry(batch.mesh);
+                let group = self.shadow.bind_group(
+                    0,
+                    &[
+                        Binding::buffer(
+                            program::SHADOW_PALETTE,
+                            self.joints.buffer().binding(0, inputs.joint_bytes),
+                        ),
+                        Binding::buffer(program::SHADOW_SKINS, self.meshes.skin_binding(geometry)),
+                        Binding::buffer(
+                            program::SHADOW_DRAWN,
+                            self.captures.casters(first, batch.count),
+                        ),
+                        Binding::buffer(
+                            program::SHADOW_VERTICES,
+                            self.meshes.buffer().binding(
+                                u64::from(geometry.first) * VERTEX_BYTES,
+                                u64::from(geometry.count) * VERTEX_BYTES,
+                            ),
+                        ),
+                        Binding::buffer(
+                            program::SHADOW_MATERIALS,
+                            self.material_records
+                                .buffer()
+                                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
+                        ),
+                    ],
+                );
+                cast_groups.push([group, shadow_tables.clone()]);
+                first += batch.count;
+            }
+            let casters = cast_groups
+                .iter()
+                .zip(inputs.batches.iter())
+                .map(|(groups, batch)| {
+                    let geometry = self.meshes.geometry(batch.mesh);
+                    Draw::new(&self.shadow, groups, geometry.count).instances(batch.count)
+                })
+                .collect::<Vec<_>>();
+            submission.render(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0], &casters);
+        }
         let mut skies = Vec::with_capacity(capture::FACES as usize);
         for face in 0..capture::FACES {
             skies.push([
@@ -1571,11 +1533,7 @@ impl Renderer {
                                 program::DRAW_LIGHT,
                                 self.light.binding(0, LIGHT_BYTES),
                             ),
-                            Binding::buffer(
-                                program::DRAW_CASCADES,
-                                self.cascades
-                                    .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
-                            ),
+                            Binding::buffer(program::DRAW_CASCADES, self.captures.cascades()),
                             Binding::buffer(
                                 program::DRAW_DRAWN,
                                 self.captures.drawn(face, inputs.bases[index], batch.count),
@@ -1617,7 +1575,7 @@ impl Renderer {
                             ),
                         ],
                     );
-                    batches.push([shade, tables.clone(), self.shade.clone()]);
+                    batches.push([shade, tables.clone(), capture_shade.clone()]);
                 }
             }
         }
@@ -1666,7 +1624,7 @@ impl Renderer {
             &[Draw::new(&self.captures.convert, &convert, 3)],
         );
         submission.submit(&self.queue);
-        let sampler = self.radiance_sampler.clone();
+        let sampler = self.shading.sampler().clone();
         let request = self.bake(&panorama, &sampler);
         let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
         let mut marker = probe.probe;
@@ -1689,7 +1647,7 @@ impl Renderer {
         let Some(baked) = self.take_baked(request) else {
             return;
         };
-        self.captures.settle(baked, &self.radiance_sampler);
+        self.captures.settle(baked, self.shading.sampler());
     }
 
     pub fn pick(&mut self, point: Vec2) -> Option<Entity> {

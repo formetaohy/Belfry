@@ -1,6 +1,6 @@
 use belfry_math::Vec3;
 use belfry_scene::{Field, FieldKind, ReferenceKind, Target, Value};
-use belfry_ui::{Align, BuildContext, Element, Icon, Key, Length, TextStyle, widget};
+use belfry_ui::{Align, BuildContext, Corners, Element, Icon, Key, Length, TextStyle, widget};
 
 use crate::message::Message;
 use crate::shell::{View, references, section, text};
@@ -41,6 +41,9 @@ pub(crate) fn panel<'a>(ctx: &BuildContext<'_, Message>, view: &View<'a>) -> Ele
             }
         }
         other => {
+            if let Some(texture) = crate::shell::texture_of(other) {
+                children.push(preview(ctx, other, &texture));
+            }
             let fields = match other {
                 Target::Mesh(_) => belfry_scene::MESH_FIELDS,
                 Target::Material(_) => belfry_scene::MATERIAL_FIELDS,
@@ -67,6 +70,25 @@ fn title_of(target: &Target) -> &str {
         | Target::Graph(id)
         | Target::Environment(id) => id,
     }
+}
+
+fn preview<'a>(
+    ctx: &BuildContext<'_, Message>,
+    target: &Target,
+    texture: &str,
+) -> Element<'a, Message> {
+    let theme = ctx.theme();
+    let (width, height) = match target {
+        Target::Environment(_) => (Length::Fill, Length::Fixed(72.0)),
+        _ => (Length::Fixed(120.0), Length::Fixed(120.0)),
+    };
+    widget::thumbnail(
+        theme,
+        texture,
+        width,
+        height,
+        Corners::all(theme.metrics.corner_md),
+    )
 }
 
 fn identity<'a>(ctx: &BuildContext<'_, Message>, id: &str) -> Element<'a, Message> {

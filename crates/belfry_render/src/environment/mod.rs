@@ -45,6 +45,7 @@ pub struct Environment {
     pub background: bool,
     pub local: bool,
     pub blend: f32,
+    pub atmosphere: Option<Atmosphere>,
 }
 
 impl Environment {
@@ -85,7 +86,13 @@ impl Environment {
             background: true,
             local: false,
             blend: 1.0,
+            atmosphere: None,
         }
+    }
+
+    pub fn air(mut self, atmosphere: Atmosphere) -> Self {
+        self.atmosphere = Some(atmosphere);
+        self
     }
 
     pub fn lit(mut self, intensity: f32, background: bool) -> Self {

@@ -671,17 +671,21 @@ mod instanced {
             placed.y * inverse * lamp.vertical + 0.5,
         );
         let atlas = shadow.atlas;
-        let low = fvec2(atlas.x + lamp.texel * 0.5, atlas.y + lamp.texel * 0.5);
+        let low = fvec2(
+            atlas.x + shadow.atlas_texel * 0.5,
+            atlas.y + shadow.atlas_texel * 0.5,
+        );
         let high = fvec2(
-            atlas.x + atlas.z - lamp.texel * 0.5,
-            atlas.y + atlas.z - lamp.texel * 0.5,
+            atlas.x + atlas.z - shadow.atlas_texel * 0.5,
+            atlas.y + atlas.z - shadow.atlas_texel * 0.5,
         );
         let at = fvec2(atlas.x + local.x * atlas.z, atlas.y + local.y * atlas.z);
         let slope = sqrt(max(0.0, 1.0 - incidence * incidence)) / max(incidence, 0.1);
         let depth = placed.z * inverse - 0.0005 - shadow.texel / shadow.depth_span * slope;
-        let sampled_shadow = shadowed(shadows, shadower, at, depth, lamp.texel, low, high);
+        let sampled_shadow = shadowed(shadows, shadower, at, depth, shadow.atlas_texel, low, high);
+        let outside = local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0;
         let beyond = reach > cascades[3u32].split;
-        let visibility = select(sampled_shadow, 1.0, beyond);
+        let visibility = select(sampled_shadow, 1.0, beyond || outside);
         let direct = pbr(
             normal,
             eye_direction,
@@ -899,6 +903,52 @@ mod instanced {
             sun.z + emitted_z + ambient.z + emissive.z,
             coverage,
         );
+        let fog_travel = fvec4(
+            position.x - camera.eye.x,
+            position.y - camera.eye.y,
+            position.z - camera.eye.z,
+            0.0,
+        );
+        let span_km = length3(fog_travel) * 0.001;
+        let floor_km = max(min(camera.eye.y, position.y), 0.0) * 0.001;
+        let climb_km = (position.y - camera.eye.y) * 0.001;
+        let thin_depth = optical(climb_km, floor_km, span_km, 8.0);
+        let haze_depth = optical(climb_km, floor_km, span_km, 1.2);
+        let fog_extinction = fvec4(
+            lamp.rayleigh.x * thin_depth + (lamp.mie.x + lamp.absorption.x) * haze_depth,
+            lamp.rayleigh.y * thin_depth + (lamp.mie.y + lamp.absorption.y) * haze_depth,
+            lamp.rayleigh.z * thin_depth + (lamp.mie.z + lamp.absorption.z) * haze_depth,
+            0.0,
+        );
+        let fog_through = fvec4(
+            exp(0.0 - fog_extinction.x),
+            exp(0.0 - fog_extinction.y),
+            exp(0.0 - fog_extinction.z),
+            0.0,
+        );
+        let fog_toward = turned(
+            lamp.environment0,
+            lamp.environment1,
+            lamp.environment2,
+            fvec4(
+                0.0 - eye_direction.x,
+                0.0 - eye_direction.y,
+                0.0 - eye_direction.z,
+                0.0,
+            ),
+        );
+        let fog_sky = sample_lod(
+            radiance,
+            radiance_sampler,
+            equirect(fog_toward),
+            min(1.0, lamp.levels),
+        );
+        let fogged = fvec4(
+            lit.x * fog_through.x + fog_sky.x * (1.0 - fog_through.x),
+            lit.y * fog_through.y + fog_sky.y * (1.0 - fog_through.y),
+            lit.z * fog_through.z + fog_sky.z * (1.0 - fog_through.z),
+            coverage,
+        );
         let marker = select(0.0, 1.0, marked);
         let blended = entry.alpha_mode == 2u32;
         if blended {
@@ -911,20 +961,30 @@ mod instanced {
                 let pixel_y = min(max(floor(screen.y * height), 0.0), height - 1.0) as u32;
                 let pixel = pixel_y * setup.width + pixel_x;
                 let previous = atomic_exchange(&heads[pixel], index + 1u32);
-                fragments[index].red = lit.x * coverage;
-                fragments[index].green = lit.y * coverage;
-                fragments[index].blue = lit.z * coverage;
+                fragments[index].red = fogged.x * coverage;
+                fragments[index].green = fogged.y * coverage;
+                fragments[index].blue = fogged.z * coverage;
                 fragments[index].alpha = coverage;
                 fragments[index].depth = reach;
                 fragments[index].next = previous;
             }
         }
         target = fvec4(
-            select(lit.x, lit.x * coverage, blended),
-            select(lit.y, lit.y * coverage, blended),
-            select(lit.z, lit.z * coverage, blended),
+            select(fogged.x, fogged.x * coverage, blended),
+            select(fogged.y, fogged.y * coverage, blended),
+            select(fogged.z, fogged.z * coverage, blended),
             select(marker, coverage, blended),
         );
+    }
+
+    fn optical(climb: f32, low: f32, span: f32, scale: f32) -> f32 {
+        let flat = span * exp(0.0 - low / scale);
+        let slanted = (scale / climb) * (exp(0.0 - low / scale) - exp(0.0 - (low + climb) / scale));
+        select(flat, slanted, abs(climb) < 0.001)
+    }
+
+    fn length3(value: Fvec4) -> f32 {
+        sqrt(dot3(value, value))
     }
 
     fn irradiance_low(c0: Fvec4, c1: Fvec4, c2: Fvec4, c3: Fvec4, normal: Fvec4) -> Fvec4 {

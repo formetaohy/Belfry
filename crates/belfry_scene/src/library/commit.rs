@@ -36,7 +36,7 @@ struct PendingEnvironment {
     request: BakeRequest,
     panorama: Texture,
     sampler: Sampler,
-    lit: Option<f32>,
+    atmosphere: Option<belfry_render::environment::Atmosphere>,
 }
 
 pub(super) struct Commit {
@@ -306,18 +306,14 @@ impl Commit {
             );
             return;
         }
-        let (panorama, background, lit) = match &item.data {
+        let (panorama, background, atmosphere) = match &item.data {
             EnvironmentData::Panorama(panorama) => {
                 let texture = panorama.texture(renderer, &item.entry.id);
                 (texture.clone(), texture, None)
             }
-            EnvironmentData::Atmosphere(atmosphere) => {
-                let panoramas = renderer.atmosphere(atmosphere);
-                (
-                    panoramas.radiance,
-                    panoramas.background,
-                    Some(atmosphere.sun_intensity),
-                )
+            EnvironmentData::Atmosphere(held) => {
+                let panoramas = renderer.atmosphere(held);
+                (panoramas.radiance, panoramas.background, Some(*held))
             }
         };
         let request = renderer.bake(&panorama, &sampler);
@@ -327,7 +323,7 @@ impl Commit {
             request,
             panorama: background,
             sampler,
-            lit,
+            atmosphere,
         });
     }
 
@@ -345,8 +341,10 @@ impl Commit {
                 baked.levels,
                 baked.irradiance,
             );
-            if let Some(intensity) = pending.lit {
-                environment = environment.lit(intensity, true);
+            if let Some(atmosphere) = pending.atmosphere {
+                environment = environment
+                    .lit(atmosphere.sun_intensity, true)
+                    .air(atmosphere);
             }
             library.environments.insert(
                 pending.id,

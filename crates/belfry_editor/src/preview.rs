@@ -191,17 +191,17 @@ impl Preview {
         }
     }
 
-    pub(crate) fn register_textures(&self, ui: &mut Ui<Message>) {
+    pub(crate) fn register_textures(&self, ui: &mut Ui<Message>, scene: &Scene) {
         let Some(library) = &self.library else {
             return;
         };
         let mut images = BTreeSet::new();
         let mut environments = BTreeSet::new();
-        for scene in self.scenes() {
-            for image in scene.images() {
+        for held in std::iter::once(scene).chain(self.scenes()) {
+            for image in held.images() {
                 images.insert(image.id.as_str());
             }
-            for environment in scene.environments() {
+            for environment in held.environments() {
                 environments.insert(environment.id.as_str());
             }
         }

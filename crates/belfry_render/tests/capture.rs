@@ -48,7 +48,106 @@ const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 fn a_probe_captures_the_boxes_and_scene_it_bounds() {
     for backend in belfry_gpu_device::PREFERENCE {
         capture(*backend);
+        shadowed(*backend);
     }
+}
+
+fn shadowed(backend: Backend) {
+    let lit = lit_probe(backend, false);
+    let held = lit_probe(backend, true);
+    assert!(
+        lit[0].x > held[0].x * 2.0,
+        "{backend:?} shades the probe it captures away from the main view: {lit:?} lit {held:?} occluded",
+    );
+}
+
+fn lit_probe(backend: Backend, occluder: bool) -> [Vec3; 9] {
+    let context = GpuContext::open(&GpuRequest {
+        backend: Some(backend),
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("no {backend:?} device captures a probe: {error}"));
+    let device = context.device();
+    let target = Texture::new(
+        device,
+        "shadowed probe frame",
+        64,
+        64,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    );
+    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    let quad = renderer.mesh(&WALL);
+    let white = renderer.material(MaterialDesc::new(Vec3::ONE));
+    let black = renderer.material(MaterialDesc::new(Vec3::ZERO));
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(
+        eye,
+        Transform::from_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+    );
+    world.insert(
+        eye,
+        Camera {
+            vertical_fov: std::f32::consts::FRAC_PI_2,
+            near: 0.1,
+            far: 20.0,
+        },
+    );
+    let sun = world.spawn();
+    world.insert(sun, Transform::IDENTITY);
+    world.insert(
+        sun,
+        DirectionalLight {
+            color: Vec3::ONE,
+            intensity: 1.0,
+            shadow_distance: 100.0,
+        },
+    );
+    let ground = world.spawn();
+    world.insert(
+        ground,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(6.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 0.0, -8.0),
+        ),
+    );
+    world.insert(
+        ground,
+        MeshInstance {
+            mesh: quad,
+            material: white,
+            tint: Vec3::ONE,
+        },
+    );
+    if occluder {
+        let held = world.spawn();
+        world.insert(
+            held,
+            Transform::from_scale_rotation_translation(
+                Vec3::splat(6.0),
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, 2.0),
+            ),
+        );
+        world.insert(
+            held,
+            MeshInstance {
+                mesh: quad,
+                material: black,
+                tint: Vec3::ONE,
+            },
+        );
+    }
+    let probe = world.spawn();
+    world.insert(probe, Transform::from_scale(Vec3::splat(12.0)));
+    world.insert(probe, placeholder(&mut renderer));
+    world.insert(probe, CaptureProbe::default());
+    let captures = settled(&mut renderer, &world, &target);
+    assert_eq!(captures.len(), 1, "{backend:?} captures the lit probe");
+    captures[0].environment.irradiance
 }
 
 fn capture(backend: Backend) {

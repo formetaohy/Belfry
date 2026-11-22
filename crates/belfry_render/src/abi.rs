@@ -203,7 +203,11 @@ record!(CascadeRecord, CASCADE, "Cascade" {
     split: f32 => F32,
     texel: f32 => F32,
     depth_span: f32 => F32,
+    atlas_texel: f32 => F32,
     pad0: u32 => U32,
+    pad1: u32 => U32,
+    pad2: u32 => U32,
+    pad3: u32 => U32,
 });
 
 record!(MotionRecord, MOTION, "Motion" {
@@ -275,14 +279,17 @@ record!(LightRecord, LIGHT, "Light" {
     environment0: Fvec4 => F32x4,
     environment1: Fvec4 => F32x4,
     environment2: Fvec4 => F32x4,
+    rayleigh: Fvec4 => F32x4,
+    mie: Fvec4 => F32x4,
+    absorption: Fvec4 => F32x4,
     intensity: f32 => F32,
     levels: f32 => F32,
     vertical: f32 => F32,
-    texel: f32 => F32,
     probes: u32 => U32,
     pad0: u32 => U32,
     pad1: u32 => U32,
     pad2: u32 => U32,
+    pad3: u32 => U32,
 });
 
 record!(ProbeRecord, PROBE, "Probe" {
