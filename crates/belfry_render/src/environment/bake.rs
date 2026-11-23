@@ -40,6 +40,7 @@ pub(crate) struct Baker {
     reduction: PipelineHandle,
     accumulation: Texture,
     levels: GpuBuffer,
+    level_span: u64,
     setup: GpuBuffer,
     partials: GpuBuffer,
     total: GpuBuffer,
@@ -49,6 +50,10 @@ impl Baker {
     pub(crate) fn new(context: &GpuContext) -> Self {
         let device = context.device().clone();
         let storage = BufferUsages::STORAGE;
+        let level_span = crate::span::padded(
+            device.limits().min_storage_buffer_offset_alignment,
+            LEVEL_BYTES,
+        );
         Self {
             prefilter: GraphicsPipeline::new(
                 &device,
@@ -75,9 +80,10 @@ impl Baker {
             levels: GpuBuffer::new(
                 &device,
                 "belfry bake levels",
-                u64::from(LEVELS) * LEVEL_BYTES,
+                u64::from(LEVELS) * level_span,
                 storage | BufferUsages::COPY_DST,
             ),
+            level_span,
             setup: GpuBuffer::new(
                 &device,
                 "belfry bake setup",
@@ -131,8 +137,13 @@ impl Baker {
                 pad1: 0,
             })
             .collect::<Vec<_>>();
-        self.levels
-            .write(&self.queue, bytemuck::cast_slice(&levels));
+        let mut level_bytes = vec![0u8; (u64::from(LEVELS) * self.level_span) as usize];
+        for (index, level) in levels.iter().enumerate() {
+            let start = index * self.level_span as usize;
+            level_bytes[start..start + LEVEL_BYTES as usize]
+                .copy_from_slice(bytemuck::bytes_of(level));
+        }
+        self.levels.write(&self.queue, &level_bytes);
         self.setup.write(
             &self.queue,
             bytemuck::bytes_of(&IrradianceSetupRecord {
@@ -160,7 +171,7 @@ impl Baker {
                 &[Binding::buffer(
                     program::PREFILTER_LEVEL,
                     self.levels
-                        .binding(u64::from(level) * LEVEL_BYTES, LEVEL_BYTES),
+                        .binding(u64::from(level) * self.level_span, LEVEL_BYTES),
                 )],
             );
             let groups = [level_group, source.clone()];

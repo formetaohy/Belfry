@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 struct InstanceOwner {
     entry: Entry,
-    raw: Instance,
+    instance: Instance,
     surface_loader: ash::khr::surface::Instance,
     surface: Option<vk::SurfaceKHR>,
 }
@@ -74,12 +74,35 @@ struct Parts {
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
+struct Core {
+    raw: ash::Device,
+    instance: Option<InstanceOwner>,
+    physical: vk::PhysicalDevice,
+    memory: vk::PhysicalDeviceMemoryProperties,
+}
+
+impl std::ops::Deref for Core {
+    type Target = ash::Device;
+
+    fn deref(&self) -> &ash::Device {
+        &self.raw
+    }
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        if self.instance.is_some() {
+            unsafe { self.raw.destroy_device(None) };
+        }
+    }
+}
+
 impl Drop for InstanceOwner {
     fn drop(&mut self) {
         if let Some(surface) = self.surface {
             unsafe { self.surface_loader.destroy_surface(surface, None) };
         }
-        unsafe { self.raw.destroy_instance(None) };
+        unsafe { self.instance.destroy_instance(None) };
     }
 }
 
@@ -167,7 +190,7 @@ impl InstanceOwner {
         };
         Ok(Self {
             entry,
-            raw,
+            instance: raw,
             surface_loader,
             surface,
         })
@@ -382,13 +405,13 @@ impl Pending {
 }
 
 struct Arena {
-    raw: ash::Device,
+    core: Arc<Core>,
     pool: vk::DescriptorPool,
     sets: u32,
 }
 
 impl Arena {
-    fn new(raw: &ash::Device, sizes: &[(vk::DescriptorType, u32)], sets: u32) -> Self {
+    fn new(core: &Arc<Core>, sizes: &[(vk::DescriptorType, u32)], sets: u32) -> Self {
         let hold = sizes
             .iter()
             .map(|(kind, count)| {
@@ -398,7 +421,7 @@ impl Arena {
             })
             .collect::<Vec<_>>();
         let pool = unsafe {
-            raw.create_descriptor_pool(
+            core.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(sets)
                     .pool_sizes(&hold),
@@ -407,7 +430,7 @@ impl Arena {
         }
         .unwrap_or_else(|error| panic!("creating a Vulkan descriptor arena: {error:?}"));
         Self {
-            raw: raw.clone(),
+            core: Arc::clone(core),
             pool,
             sets,
         }
@@ -416,7 +439,7 @@ impl Arena {
 
 impl Drop for Arena {
     fn drop(&mut self) {
-        unsafe { self.raw.destroy_descriptor_pool(self.pool, None) };
+        unsafe { self.core.destroy_descriptor_pool(self.pool, None) };
     }
 }
 
@@ -473,7 +496,7 @@ impl Releases {
 }
 
 struct GroupPool {
-    raw: ash::Device,
+    core: Arc<Core>,
     sizes: Vec<(vk::DescriptorType, u32)>,
     free: Mutex<Vec<vk::DescriptorSet>>,
     arenas: Mutex<Vec<Arc<Arena>>>,
@@ -482,12 +505,12 @@ struct GroupPool {
 
 impl GroupPool {
     fn new(
-        raw: &ash::Device,
+        core: &Arc<Core>,
         sizes: Vec<(vk::DescriptorType, u32)>,
         releases: Arc<Releases>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            raw: raw.clone(),
+            core: Arc::clone(core),
             sizes,
             free: Mutex::new(Vec::new()),
             arenas: Mutex::new(Vec::new()),
@@ -509,13 +532,13 @@ impl GroupPool {
             .lock()
             .expect("the Vulkan descriptor arenas are never poisoned");
         if arenas.is_empty() {
-            arenas.push(Arc::new(Arena::new(&self.raw, &self.sizes, 16)));
+            arenas.push(Arc::new(Arena::new(&self.core, &self.sizes, 16)));
         }
         loop {
             let arena = arenas.last().expect("a descriptor pool holds one arena");
             let layouts = [layout];
             match unsafe {
-                self.raw.allocate_descriptor_sets(
+                self.core.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(arena.pool)
                         .set_layouts(&layouts),
@@ -525,7 +548,7 @@ impl GroupPool {
                 Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
                 | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
                     let sets = arena.sets * 2;
-                    arenas.push(Arc::new(Arena::new(&self.raw, &self.sizes, sets)));
+                    arenas.push(Arc::new(Arena::new(&self.core, &self.sizes, sets)));
                 }
                 Err(error) => panic!("allocating Vulkan descriptors: {error:?}"),
             }
@@ -556,7 +579,7 @@ struct Frame {
 impl Frame {
     fn new(device: &Device) -> Self {
         let command = unsafe {
-            device.raw.allocate_command_buffers(
+            device.core.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(device.pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
@@ -566,7 +589,7 @@ impl Frame {
         .unwrap_or_else(|error| panic!("allocating a Vulkan compute command buffer: {error:?}"))[0];
         let fence = unsafe {
             device
-                .raw
+                .core
                 .create_fence(&vk::FenceCreateInfo::default(), None)
         }
         .unwrap_or_else(|error| panic!("creating a Vulkan completion fence: {error:?}"));
@@ -582,7 +605,7 @@ impl Frame {
     }
 
     fn begin(&mut self, device: &Device) {
-        let raw = &device.raw;
+        let raw = &device.core;
         unsafe { raw.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty()) }
             .unwrap_or_else(|error| panic!("recycling a Vulkan compute command buffer: {error:?}"));
         unsafe { raw.reset_fences(&[self.fence]) }
@@ -608,7 +631,7 @@ impl Frame {
             (staging, 0)
         };
         let mapped = unsafe {
-            device.raw.map_memory(
+            device.core.map_memory(
                 staging.memory,
                 0,
                 offset + size,
@@ -622,7 +645,7 @@ impl Frame {
                 mapped.cast::<u8>().add(offset as usize),
                 bytes.len(),
             );
-            device.raw.unmap_memory(staging.memory);
+            device.core.unmap_memory(staging.memory);
         }
         (staging.handle, offset)
     }
@@ -649,10 +672,6 @@ impl Default for QueueState {
 }
 
 pub(crate) struct Device {
-    raw: ash::Device,
-    instance: Option<InstanceOwner>,
-    physical: vk::PhysicalDevice,
-    memory: vk::PhysicalDeviceMemoryProperties,
     queue: vk::Queue,
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
@@ -664,6 +683,7 @@ pub(crate) struct Device {
     releases: Arc<Releases>,
     pub(crate) gate: Arc<Gate>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
+    core: Arc<Core>,
 }
 
 struct Lent {
@@ -678,7 +698,7 @@ struct Lent {
 static LENT: LazyLock<Mutex<Vec<Lent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) struct BufferResource {
-    raw: ash::Device,
+    core: Arc<Core>,
     handle: vk::Buffer,
     memory: vk::DeviceMemory,
 }
@@ -805,7 +825,7 @@ fn cooperation(
 }
 
 struct PipelineResource {
-    raw: ash::Device,
+    core: Arc<Core>,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
     pools: Vec<Arc<GroupPool>>,
@@ -842,7 +862,7 @@ struct Target {
 }
 
 struct TextureResource {
-    raw: ash::Device,
+    core: Arc<Core>,
     image: vk::Image,
     memory: Option<vk::DeviceMemory>,
     view: vk::ImageView,
@@ -885,7 +905,7 @@ pub(crate) struct Present {
 }
 
 pub(crate) struct Sampler {
-    device: ash::Device,
+    core: Arc<Core>,
     raw: vk::Sampler,
 }
 
@@ -894,7 +914,7 @@ pub(crate) struct GraphicsPipeline {
 }
 
 struct GraphicsPipelineResource {
-    raw: ash::Device,
+    core: Arc<Core>,
     layout: vk::PipelineLayout,
     groups: Vec<vk::DescriptorSetLayout>,
     pools: Vec<Arc<GroupPool>>,
@@ -1095,11 +1115,13 @@ impl Facts {
     }
 
     fn assemble(&self, parts: Parts, instance: Option<InstanceOwner>) -> Arc<Device> {
-        Arc::new(Device {
+        let core = Arc::new(Core {
             raw: parts.raw,
             instance,
             physical: parts.physical,
             memory: self.memory,
+        });
+        Arc::new(Device {
             queue: parts.queue,
             pool: parts.pool,
             stamps: parts.stamps,
@@ -1111,6 +1133,7 @@ impl Facts {
             releases: Releases::new(),
             gate: Gate::of(parts.advance),
             _keep_alive: parts.keep_alive,
+            core,
         })
     }
 }
@@ -1282,11 +1305,11 @@ fn render_pass(raw: &ash::Device, format: vk::Format) -> Result<vk::RenderPass, 
 
 fn select(owner: &InstanceOwner, policy: AdapterPolicy) -> Result<Selection, DeviceFailure> {
     let physical_devices =
-        complete_enumeration(|| unsafe { owner.raw.enumerate_physical_devices() })
+        complete_enumeration(|| unsafe { owner.instance.enumerate_physical_devices() })
             .map_err(|error| format!("enumerating devices: {error:?}"))?;
     let mut candidates = Vec::new();
     for physical in physical_devices {
-        let properties = unsafe { owner.raw.get_physical_device_properties(physical) };
+        let properties = unsafe { owner.instance.get_physical_device_properties(physical) };
         if vk::api_version_major(properties.api_version) < 1
             || (vk::api_version_major(properties.api_version) == 1
                 && vk::api_version_minor(properties.api_version) < 1)
@@ -1295,7 +1318,7 @@ fn select(owner: &InstanceOwner, policy: AdapterPolicy) -> Result<Selection, Dev
         }
         let families = unsafe {
             owner
-                .raw
+                .instance
                 .get_physical_device_queue_family_properties(physical)
         };
         let Some(family) = families
@@ -1316,7 +1339,7 @@ fn select(owner: &InstanceOwner, policy: AdapterPolicy) -> Result<Selection, Dev
             physical,
             family,
             info: describe(&properties, device_type(properties.device_type)),
-            facts: Facts::of(&owner.entry, &owner.raw, physical, family, &properties),
+            facts: Facts::of(&owner.entry, &owner.instance, physical, family, &properties),
         });
     }
     let offered = candidates
@@ -1384,7 +1407,7 @@ impl Device {
                 }
             };
             let capability = facts.capability;
-            match create(&owner.raw, physical, family, &facts, swapchain) {
+            match create(&owner.instance, physical, family, &facts, swapchain) {
                 Ok(parts) => {
                     return Ok((
                         facts.assemble(parts, Some(owner)),
@@ -1483,10 +1506,10 @@ impl Device {
                 fingerprint(&[&bytes_of(program.spirv())]),
             );
             let initial = artifacts.load(&key);
-            let pipeline_cache = pipeline_cache(&self.raw, initial.as_deref());
+            let pipeline_cache = pipeline_cache(&self.core, initial.as_deref());
             let spirv = program.spirv();
             let module = unsafe {
-                self.raw
+                self.core
                     .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spirv), None)
             }
             .unwrap_or_else(|error| {
@@ -1502,7 +1525,7 @@ impl Device {
                 .module(module)
                 .name(&entry);
             let pipelines = unsafe {
-                self.raw.create_compute_pipelines(
+                self.core.create_compute_pipelines(
                     pipeline_cache,
                     &[vk::ComputePipelineCreateInfo::default()
                         .stage(stage)
@@ -1510,14 +1533,14 @@ impl Device {
                     None,
                 )
             };
-            unsafe { self.raw.destroy_shader_module(module, None) };
+            unsafe { self.core.destroy_shader_module(module, None) };
             let compiled = pipelines.unwrap_or_else(|(_, error)| {
                 panic!(
                     "compiling Vulkan compute pipeline {}: {error:?}",
                     program.label()
                 )
             })[0];
-            let data = unsafe { self.raw.get_pipeline_cache_data(pipeline_cache) }.unwrap_or_else(
+            let data = unsafe { self.core.get_pipeline_cache_data(pipeline_cache) }.unwrap_or_else(
                 |error| {
                     panic!(
                         "reading the Vulkan pipeline cache of {}: {error:?}",
@@ -1526,7 +1549,7 @@ impl Device {
                 },
             );
             artifacts.store(&key, &data);
-            unsafe { self.raw.destroy_pipeline_cache(pipeline_cache, None) };
+            unsafe { self.core.destroy_pipeline_cache(pipeline_cache, None) };
             compiled
         });
     }
@@ -1536,25 +1559,25 @@ impl Device {
             .size(size)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let handle = unsafe { self.raw.create_buffer(&info, None) }
+        let handle = unsafe { self.core.create_buffer(&info, None) }
             .unwrap_or_else(|error| panic!("allocating {size} Vulkan buffer bytes: {error:?}"));
-        let requirements = unsafe { self.raw.get_buffer_memory_requirements(handle) };
+        let requirements = unsafe { self.core.get_buffer_memory_requirements(handle) };
         let wanted = if host {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
         } else {
             vk::MemoryPropertyFlags::DEVICE_LOCAL
         };
-        let memory_type = (0..self.memory.memory_type_count)
+        let memory_type = (0..self.core.memory.memory_type_count)
             .find(|index| {
                 (requirements.memory_type_bits & (1 << index)) != 0
-                    && self.memory.memory_types[*index as usize]
+                    && self.core.memory.memory_types[*index as usize]
                         .property_flags
                         .contains(wanted)
             })
             .or_else(|| {
                 (!host)
                     .then(|| {
-                        (0..self.memory.memory_type_count)
+                        (0..self.core.memory.memory_type_count)
                             .find(|index| (requirements.memory_type_bits & (1 << index)) != 0)
                     })
                     .flatten()
@@ -1566,7 +1589,7 @@ impl Device {
                 )
             });
         let memory = unsafe {
-            self.raw.allocate_memory(
+            self.core.allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(requirements.size)
                     .memory_type_index(memory_type),
@@ -1574,10 +1597,10 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("allocating Vulkan device memory: {error:?}"));
-        unsafe { self.raw.bind_buffer_memory(handle, memory, 0) }
+        unsafe { self.core.bind_buffer_memory(handle, memory, 0) }
             .unwrap_or_else(|error| panic!("binding Vulkan device memory: {error:?}"));
         Arc::new(BufferResource {
-            raw: self.raw.clone(),
+            core: self.core.clone(),
             handle,
             memory,
         })
@@ -1619,7 +1642,7 @@ impl Device {
         );
         Pipeline {
             resource: Arc::new(PipelineResource {
-                raw: self.raw.clone(),
+                core: self.core.clone(),
                 layout,
                 groups,
                 pools,
@@ -1668,7 +1691,7 @@ impl Device {
                 })
                 .collect::<Vec<_>>();
             let layout = unsafe {
-                self.raw.create_descriptor_set_layout(
+                self.core.create_descriptor_set_layout(
                     &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                     None,
                 )
@@ -1687,10 +1710,14 @@ impl Device {
                     None => sizes.push((binding.descriptor_type, binding.descriptor_count)),
                 }
             }
-            pools.push(GroupPool::new(&self.raw, sizes, Arc::clone(&self.releases)));
+            pools.push(GroupPool::new(
+                &self.core,
+                sizes,
+                Arc::clone(&self.releases),
+            ));
         }
         let layout = unsafe {
-            self.raw.create_pipeline_layout(
+            self.core.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default().set_layouts(&groups),
                 None,
             )
@@ -1825,7 +1852,7 @@ impl Device {
                 }
             })
             .collect::<Vec<_>>();
-        unsafe { self.raw.update_descriptor_sets(&writes, &[]) };
+        unsafe { self.core.update_descriptor_sets(&writes, &[]) };
         Group {
             resource: Arc::new(GroupResource {
                 set,
@@ -1852,10 +1879,10 @@ impl Device {
                 .anisotropy_enable(true)
                 .max_anisotropy(anisotropy as f32);
         }
-        let raw = unsafe { self.raw.create_sampler(&info, None) }
+        let raw = unsafe { self.core.create_sampler(&info, None) }
             .unwrap_or_else(|error| panic!("creating a Vulkan sampler: {error:?}"));
         Sampler {
-            device: self.raw.clone(),
+            core: self.core.clone(),
             raw,
         }
     }
@@ -1900,7 +1927,7 @@ impl Device {
                         view
                     } else {
                         unsafe {
-                            self.raw
+                            self.core
                                 .create_image_view(
                                     &vk::ImageViewCreateInfo::default()
                                         .image(image)
@@ -1930,7 +1957,7 @@ impl Device {
                     );
                     let pass = self.render_pass(format);
                     let framebuffer = unsafe {
-                        self.raw.create_framebuffer(
+                        self.core.create_framebuffer(
                             &vk::FramebufferCreateInfo::default()
                                 .render_pass(pass)
                                 .attachments(&[level_view, depth_view])
@@ -1959,7 +1986,7 @@ impl Device {
         };
         Texture {
             resource: Arc::new(TextureResource {
-                raw: self.raw.clone(),
+                core: self.core.clone(),
                 image,
                 memory: Some(memory),
                 view,
@@ -1976,24 +2003,29 @@ impl Device {
     }
 
     pub(crate) fn has_surface(&self) -> bool {
-        self.instance
+        self.core
+            .instance
             .as_ref()
             .is_some_and(|owner| owner.surface.is_some())
     }
 
     pub(crate) fn create_surface(self: &Arc<Self>, width: u32, height: u32) -> Surface {
         let owner = self
+            .core
             .instance
             .as_ref()
             .expect("a Vulkan swapchain belongs to a window device");
         let surface = owner
             .surface
             .expect("a Vulkan window device owns its surface");
-        let loader = ash::khr::swapchain::Device::new(&owner.raw, &self.raw);
+        let loader = ash::khr::swapchain::Device::new(&owner.instance, &self.core);
         let (raw, images, present, width, height, format) =
             self.build_swapchain(&loader, surface, width, height);
-        let acquire = unsafe { self.raw.create_fence(&vk::FenceCreateInfo::default(), None) }
-            .unwrap_or_else(|error| panic!("creating a Vulkan acquire fence: {error:?}"));
+        let acquire = unsafe {
+            self.core
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .unwrap_or_else(|error| panic!("creating a Vulkan acquire fence: {error:?}"));
         Surface {
             device: self.clone(),
             surface,
@@ -2024,19 +2056,20 @@ impl Device {
         TextureFormat,
     ) {
         let owner = self
+            .core
             .instance
             .as_ref()
             .expect("a Vulkan swapchain keeps its surface loader");
         let capabilities = unsafe {
             owner
                 .surface_loader
-                .get_physical_device_surface_capabilities(self.physical, surface)
+                .get_physical_device_surface_capabilities(self.core.physical, surface)
         }
         .unwrap_or_else(|error| panic!("reading Vulkan surface capabilities: {error:?}"));
         let formats = unsafe {
             owner
                 .surface_loader
-                .get_physical_device_surface_formats(self.physical, surface)
+                .get_physical_device_surface_formats(self.core.physical, surface)
         }
         .unwrap_or_else(|error| panic!("reading Vulkan surface formats: {error:?}"));
         let chosen = formats
@@ -2105,7 +2138,7 @@ impl Device {
             .iter()
             .map(|_| {
                 unsafe {
-                    self.raw
+                    self.core
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                 }
                 .unwrap_or_else(|error| panic!("creating a Vulkan present semaphore: {error:?}"))
@@ -2123,7 +2156,7 @@ impl Device {
         pass: vk::RenderPass,
     ) -> Texture {
         let view = unsafe {
-            self.raw.create_image_view(
+            self.core.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
@@ -2149,7 +2182,7 @@ impl Device {
             vk::ImageAspectFlags::DEPTH,
         );
         let framebuffer = unsafe {
-            self.raw.create_framebuffer(
+            self.core.create_framebuffer(
                 &vk::FramebufferCreateInfo::default()
                     .render_pass(pass)
                     .attachments(&[view, depth_view])
@@ -2162,7 +2195,7 @@ impl Device {
         .unwrap_or_else(|error| panic!("creating a Vulkan swapchain framebuffer: {error:?}"));
         Texture {
             resource: Arc::new(TextureResource {
-                raw: self.raw.clone(),
+                core: self.core.clone(),
                 image,
                 memory: None,
                 view,
@@ -2189,7 +2222,7 @@ impl Device {
     }
 
     pub(crate) fn idle(&self) {
-        unsafe { self.raw.device_wait_idle() }
+        unsafe { self.core.device_wait_idle() }
             .unwrap_or_else(|error| panic!("waiting for a Vulkan device: {error:?}"));
         let mut state = self
             .state
@@ -2216,7 +2249,7 @@ impl Device {
             depth: 1,
         };
         let image = unsafe {
-            self.raw.create_image(
+            self.core.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
                     .format(format)
@@ -2234,17 +2267,17 @@ impl Device {
         .unwrap_or_else(|error| {
             panic!("allocating a Vulkan attachment of {width} by {height}: {error:?}")
         });
-        let requirements = unsafe { self.raw.get_image_memory_requirements(image) };
-        let memory_type = (0..self.memory.memory_type_count)
+        let requirements = unsafe { self.core.get_image_memory_requirements(image) };
+        let memory_type = (0..self.core.memory.memory_type_count)
             .find(|index| {
                 (requirements.memory_type_bits & (1 << index)) != 0
-                    && self.memory.memory_types[*index as usize]
+                    && self.core.memory.memory_types[*index as usize]
                         .property_flags
                         .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
             })
             .unwrap_or_else(|| panic!("a Vulkan attachment has no device local memory"));
         let memory = unsafe {
-            self.raw.allocate_memory(
+            self.core.allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(requirements.size)
                     .memory_type_index(memory_type),
@@ -2252,7 +2285,7 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("allocating Vulkan attachment memory: {error:?}"));
-        unsafe { self.raw.bind_image_memory(image, memory, 0) }
+        unsafe { self.core.bind_image_memory(image, memory, 0) }
             .unwrap_or_else(|error| panic!("binding Vulkan attachment memory: {error:?}"));
         let range = vk::ImageSubresourceRange::default()
             .aspect_mask(aspect)
@@ -2261,7 +2294,7 @@ impl Device {
             .base_array_layer(0)
             .layer_count(1);
         let view = unsafe {
-            self.raw.create_image_view(
+            self.core.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
@@ -2287,7 +2320,7 @@ impl Device {
         );
         GraphicsPipeline {
             resource: Arc::new(GraphicsPipelineResource {
-                raw: self.raw.clone(),
+                core: self.core.clone(),
                 layout,
                 groups,
                 pools,
@@ -2307,7 +2340,7 @@ impl Device {
         if let Some((_, pass)) = passes.iter().find(|(held, _)| *held == format) {
             return *pass;
         }
-        let pass = render_pass(&self.raw, vk_format(format))
+        let pass = render_pass(&self.core, vk_format(format))
             .unwrap_or_else(|error| panic!("creating the {format:?} Vulkan render pass: {error}"));
         passes.push((format, pass));
         pass
@@ -2335,16 +2368,16 @@ impl Device {
                 fingerprint(&[&bytes_of(&module), vertex.as_bytes(), fragment.as_bytes()]),
             );
             let initial = artifacts.load(&key);
-            let pipeline_cache = pipeline_cache(&self.raw, initial.as_deref());
+            let pipeline_cache = pipeline_cache(&self.core, initial.as_deref());
             let vertex_module = unsafe {
-                self.raw.create_shader_module(
+                self.core.create_shader_module(
                     &vk::ShaderModuleCreateInfo::default().code(&module),
                     None,
                 )
             }
             .unwrap_or_else(|error| panic!("creating the Vulkan vertex module: {error:?}"));
             let fragment_module = unsafe {
-                self.raw.create_shader_module(
+                self.core.create_shader_module(
                     &vk::ShaderModuleCreateInfo::default().code(&module),
                     None,
                 )
@@ -2436,7 +2469,7 @@ impl Device {
                 .render_pass(pipeline.resource.render_pass)
                 .subpass(0);
             let compiled = unsafe {
-                self.raw
+                self.core
                     .create_graphics_pipelines(pipeline_cache, &[info], None)
             }
             .unwrap_or_else(|(_, error)| {
@@ -2446,10 +2479,10 @@ impl Device {
                 )
             })[0];
             unsafe {
-                self.raw.destroy_shader_module(vertex_module, None);
-                self.raw.destroy_shader_module(fragment_module, None);
+                self.core.destroy_shader_module(vertex_module, None);
+                self.core.destroy_shader_module(fragment_module, None);
             }
-            let data = unsafe { self.raw.get_pipeline_cache_data(pipeline_cache) }.unwrap_or_else(
+            let data = unsafe { self.core.get_pipeline_cache_data(pipeline_cache) }.unwrap_or_else(
                 |error| {
                     panic!(
                         "reading the Vulkan pipeline cache of {}: {error:?}",
@@ -2458,7 +2491,7 @@ impl Device {
                 },
             );
             artifacts.store(&key, &data);
-            unsafe { self.raw.destroy_pipeline_cache(pipeline_cache, None) };
+            unsafe { self.core.destroy_pipeline_cache(pipeline_cache, None) };
             compiled
         });
     }
@@ -2493,9 +2526,9 @@ impl Device {
         frame.first_dispatch = first_dispatch;
         let command = frame.command;
         unsafe {
-            self.raw
+            self.core
                 .cmd_reset_query_pool(command, self.stamps, (slot * 2) as u32, 2);
-            self.raw.cmd_write_timestamp(
+            self.core.cmd_write_timestamp(
                 command,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 self.stamps,
@@ -2513,13 +2546,13 @@ impl Device {
                     vk::AccessFlags::TRANSFER_WRITE,
                 ),
             );
-            pending.flush(&self.raw, command);
+            pending.flush(&self.core, command);
             let (staging, offset) = frame.stage(self, &write.bytes, TRANSFER_ALIGNMENT);
             let region = [vk::BufferCopy::default()
                 .src_offset(offset)
                 .dst_offset(write.offset)
                 .size(write.bytes.len() as u64)];
-            unsafe { self.raw.cmd_copy_buffer(command, staging, handle, &region) };
+            unsafe { self.core.cmd_copy_buffer(command, staging, handle, &region) };
             frame.resources.push(native_buffer(&write.buffer).clone());
         }
         let mut presenting = None;
@@ -2548,13 +2581,13 @@ impl Device {
                             vk::AccessFlags::TRANSFER_WRITE,
                         ),
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     let region = [vk::BufferCopy::default()
                         .src_offset(*source_offset)
                         .dst_offset(*target_offset)
                         .size(*bytes)];
                     unsafe {
-                        self.raw.cmd_copy_buffer(
+                        self.core.cmd_copy_buffer(
                             command,
                             buffer(source).handle,
                             buffer(target).handle,
@@ -2577,10 +2610,15 @@ impl Device {
                             vk::AccessFlags::TRANSFER_WRITE,
                         ),
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     unsafe {
-                        self.raw
-                            .cmd_fill_buffer(command, buffer(target).handle, *offset, *bytes, 0)
+                        self.core.cmd_fill_buffer(
+                            command,
+                            buffer(target).handle,
+                            *offset,
+                            *bytes,
+                            0,
+                        )
                     };
                     frame.resources.push(buffer(target).clone());
                 }
@@ -2662,10 +2700,13 @@ impl Device {
                             vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::MEMORY_WRITE,
                         ),
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     unsafe {
-                        self.raw
-                            .cmd_begin_render_pass(command, &info, vk::SubpassContents::INLINE);
+                        self.core.cmd_begin_render_pass(
+                            command,
+                            &info,
+                            vk::SubpassContents::INLINE,
+                        );
                     }
                     for draw in draws {
                         let pipeline = graphics_pipeline(&draw.pipeline.native);
@@ -2680,7 +2721,7 @@ impl Device {
                             .get()
                             .expect("a graphics pipeline is compiled before a draw");
                         unsafe {
-                            self.raw.cmd_set_viewport(
+                            self.core.cmd_set_viewport(
                                 command,
                                 0,
                                 &[vk::Viewport {
@@ -2692,7 +2733,7 @@ impl Device {
                                     max_depth: 1.0,
                                 }],
                             );
-                            self.raw.cmd_set_scissor(
+                            self.core.cmd_set_scissor(
                                 command,
                                 0,
                                 &[vk::Rect2D {
@@ -2706,12 +2747,12 @@ impl Device {
                                     },
                                 }],
                             );
-                            self.raw.cmd_bind_pipeline(
+                            self.core.cmd_bind_pipeline(
                                 command,
                                 vk::PipelineBindPoint::GRAPHICS,
                                 compiled,
                             );
-                            self.raw.cmd_bind_descriptor_sets(
+                            self.core.cmd_bind_descriptor_sets(
                                 command,
                                 vk::PipelineBindPoint::GRAPHICS,
                                 pipeline.layout,
@@ -2723,9 +2764,9 @@ impl Device {
                                 RecordedCount::Direct {
                                     vertices,
                                     instances,
-                                } => self.raw.cmd_draw(command, *vertices, *instances, 0, 0),
+                                } => self.core.cmd_draw(command, *vertices, *instances, 0, 0),
                                 RecordedCount::Indirect { arguments, offset } => {
-                                    self.raw.cmd_draw_indirect(
+                                    self.core.cmd_draw_indirect(
                                         command,
                                         native_buffer(arguments.native()).handle,
                                         *offset,
@@ -2743,7 +2784,7 @@ impl Device {
                             frame.resources.push(group);
                         }
                     }
-                    unsafe { self.raw.cmd_end_render_pass(command) };
+                    unsafe { self.core.cmd_end_render_pass(command) };
                     *texture
                         .layout
                         .lock()
@@ -2770,7 +2811,7 @@ impl Device {
                         vk::PipelineStageFlags::TRANSFER,
                         vk::AccessFlags::TRANSFER_WRITE,
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     let width = (texture.width >> level).max(1);
                     let height = (texture.height >> level).max(1);
                     let row = u64::from(width) * texel;
@@ -2792,7 +2833,7 @@ impl Device {
                             depth: 1,
                         })];
                     unsafe {
-                        self.raw.cmd_copy_buffer_to_image(
+                        self.core.cmd_copy_buffer_to_image(
                             command,
                             staging,
                             texture.image,
@@ -2815,7 +2856,7 @@ impl Device {
                             vk::PipelineStageFlags::FRAGMENT_SHADER,
                             vk::AccessFlags::SHADER_READ,
                         );
-                        pending.flush(&self.raw, command);
+                        pending.flush(&self.core, command);
                     }
                     frame.resources.push(texture.clone());
                 }
@@ -2841,7 +2882,7 @@ impl Device {
                             vk::AccessFlags::TRANSFER_WRITE,
                         ),
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     let regions = [vk::BufferImageCopy::default()
                         .buffer_offset(*target_offset)
                         .buffer_row_length({
@@ -2862,7 +2903,7 @@ impl Device {
                             depth: 1,
                         })];
                     unsafe {
-                        self.raw.cmd_copy_image_to_buffer(
+                        self.core.cmd_copy_image_to_buffer(
                             command,
                             texture.image,
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
@@ -2887,7 +2928,7 @@ impl Device {
                         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                         vk::AccessFlags::empty(),
                     );
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     frame.resources.push(texture.clone());
                     presenting = Some(present);
                 }
@@ -2917,18 +2958,18 @@ impl Device {
                             ),
                         );
                     }
-                    pending.flush(&self.raw, command);
+                    pending.flush(&self.core, command);
                     let pipeline_handle = *compiled
                         .compiled
                         .get()
                         .expect("a compute pipeline is compiled before dispatch");
                     unsafe {
-                        self.raw.cmd_bind_pipeline(
+                        self.core.cmd_bind_pipeline(
                             command,
                             vk::PipelineBindPoint::COMPUTE,
                             pipeline_handle,
                         );
-                        self.raw.cmd_bind_descriptor_sets(
+                        self.core.cmd_bind_descriptor_sets(
                             command,
                             vk::PipelineBindPoint::COMPUTE,
                             compiled.layout,
@@ -2936,7 +2977,7 @@ impl Device {
                             &[group.set],
                             &[],
                         );
-                        self.raw
+                        self.core
                             .cmd_dispatch(command, groups[0], groups[1], groups[2]);
                     }
                     frame.resources.push(compiled.clone());
@@ -2945,13 +2986,13 @@ impl Device {
             }
         }
         unsafe {
-            self.raw.cmd_write_timestamp(
+            self.core.cmd_write_timestamp(
                 command,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 self.stamps,
                 (slot * 2 + 1) as u32,
             );
-            self.raw.end_command_buffer(command)
+            self.core.end_command_buffer(command)
         }
         .unwrap_or_else(|error| panic!("closing a Vulkan compute submission: {error:?}"));
         let buffers = [command];
@@ -2962,7 +3003,7 @@ impl Device {
         }
         let submits = [submit];
         let turn = self.gate.take();
-        unsafe { self.raw.queue_submit(self.queue, &submits, frame.fence) }
+        unsafe { self.core.queue_submit(self.queue, &submits, frame.fence) }
             .unwrap_or_else(|error| panic!("submitting Vulkan compute work: {error:?}"));
         if let Some(present) = presenting {
             present.present(self.queue);
@@ -3004,7 +3045,7 @@ impl Device {
             .position(|frame| frame.index == completed + 1)
         {
             let fence = state.frames[slot].fence;
-            let signaled = unsafe { self.raw.get_fence_status(fence) }
+            let signaled = unsafe { self.core.get_fence_status(fence) }
                 .unwrap_or_else(|error| panic!("checking Vulkan compute completion: {error:?}"));
             if !signaled {
                 break;
@@ -3028,7 +3069,7 @@ impl Device {
             }
             let mut stamps = [0u64; 2];
             unsafe {
-                self.raw.get_query_pool_results(
+                self.core.get_query_pool_results(
                     self.stamps,
                     (slot * 2) as u32,
                     &mut stamps,
@@ -3110,7 +3151,7 @@ impl Device {
         );
         match self.gate.advance() {
             None => unsafe {
-                self.raw.wait_for_fences(
+                self.core.wait_for_fences(
                     &[fence],
                     true,
                     timeout.as_nanos().min(u64::MAX as u128) as u64,
@@ -3122,7 +3163,7 @@ impl Device {
                 loop {
                     let slice = HOST_SLICE.min(timeout.saturating_sub(started.elapsed()));
                     match unsafe {
-                        self.raw.wait_for_fences(
+                        self.core.wait_for_fences(
                             &[fence],
                             true,
                             slice.as_nanos().min(u64::MAX as u128) as u64,
@@ -3160,7 +3201,7 @@ impl Device {
             return;
         }
         let result = unsafe {
-            self.raw.wait_for_fences(
+            self.core.wait_for_fences(
                 &fences,
                 true,
                 RELEASE_TIMEOUT.as_nanos().min(u64::MAX as u128) as u64,
@@ -3182,13 +3223,13 @@ impl Device {
             .expect("the Vulkan queue is never poisoned");
         let frames = std::mem::take(&mut state.frames);
         for frame in frames {
-            unsafe { self.raw.destroy_fence(frame.fence, None) };
+            unsafe { self.core.destroy_fence(frame.fence, None) };
         }
     }
 
     pub(crate) fn write_host(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) {
         let mapped = unsafe {
-            self.raw.map_memory(
+            self.core.map_memory(
                 buffer.resource.memory,
                 0,
                 vk::WHOLE_SIZE,
@@ -3202,13 +3243,13 @@ impl Device {
                 mapped.cast::<u8>().add(offset as usize),
                 bytes.len(),
             );
-            self.raw.unmap_memory(buffer.resource.memory);
+            self.core.unmap_memory(buffer.resource.memory);
         }
     }
 
     pub(crate) fn read_host(&self, buffer: &Buffer, offset: u64, bytes: u64) -> Vec<u8> {
         let mapped = unsafe {
-            self.raw.map_memory(
+            self.core.map_memory(
                 buffer.resource.memory,
                 0,
                 vk::WHOLE_SIZE,
@@ -3220,13 +3261,13 @@ impl Device {
             std::slice::from_raw_parts(mapped.cast::<u8>().add(offset as usize), bytes as usize)
                 .to_vec()
         };
-        unsafe { self.raw.unmap_memory(buffer.resource.memory) };
+        unsafe { self.core.unmap_memory(buffer.resource.memory) };
         result
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
         let mapped = unsafe {
-            self.raw.map_memory(
+            self.core.map_memory(
                 buffer.resource.memory,
                 0,
                 bytes,
@@ -3236,7 +3277,7 @@ impl Device {
         .unwrap_or_else(|error| panic!("mapping a Vulkan readback: {error:?}"));
         let result =
             unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), bytes as usize) }.to_vec();
-        unsafe { self.raw.unmap_memory(buffer.resource.memory) };
+        unsafe { self.core.unmap_memory(buffer.resource.memory) };
         result
     }
 
@@ -3328,11 +3369,11 @@ impl Drop for GraphicsPipelineResource {
     fn drop(&mut self) {
         unsafe {
             if let Some(compiled) = self.compiled.get() {
-                self.raw.destroy_pipeline(*compiled, None);
+                self.core.destroy_pipeline(*compiled, None);
             }
-            self.raw.destroy_pipeline_layout(self.layout, None);
+            self.core.destroy_pipeline_layout(self.layout, None);
             for group in &self.groups {
-                self.raw.destroy_descriptor_set_layout(*group, None);
+                self.core.destroy_descriptor_set_layout(*group, None);
             }
         }
     }
@@ -3342,18 +3383,18 @@ impl Drop for TextureResource {
     fn drop(&mut self) {
         unsafe {
             for target in &self.targets {
-                self.raw.destroy_framebuffer(target.framebuffer, None);
-                self.raw.destroy_image_view(target.depth_view, None);
-                self.raw.destroy_image(target.depth, None);
-                self.raw.free_memory(target.depth_memory, None);
+                self.core.destroy_framebuffer(target.framebuffer, None);
+                self.core.destroy_image_view(target.depth_view, None);
+                self.core.destroy_image(target.depth, None);
+                self.core.free_memory(target.depth_memory, None);
                 if target.owned_view {
-                    self.raw.destroy_image_view(target.view, None);
+                    self.core.destroy_image_view(target.view, None);
                 }
             }
-            self.raw.destroy_image_view(self.view, None);
+            self.core.destroy_image_view(self.view, None);
             if let Some(memory) = self.memory {
-                self.raw.destroy_image(self.image, None);
-                self.raw.free_memory(memory, None);
+                self.core.destroy_image(self.image, None);
+                self.core.free_memory(memory, None);
             }
         }
     }
@@ -3390,11 +3431,11 @@ impl Surface {
         };
         unsafe {
             self.device
-                .raw
+                .core
                 .wait_for_fences(&[self.acquire], true, FRAME_TIMEOUT.as_nanos() as u64)
         }
         .unwrap_or_else(|error| panic!("waiting for a Vulkan acquire fence: {error:?}"));
-        unsafe { self.device.raw.reset_fences(&[self.acquire]) }
+        unsafe { self.device.core.reset_fences(&[self.acquire]) }
             .unwrap_or_else(|error| panic!("recycling a Vulkan acquire fence: {error:?}"));
         let texture = self.images[image as usize].clone();
         Some(NativeFrame {
@@ -3416,7 +3457,7 @@ impl Surface {
         self.device.idle();
         self.images.clear();
         for semaphore in self.present.drain(..) {
-            unsafe { self.device.raw.destroy_semaphore(semaphore, None) };
+            unsafe { self.device.core.destroy_semaphore(semaphore, None) };
         }
         unsafe { self.loader.destroy_swapchain(self.raw, None) };
         let (raw, images, present, width, height, format) =
@@ -3454,16 +3495,16 @@ impl Drop for Surface {
         self.device.idle();
         self.images.clear();
         for semaphore in self.present.drain(..) {
-            unsafe { self.device.raw.destroy_semaphore(semaphore, None) };
+            unsafe { self.device.core.destroy_semaphore(semaphore, None) };
         }
         unsafe { self.loader.destroy_swapchain(self.raw, None) };
-        unsafe { self.device.raw.destroy_fence(self.acquire, None) };
+        unsafe { self.device.core.destroy_fence(self.acquire, None) };
     }
 }
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        unsafe { self.device.destroy_sampler(self.raw, None) };
+        unsafe { self.core.destroy_sampler(self.raw, None) };
     }
 }
 
@@ -3471,11 +3512,11 @@ impl Drop for PipelineResource {
     fn drop(&mut self) {
         unsafe {
             if let Some(compiled) = self.compiled.get() {
-                self.raw.destroy_pipeline(*compiled, None);
+                self.core.destroy_pipeline(*compiled, None);
             }
-            self.raw.destroy_pipeline_layout(self.layout, None);
+            self.core.destroy_pipeline_layout(self.layout, None);
             for group in &self.groups {
-                self.raw.destroy_descriptor_set_layout(*group, None);
+                self.core.destroy_descriptor_set_layout(*group, None);
             }
         }
     }
@@ -3490,8 +3531,8 @@ impl Drop for GroupResource {
 impl Drop for BufferResource {
     fn drop(&mut self) {
         unsafe {
-            self.raw.destroy_buffer(self.handle, None);
-            self.raw.free_memory(self.memory, None);
+            self.core.destroy_buffer(self.handle, None);
+            self.core.free_memory(self.memory, None);
         }
     }
 }
@@ -3508,13 +3549,10 @@ impl Drop for Device {
                 .expect("the Vulkan render passes are never poisoned")
                 .drain(..)
             {
-                self.raw.destroy_render_pass(pass, None);
+                self.core.destroy_render_pass(pass, None);
             }
-            self.raw.destroy_query_pool(self.stamps, None);
-            self.raw.destroy_command_pool(self.pool, None);
-            if self.instance.is_some() {
-                self.raw.destroy_device(None);
-            }
+            self.core.destroy_query_pool(self.stamps, None);
+            self.core.destroy_command_pool(self.pool, None);
         }
     }
 }

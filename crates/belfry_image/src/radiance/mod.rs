@@ -11,7 +11,7 @@ impl Radiance {
     pub fn decode(bytes: &[u8], what: &str) -> Self {
         let (exposure, width, height, body) = header::header(bytes, what);
         let texels = scanline::decode(body, width, height, what);
-        let scale = exposure as f32;
+        let scale = 1.0 / exposure as f32;
         let mut rgb = Vec::with_capacity(texels.len() * 3);
         for texel in texels {
             rgb.extend_from_slice(&[texel[0] * scale, texel[1] * scale, texel[2] * scale]);

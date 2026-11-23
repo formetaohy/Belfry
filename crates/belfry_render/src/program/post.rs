@@ -42,7 +42,6 @@ mod transparency {
         let mut red = 0.0;
         let mut green = 0.0;
         let mut blue = 0.0;
-        let mut marker = 0.0;
         let head = heads[pixel];
         let mut total = 0u32;
         let mut node = head;
@@ -71,7 +70,6 @@ mod transparency {
             red += held.red * transmit;
             green += held.green * transmit;
             blue += held.blue * transmit;
-            marker += held.alpha * transmit;
             transmit *= max(0.0, 1.0 - held.alpha);
             previous = best;
             if transmit <= 0.001 {
@@ -82,7 +80,7 @@ mod transparency {
             base.x * transmit + red,
             base.y * transmit + green,
             base.z * transmit + blue,
-            base.w * transmit + marker,
+            base.w * transmit,
         );
     }
 }
@@ -401,7 +399,7 @@ mod sky {
             held_radiance.x * held.intensity,
             held_radiance.y * held.intensity,
             held_radiance.z * held.intensity,
-            1.0,
+            0.0,
         );
     }
 

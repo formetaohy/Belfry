@@ -106,6 +106,7 @@ impl Shading {
         &self,
         pipeline: &GraphicsPipeline,
         shadow: (&Texture, &Sampler),
+        point: (&Texture, &Sampler),
         probes: (&TextureTable, &SamplerTable),
     ) -> BindGroup {
         pipeline.bind_group(
@@ -117,6 +118,8 @@ impl Shading {
                 Binding::sampler(program::SHADE_RADIANCE_SAMPLER, &self.sampler),
                 Binding::texture(program::SHADE_BRDF, &self.brdf),
                 Binding::sampler(program::SHADE_BRDF_SAMPLER, &self.brdf_sampler),
+                Binding::texture(program::POINT_SHADOW_TEXTURE, point.0),
+                Binding::sampler(program::POINT_SHADOW_SAMPLER, point.1),
                 Binding::texture_table(program::PROBE_TEXTURES, probes.0),
                 Binding::sampler_table(program::PROBE_SAMPLERS, probes.1),
             ],

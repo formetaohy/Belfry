@@ -40,6 +40,7 @@ impl Renderer {
             device: self.device.clone(),
             queue: self.queue.clone(),
             eye: probe.transform.translation,
+            basis: probe.transform.rotation.normalize(),
             clip_space: self.device.clip_space(),
             rotation,
             intensity,
@@ -99,6 +100,7 @@ impl Renderer {
         let capture_shade = self.shading.group(
             &self.draw,
             (&self.captures.shadow, &self.captures.shadow_sampler),
+            (self.point_shadows.atlas(), self.point_shadows.sampler()),
             (self.probes.textures(), self.probes.samplers()),
         );
         let pipelines = Pipelines {

@@ -37,6 +37,7 @@ use crate::material::{AlphaMode, Material, MaterialDesc, MaterialLibrary};
 use crate::mesh::{Mesh, MeshLibrary};
 use crate::palette::{self, Palettes};
 use crate::pick::{PickBatch, PickFrame, PickResources, Picker};
+use crate::point_shadow::{POINT_SHADOW_NEAR, PointShadowFrame, PointShadows};
 use crate::post::Post;
 use crate::probe::Probes;
 use crate::program;
@@ -90,7 +91,6 @@ struct CaptureInputs<'a> {
     probe_count: u32,
     tables: Option<BindGroup>,
 }
-
 pub enum Target<'a> {
     Texture(&'a Texture),
     Surface(SurfaceFrame),
@@ -153,6 +153,8 @@ pub struct Renderer {
     line_records: Growing,
     picker: Picker,
     pick_frame: Option<PickFrame>,
+    point_shadows: PointShadows,
+    point_shadow_identity: usize,
     transparency: Transparency,
     temporality: Temporality,
     previous: HashMap<Entity, Mat4>,
@@ -269,6 +271,8 @@ impl Renderer {
         let probes = Probes::new(&device, shading.fallback(), shading.sampler());
         let baker = Baker::new(context);
         let captures = Captures::new(context);
+        let point_shadows = PointShadows::new(&device);
+        let point_shadow_identity = point_shadows.atlas().identity();
         let sky_record = GpuBuffer::new(
             &device,
             "belfry sky",
@@ -283,9 +287,10 @@ impl Renderer {
             )],
         );
         let shadows = (&shadow_map, &shadow_sampler);
+        let point = (point_shadows.atlas(), point_shadows.sampler());
         let probe_tables = (probes.textures(), probes.samplers());
-        let shade = shading.group(&draw, shadows, probe_tables);
-        let transparent_shade = shading.group(&transparent_draw, shadows, probe_tables);
+        let shade = shading.group(&draw, shadows, point, probe_tables);
+        let transparent_shade = shading.group(&transparent_draw, shadows, point, probe_tables);
         let sky_shade = shading.sky(&sky);
         let cull = context.declare(program::culling());
         let light_clusters = context.declare(program::clustering());
@@ -381,6 +386,8 @@ impl Renderer {
             line_records: Growing::new(&device, "belfry debug lines", storage),
             picker,
             pick_frame: None,
+            point_shadows,
+            point_shadow_identity,
             transparency: Transparency::new(&device),
             temporality: Temporality::new(&device),
             previous: HashMap::new(),
@@ -394,17 +401,22 @@ impl Renderer {
     fn refresh_ambient(&mut self, environment: Option<&Environment>) {
         self.shading.follow(environment);
         let identity = self.shading.identity();
-        if self.ambient == identity {
+        let point = self.point_shadows.atlas().identity();
+        if self.ambient == identity && self.point_shadow_identity == point {
             return;
         }
         let shadow = (&self.shadow_map, &self.shadow_sampler);
+        let point_shadow = (self.point_shadows.atlas(), self.point_shadows.sampler());
         let probe_tables = (self.probes.textures(), self.probes.samplers());
-        self.shade = self.shading.group(&self.draw, shadow, probe_tables);
-        self.transparent_shade = self
+        self.shade = self
             .shading
-            .group(&self.transparent_draw, shadow, probe_tables);
+            .group(&self.draw, shadow, point_shadow, probe_tables);
+        self.transparent_shade =
+            self.shading
+                .group(&self.transparent_draw, shadow, point_shadow, probe_tables);
         self.sky_shade = self.shading.sky(&self.sky);
         self.ambient = identity;
+        self.point_shadow_identity = point;
     }
 
     pub fn mesh(&mut self, vertices: &[crate::abi::Vertex]) -> Mesh {
@@ -583,16 +595,6 @@ impl Renderer {
         if probe_textures {
             self.ambient = None;
         }
-        self.refresh_ambient(environment);
-        let width = texture.width();
-        let height = texture.height();
-        let vertical = crate::frame::vertical(&self.device);
-        self.temporality
-            .prepare(&self.device, &self.queue, width, height);
-        let jitter = self.temporality.jitter();
-        let aspect = width as f32 / height as f32;
-        let (camera, transform) = camera_of(world);
-        let (light, light_transform) = light_of(world);
         let mut point_light_records = Vec::new();
         world.for_each_pair::<Transform, PointLight>(|entity, transform, light| {
             if world.contains::<Hidden>(entity) {
@@ -611,9 +613,36 @@ impl Renderer {
                     z: light.color.z * light.intensity,
                     w: 0.0,
                 },
+                shadow: Fvec4 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 0.0,
+                },
             });
         });
         let point_light_count = point_light_records.len() as u32;
+        let rows = point_light_count.max(1) as f32;
+        for (index, record) in point_light_records.iter_mut().enumerate() {
+            record.shadow = Fvec4 {
+                x: index as f32 / rows,
+                y: 1.0 / rows,
+                z: POINT_SHADOW_NEAR,
+                w: record.position.w,
+            };
+        }
+        self.point_shadows
+            .ensure(&self.device, point_light_records.len());
+        self.refresh_ambient(environment);
+        let width = texture.width();
+        let height = texture.height();
+        let vertical = crate::frame::vertical(&self.device);
+        self.temporality
+            .prepare(&self.device, &self.queue, width, height);
+        let jitter = self.temporality.jitter();
+        let aspect = width as f32 / height as f32;
+        let (camera, transform) = camera_of(world);
+        let (light, light_transform) = light_of(world);
         let eye = transform.translation;
         let forward = transform.rotation.rotate_vec3(-Vec3::Z).normalize();
         let view = camera.view_jittered(
@@ -755,7 +784,7 @@ impl Renderer {
                 total: collection.total,
                 depth_batches: collection.depth_batches,
                 joint_bytes: collection.joint_bytes,
-                point_lights: point_light_count,
+                points: &point_light_records,
                 cluster_offset_bytes,
                 cluster_bytes,
                 cluster_x,
@@ -905,8 +934,8 @@ const _: () = assert!(
     "the point light layout spans its record",
 );
 const _: () = assert!(
-    POINT_LIGHT_BYTES == 8 * WORD_BYTES,
-    "a point light record spans the eight words its shader indexes",
+    POINT_LIGHT_BYTES == 12 * WORD_BYTES,
+    "a point light record spans the twelve words its shader indexes",
 );
 const _: () = assert!(
     CLUSTER_BYTES == (LIGHT_CAPACITY + 1) as u64 * WORD_BYTES,

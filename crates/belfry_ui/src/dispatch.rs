@@ -667,7 +667,7 @@ impl<A: Clone> Ui<A> {
         self.focus = Some(node);
         self.focus_visible = false;
         self.input.clear_preedit();
-        self.wake_animation(node);
+        self.touch(node);
     }
 
     fn edit_press(&mut self, node: NodeId, at: Vec2) {
@@ -796,6 +796,7 @@ impl<A: Clone> Ui<A> {
             .map_or_else(String::new, |edit| edit.text().to_string());
         self.edit = None;
         self.input.clear_preedit();
+        self.touch(node);
         let action = match &self.tree.nodes[node].interaction {
             Interaction::Field {
                 commit,

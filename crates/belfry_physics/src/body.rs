@@ -441,13 +441,14 @@ fn mass_properties(parts: &[Part], mass: f32) -> (Vec3, Mat3) {
     });
     let mut columns = [Vec3::ZERO; 3];
     for part in parts {
-        let share = part.shape.volume() / total;
-        let inertia = part.shape.inertia(mass * share);
+        let share = mass * (part.shape.volume() / total);
+        let inertia = part.shape.inertia(share);
         let matrix = part.rotation.to_mat3();
         let tensor = matrix * Mat3::from_diagonal(inertia) * matrix.transpose();
         let span = part.offset - center;
-        let parallel = Mat3::from_diagonal(Vec3::splat(span.dot(span)))
-            - Mat3::from_cols(span * span.x, span * span.y, span * span.z);
+        let parallel = (Mat3::from_diagonal(Vec3::splat(span.dot(span)))
+            - Mat3::from_cols(span * span.x, span * span.y, span * span.z))
+            * share;
         for (axis, column) in columns.iter_mut().enumerate() {
             *column += tensor.col(axis) + parallel.col(axis);
         }

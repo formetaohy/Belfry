@@ -63,7 +63,7 @@ impl<A: Clone> Ui<A> {
             };
             let mut animating =
                 crate::widget::animate(&mut self.tree.nodes[id], &frame, &mut self.text);
-            if self.edit == Some(id) {
+            if self.edit == Some(id) || self.drag == Some(id) {
                 self.tree.nodes[id].paint_dirty = true;
                 animating = true;
             }

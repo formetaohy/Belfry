@@ -302,6 +302,14 @@ impl MaterialLibrary {
         self.white_linear_index = self.textures.add(&self.white_linear);
         self.flat_normal_index = self.textures.add(&self.flat_normal);
         self.clamp_index = self.samplers.add(&self.clamp);
+        for index in [
+            self.white_srgb_index,
+            self.white_linear_index,
+            self.flat_normal_index,
+        ] {
+            self.texture_counts[index as usize] = 1;
+        }
+        self.sampler_counts[self.clamp_index as usize] = 1;
     }
 
     pub(crate) fn add(&mut self, desc: MaterialDesc) -> Material {

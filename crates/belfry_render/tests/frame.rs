@@ -552,13 +552,30 @@ fn points(backend: Backend) {
         },
     );
     for (translation, color) in [
-        (Vec3::new(-6.0, 0.0, 0.5), RED),
-        (Vec3::new(6.0, 0.0, 0.5), BLUE),
+        (Vec3::new(-6.0, 0.0, 1.0), RED),
+        (Vec3::new(6.0, 0.0, 1.0), BLUE),
     ] {
         let light = world.spawn();
         world.insert(light, Transform::from_translation(translation));
         world.insert(light, PointLight::new(color, 1.0, 2.0));
     }
+    let occluder = world.spawn();
+    world.insert(
+        occluder,
+        Transform::from_scale_rotation_translation(
+            Vec3::new(0.2, 0.2, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(-6.0, 0.0, 0.9),
+        ),
+    );
+    world.insert(
+        occluder,
+        MeshInstance {
+            mesh: quad,
+            material,
+            tint: WHITE,
+        },
+    );
 
     renderer.render(&world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
@@ -566,9 +583,14 @@ fn points(backend: Backend) {
         backend,
         &pixels,
         256,
+        52,
         64,
-        64,
-        "the left tile holds the red point light it reaches",
+        "the occluder stands lit by the red point light it hides",
+    );
+    let shadowed = pixels[(64 * 256 + 64) as usize];
+    assert!(
+        shadowed.iter().take(3).all(|channel| *channel < 32),
+        "{backend:?} paints the wall behind the point light occluder {shadowed:?}",
     );
     assert_blue(
         backend,

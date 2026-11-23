@@ -185,6 +185,7 @@ pub(crate) struct AtmosphereBaker {
     scattering_pass: GraphicsPipeline,
     sky: GraphicsPipeline,
     setup: GpuBuffer,
+    setup_span: u64,
     transmittance_group: BindGroup,
     scattering_group: BindGroup,
     radiance_group: BindGroup,
@@ -244,13 +245,17 @@ impl AtmosphereBaker {
             TextureFormat::Rgba16Float,
             PipelineState::SCREEN,
         );
+        let setup_span = crate::span::padded(
+            device.limits().min_storage_buffer_offset_alignment,
+            RECORD_BYTES,
+        );
         let setup = GpuBuffer::new(
             &device,
             "belfry atmosphere setup",
-            RECORD_BYTES * u64::from(ATMOSPHERE_RECORDS),
+            setup_span * u64::from(ATMOSPHERE_RECORDS),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
-        let record = |index: u64| setup.binding(index * RECORD_BYTES, RECORD_BYTES);
+        let record = |index: u64| setup.binding(index * setup_span, RECORD_BYTES);
         let transmittance_group = transmittance_pass
             .bind_group(0, &[Binding::buffer(program::ATMOSPHERE_SETUP, record(0))]);
         let scattering_group =
@@ -283,6 +288,7 @@ impl AtmosphereBaker {
             scattering_pass,
             sky,
             setup,
+            setup_span,
             transmittance_group,
             scattering_group,
             radiance_group,
@@ -300,8 +306,12 @@ impl AtmosphereBaker {
             atmosphere.record(vertical, false),
             atmosphere.record(vertical, true),
         ];
-        self.setup
-            .write(&self.queue, bytemuck::cast_slice(&records));
+        let mut bytes = vec![0u8; (self.setup_span * u64::from(ATMOSPHERE_RECORDS)) as usize];
+        for (index, record) in records.iter().enumerate() {
+            let start = index * self.setup_span as usize;
+            bytes[start..start + RECORD_BYTES as usize].copy_from_slice(bytemuck::bytes_of(record));
+        }
+        self.setup.write(&self.queue, &bytes);
         let panorama = || {
             Texture::new(
                 &self.device,

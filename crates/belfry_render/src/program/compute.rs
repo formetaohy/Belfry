@@ -182,7 +182,7 @@ mod cluster {
         let slice_near = held.near * pow(ratio, slice as f32 / 24.0);
         let slice_far = held.near * pow(ratio, (slice + 1u32) as f32 / 24.0);
         for light in stride(lid, held.point_lights, 64u32) {
-            let at = light * 8u32;
+            let at = light * 12u32;
             let point_x = bitcast_f32(points[at]);
             let point_y = bitcast_f32(points[at + 1u32]);
             let point_z = bitcast_f32(points[at + 2u32]);

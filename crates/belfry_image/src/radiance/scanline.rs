@@ -2,6 +2,7 @@ use crate::radiance::value;
 
 const RUN: u8 = 128;
 const CHANNELS: usize = 4;
+const REPEAT: [u8; 3] = [1, 1, 1];
 
 pub(crate) fn decode(bytes: &[u8], width: u32, height: u32, what: &str) -> Vec<[f32; 3]> {
     let mut cursor = Cursor {
@@ -15,8 +16,7 @@ pub(crate) fn decode(bytes: &[u8], width: u32, height: u32, what: &str) -> Vec<[
         if (8..=0x7fff).contains(&width) {
             let start = cursor.offset;
             let head = cursor.take(4);
-            let scans = head[0] == 2 && head[1] == 2;
-            if scans {
+            if head[0] == 2 && head[1] == 2 && head[2] < RUN {
                 let declared = u32::from(head[2]) << 8 | u32::from(head[3]);
                 assert_eq!(
                     declared, width,
@@ -25,20 +25,50 @@ pub(crate) fn decode(bytes: &[u8], width: u32, height: u32, what: &str) -> Vec<[
                 cursor.scanline(&mut row);
             } else {
                 cursor.offset = start;
-                flat(&mut cursor, &mut row);
+                old(&mut cursor, &mut row);
             }
         } else {
-            flat(&mut cursor, &mut row);
+            old(&mut cursor, &mut row);
         }
         texels.extend(row.iter().copied().map(value));
     }
     texels
 }
 
-fn flat(cursor: &mut Cursor<'_>, row: &mut [[u8; 4]]) {
-    for texel in row.iter_mut() {
-        let head = cursor.take(4);
-        *texel = [head[0], head[1], head[2], head[3]];
+fn old(cursor: &mut Cursor<'_>, row: &mut [[u8; 4]]) {
+    let mut at = 0;
+    let mut shift = 0;
+    while at < row.len() {
+        let texel = cursor.texel();
+        if texel[..3] == REPEAT {
+            assert!(
+                at > 0,
+                "{} repeats a texel before it holds one",
+                cursor.what,
+            );
+            assert!(
+                shift < usize::BITS as usize,
+                "{} repeats a texel beyond its scanline",
+                cursor.what,
+            );
+            let count = usize::from(texel[3]) << shift;
+            assert!(
+                count <= row.len() - at,
+                "{} overruns a scanline of {} texels",
+                cursor.what,
+                row.len(),
+            );
+            let repeated = row[at - 1];
+            for held in &mut row[at..at + count] {
+                *held = repeated;
+            }
+            at += count;
+            shift += 8;
+        } else {
+            row[at] = texel;
+            at += 1;
+            shift = 0;
+        }
     }
 }
 
@@ -49,6 +79,11 @@ struct Cursor<'a> {
 }
 
 impl Cursor<'_> {
+    fn texel(&mut self) -> [u8; 4] {
+        let held = self.take(4);
+        [held[0], held[1], held[2], held[3]]
+    }
+
     fn take(&mut self, count: usize) -> &[u8] {
         let end = self.offset + count;
         assert!(

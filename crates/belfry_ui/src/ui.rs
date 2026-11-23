@@ -232,9 +232,7 @@ impl<A: Clone> Ui<A> {
         let command = modifiers.control || modifiers.logo;
         if self.edit.is_some() {
             return match key {
-                InputKey::Character(character) if command => {
-                    matches!(character.to_ascii_lowercase(), 'a' | 'c' | 'v' | 'x' | 'z')
-                }
+                InputKey::Character(character) if command => crate::edit::command(character),
                 InputKey::Character(_) | InputKey::Space => true,
                 InputKey::Backspace
                 | InputKey::Delete
@@ -413,6 +411,11 @@ impl<A: Clone> Ui<A> {
         }
         self.tree.nodes[id].runtime.active = true;
         self.animation.push(id);
+    }
+
+    pub(crate) fn touch(&mut self, id: NodeId) {
+        self.tree.nodes[id].paint_dirty = true;
+        self.wake_animation(id);
     }
 
     fn invalidate(&mut self) {

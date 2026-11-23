@@ -418,6 +418,13 @@ impl SceneComponent for AudioSourceRef {
                 && self.bus.as_ref().is_some_and(|bus| bus.as_str() == id))
     }
 
+    fn remap(&mut self, prefix: &str) {
+        self.bus = self
+            .bus
+            .as_ref()
+            .map(|bus| AudioBusId::new(format!("{prefix}{bus}")));
+    }
+
     fn rebind(
         &self,
         scene: &Scene,

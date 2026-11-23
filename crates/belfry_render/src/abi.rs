@@ -192,6 +192,7 @@ record!(MaterialRecord, MATERIAL, "Material" {
 record!(PointLightRecord, POINT_LIGHT, "PointLight" {
     position: Fvec4 => F32x4,
     radiance: Fvec4 => F32x4,
+    shadow: Fvec4 => F32x4,
 });
 
 record!(CascadeRecord, CASCADE, "Cascade" {

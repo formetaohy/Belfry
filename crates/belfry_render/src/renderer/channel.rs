@@ -9,7 +9,7 @@ pub(super) struct ChannelFrame<'a> {
     pub(super) total: u32,
     pub(super) depth_batches: u32,
     pub(super) joint_bytes: u64,
-    pub(super) point_lights: u32,
+    pub(super) points: &'a [PointLightRecord],
     pub(super) cluster_offset_bytes: u64,
     pub(super) cluster_bytes: u64,
     pub(super) cluster_x: u32,
@@ -40,7 +40,7 @@ impl Renderer {
             total,
             depth_batches,
             joint_bytes,
-            point_lights: point_light_count,
+            points,
             cluster_offset_bytes,
             cluster_bytes,
             cluster_x,
@@ -50,6 +50,7 @@ impl Renderer {
             line_vertices,
             probe_count,
         } = frame;
+        let point_light_count = points.len() as u32;
         submission.clear(self.lighting.buffer(), cluster_offset_bytes, cluster_bytes);
         if point_light_count > 0 {
             let group = self.light_clusters.bind_group(
@@ -89,6 +90,18 @@ impl Renderer {
         );
         self.upload(&collection.records, &arguments, slots);
         self.main_batches = batches.len() as u32;
+        self.point_shadows.prepare(
+            &self.device,
+            &self.queue,
+            &PointShadowFrame {
+                clip_space: self.device.clip_space(),
+                lights: points,
+                instances: total,
+                slots,
+                arguments: &arguments,
+            },
+        );
+        let point_cells = self.point_shadows.cells();
         let hzb = self
             .hzb
             .as_ref()
@@ -141,6 +154,18 @@ impl Renderer {
         submission.dispatch(&self.cull, &depth_cull, [total.div_ceil(WORKGROUP), 1, 1]);
         for group in &shadow_cull {
             submission.dispatch(&self.cull, group, [total.div_ceil(WORKGROUP), 1, 1]);
+        }
+        if point_light_count > 0 {
+            for cell in 0..point_cells {
+                let group = hzb.cull(
+                    &self.cull,
+                    self.point_shadows.view(cell),
+                    instances,
+                    self.point_shadows.drawn_view(cell),
+                    self.point_shadows.argument_view(cell),
+                );
+                submission.dispatch(&self.cull, &group, [total.div_ceil(WORKGROUP), 1, 1]);
+            }
         }
         let pipelines = Pipelines {
             depth: &self.depth,
@@ -335,6 +360,65 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         submission.render(&self.shadow_map, [1.0, 0.0, 0.0, 1.0], &cast);
+        if point_light_count > 0 {
+            let palette = self.joints.buffer().binding(0, joint_bytes);
+            let materials = self
+                .material_records
+                .buffer()
+                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES);
+            let opaque = depth_batches as usize;
+            let mut groups = Vec::with_capacity(point_cells as usize * opaque);
+            for cell in 0..point_cells {
+                for (index, batch) in batches.iter().take(opaque).enumerate() {
+                    let geometry = self.meshes.geometry(batch.mesh);
+                    let base = bases[index];
+                    groups.push([
+                        self.shadow.bind_group(
+                            0,
+                            &[
+                                Binding::buffer(program::SHADOW_PALETTE, palette),
+                                Binding::buffer(
+                                    program::SHADOW_SKINS,
+                                    self.meshes.skin_binding(geometry),
+                                ),
+                                Binding::buffer(
+                                    program::SHADOW_DRAWN,
+                                    self.point_shadows.drawn(cell, base, batch.count),
+                                ),
+                                Binding::buffer(
+                                    program::SHADOW_VERTICES,
+                                    self.meshes.buffer().binding(
+                                        u64::from(geometry.first) * VERTEX_BYTES,
+                                        u64::from(geometry.count) * VERTEX_BYTES,
+                                    ),
+                                ),
+                                Binding::buffer(program::SHADOW_MATERIALS, materials),
+                            ],
+                        ),
+                        shadow_tables.clone(),
+                    ]);
+                }
+            }
+            let draws = groups
+                .iter()
+                .enumerate()
+                .map(|(index, held)| {
+                    let cell = (index / opaque) as u32;
+                    let batch = (index % opaque) as u32;
+                    Draw::indirect(
+                        &self.shadow,
+                        held,
+                        self.point_shadows.arguments(cell, batch),
+                    )
+                    .viewport(self.point_shadows.viewport(cell))
+                })
+                .collect::<Vec<_>>();
+            submission.render(
+                self.point_shadows.atlas(),
+                self.point_shadows.clear(),
+                &draws,
+            );
+        }
         self.transparency.clear(submission);
         submission.render(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0], &main);
         Channels { arguments, tables }

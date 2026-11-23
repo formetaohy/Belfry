@@ -101,12 +101,20 @@ impl GraphAsset {
                     "from" => {
                         let name = value.text()?;
                         let name = String::from(self.state_name(name)?);
-                        self.transition_mut(at)?.from = name;
+                        let transition = self.transition_mut(at)?;
+                        if transition.to == name {
+                            return Err(format!("{what} transitions {name} to itself"));
+                        }
+                        transition.from = name;
                     }
                     "to" => {
                         let name = value.text()?;
                         let name = String::from(self.state_name(name)?);
-                        self.transition_mut(at)?.to = name;
+                        let transition = self.transition_mut(at)?;
+                        if transition.from == name {
+                            return Err(format!("{what} transitions {name} to itself"));
+                        }
+                        transition.to = name;
                     }
                     "fade" => {
                         let fade = crate::field::number(value, &what)?;

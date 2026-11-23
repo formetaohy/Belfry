@@ -8,6 +8,12 @@ const BLINK_DUTY: f32 = 0.53;
 const MULTI_CLICK_SECONDS: f32 = 0.35;
 const MULTI_CLICK_SLOP: f32 = 4.0;
 
+pub(crate) const COMMANDS: [char; 6] = ['a', 'c', 'v', 'x', 'y', 'z'];
+
+pub(crate) fn command(character: char) -> bool {
+    COMMANDS.contains(&character.to_ascii_lowercase())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Commit,
@@ -364,15 +370,17 @@ impl Edit {
             if (modifiers.control || modifiers.logo)
                 && let Key::Character(character) = key
             {
-                match character.to_ascii_lowercase() {
-                    'a' => self.select_all(time),
-                    'c' => self.copy(clipboard),
-                    'x' => self.cut(clipboard, time),
-                    'v' => self.paste(clipboard, time),
-                    'z' if modifiers.shift => self.redo(time),
-                    'z' => self.undo(time),
-                    'y' => self.redo(time),
-                    _ => {}
+                if command(character) {
+                    match character.to_ascii_lowercase() {
+                        'a' => self.select_all(time),
+                        'c' => self.copy(clipboard),
+                        'x' => self.cut(clipboard, time),
+                        'v' => self.paste(clipboard, time),
+                        'z' if modifiers.shift => self.redo(time),
+                        'z' => self.undo(time),
+                        'y' => self.redo(time),
+                        _ => {}
+                    }
                 }
                 continue;
             }

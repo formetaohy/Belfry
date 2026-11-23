@@ -9,24 +9,16 @@ use crate::shell::{View, section, text};
 pub(crate) fn panel<'a>(ctx: &BuildContext<'_, Message>, view: &View<'a>) -> Element<'a, Message> {
     let mut children = vec![create(ctx, view)];
     children.push(import(ctx, view));
-    children.push(list(ctx, view, "Meshes", assets(view, Asset::Mesh)));
-    children.push(list(ctx, view, "Materials", assets(view, Asset::Material)));
-    children.push(list(ctx, view, "Images", assets(view, Asset::Image)));
-    children.push(list(ctx, view, "Models", assets(view, Asset::Model)));
-    children.push(list(ctx, view, "Sounds", assets(view, Asset::Sound)));
-    children.push(list(
-        ctx,
-        view,
-        "Environments",
-        assets(view, Asset::Environment),
-    ));
-    children.push(list(ctx, view, "Graphs", assets(view, Asset::Graph)));
+    for asset in Asset::ALL {
+        children.push(list(ctx, view, asset));
+    }
     Element::column()
         .width(Length::Fill)
         .gap(8.0)
         .children([section(ctx, "Library", children)])
 }
 
+#[derive(Clone, Copy)]
 enum Asset {
     Mesh,
     Material,
@@ -37,44 +29,80 @@ enum Asset {
     Graph,
 }
 
-fn assets(view: &View<'_>, asset: Asset) -> Vec<(String, Target)> {
-    let scene = view.scene;
-    match asset {
-        Asset::Mesh => scene
-            .meshes()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Mesh(entry.id.clone())))
-            .collect(),
-        Asset::Material => scene
-            .materials()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Material(entry.id.clone())))
-            .collect(),
-        Asset::Image => scene
-            .images()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Image(entry.id.clone())))
-            .collect(),
-        Asset::Model => scene
-            .models()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Model(entry.id.clone())))
-            .collect(),
-        Asset::Sound => scene
-            .sounds()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Sound(entry.id.clone())))
-            .collect(),
-        Asset::Environment => scene
-            .environments()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Environment(entry.id.clone())))
-            .collect(),
-        Asset::Graph => scene
-            .graphs()
-            .iter()
-            .map(|entry| (entry.id.clone(), Target::Graph(entry.id.clone())))
-            .collect(),
+impl Asset {
+    const ALL: [Self; 7] = [
+        Self::Mesh,
+        Self::Material,
+        Self::Image,
+        Self::Model,
+        Self::Sound,
+        Self::Environment,
+        Self::Graph,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mesh => "mesh",
+            Self::Material => "material",
+            Self::Image => "image",
+            Self::Model => "model",
+            Self::Sound => "sound",
+            Self::Environment => "environment",
+            Self::Graph => "graph",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Mesh => "Meshes",
+            Self::Material => "Materials",
+            Self::Image => "Images",
+            Self::Model => "Models",
+            Self::Sound => "Sounds",
+            Self::Environment => "Environments",
+            Self::Graph => "Graphs",
+        }
+    }
+
+    fn entries(self, view: &View<'_>) -> Vec<(String, Target)> {
+        let scene = view.scene;
+        match self {
+            Self::Mesh => scene
+                .meshes()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Mesh(entry.id.clone())))
+                .collect(),
+            Self::Material => scene
+                .materials()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Material(entry.id.clone())))
+                .collect(),
+            Self::Image => scene
+                .images()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Image(entry.id.clone())))
+                .collect(),
+            Self::Model => scene
+                .models()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Model(entry.id.clone())))
+                .collect(),
+            Self::Sound => scene
+                .sounds()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Sound(entry.id.clone())))
+                .collect(),
+            Self::Environment => scene
+                .environments()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Environment(entry.id.clone())))
+                .collect(),
+            Self::Graph => scene
+                .graphs()
+                .iter()
+                .map(|entry| (entry.id.clone(), Target::Graph(entry.id.clone())))
+                .collect(),
+        }
     }
 }
 
@@ -130,11 +158,12 @@ fn import<'a>(ctx: &BuildContext<'_, Message>, view: &View<'a>) -> Element<'a, M
 fn list<'a>(
     ctx: &BuildContext<'_, Message>,
     view: &View<'a>,
-    title: &str,
-    entries: Vec<(String, Target)>,
+    asset: Asset,
 ) -> Element<'a, Message> {
     let theme = ctx.theme();
     let palette = theme.palette;
+    let title = asset.title();
+    let entries = asset.entries(view);
     if entries.is_empty() {
         return Element::column()
             .width(Length::Fill)
@@ -190,7 +219,7 @@ fn list<'a>(
         }
         rows.push(
             Element::row()
-                .key(Key::new(format!("library.{id}")))
+                .key(Key::new(format!("library.{}.{id}", asset.name())))
                 .width(Length::Fill)
                 .height(Length::Fixed(24.0))
                 .padding(belfry_ui::Edges::symmetric(6.0, 0.0))

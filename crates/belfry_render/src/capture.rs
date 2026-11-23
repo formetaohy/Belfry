@@ -19,7 +19,7 @@ use belfry_gpu_device::{
     GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Texture, TextureFormat,
     TextureUsages,
 };
-use belfry_math::{Mat4, Transform, Vec3};
+use belfry_math::{Mat4, Quat, Transform, Vec3};
 use std::mem::size_of;
 
 pub const PROBE_RESOLUTION: u32 = 128;
@@ -101,6 +101,7 @@ pub(crate) struct CaptureFrame<'a> {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) eye: Vec3,
+    pub(crate) basis: Quat,
     pub(crate) clip_space: ClipSpace,
     pub(crate) rotation: Mat4,
     pub(crate) intensity: f32,
@@ -139,6 +140,10 @@ pub(crate) struct Captures {
     batches: u32,
     point_bytes: u64,
     cluster_base: u32,
+    sky_span: u64,
+    cluster_span: u64,
+    drawn_span: u64,
+    argument_span: u64,
     pending: Option<Pending>,
     results: Vec<Capture>,
 }
@@ -224,6 +229,10 @@ impl Captures {
             batches: 0,
             point_bytes: 0,
             cluster_base: 0,
+            sky_span: SKY_BYTES,
+            cluster_span: FACE_CLUSTER_BYTES,
+            drawn_span: DRAW_BYTES,
+            argument_span: ARGUMENT_BYTES,
             sampler: Sampler::new(
                 device,
                 SamplerDesc {
@@ -299,7 +308,8 @@ impl Captures {
     }
 
     pub(crate) fn sky(&self, face: u32) -> BufferBinding<'_> {
-        self.skies.binding(u64::from(face) * SKY_BYTES, SKY_BYTES)
+        self.skies
+            .binding(u64::from(face) * self.sky_span, SKY_BYTES)
     }
 
     pub(crate) fn cascades(&self) -> BufferBinding<'_> {
@@ -308,31 +318,29 @@ impl Captures {
     }
 
     pub(crate) fn drawn(&self, view: u32, offset: u32, count: u32) -> BufferBinding<'_> {
-        let base = u64::from(view) * u64::from(self.slots) + u64::from(offset);
+        let base = u64::from(view) * self.drawn_span + u64::from(offset) * DRAW_BYTES;
         self.drawn
             .buffer()
-            .binding(base * DRAW_BYTES, u64::from(count) * DRAW_BYTES)
+            .binding(base, u64::from(count) * DRAW_BYTES)
     }
 
     pub(crate) fn drawn_view(&self, view: u32) -> BufferBinding<'_> {
-        let offset = u64::from(view) * u64::from(self.slots) * DRAW_BYTES;
+        let offset = u64::from(view) * self.drawn_span;
         self.drawn
             .buffer()
             .binding(offset, u64::from(self.slots) * DRAW_BYTES)
     }
 
     pub(crate) fn argument_view(&self, view: u32) -> BufferBinding<'_> {
-        let offset = u64::from(view) * u64::from(self.batches) * ARGUMENT_BYTES;
+        let offset = u64::from(view) * self.argument_span;
         self.arguments
             .buffer()
             .binding(offset, u64::from(self.batches) * ARGUMENT_BYTES)
     }
 
     pub(crate) fn arguments(&self, view: u32, batch: u32) -> BufferBinding<'_> {
-        let base = u64::from(view) * u64::from(self.batches) + u64::from(batch);
-        self.arguments
-            .buffer()
-            .binding(base * ARGUMENT_BYTES, ARGUMENT_BYTES)
+        let base = u64::from(view) * self.argument_span + u64::from(batch) * ARGUMENT_BYTES;
+        self.arguments.buffer().binding(base, ARGUMENT_BYTES)
     }
 
     pub(crate) fn point_lights(&self) -> BufferBinding<'_> {
@@ -343,7 +351,7 @@ impl Captures {
 
     pub(crate) fn clusters(&self, face: u32) -> BufferBinding<'_> {
         self.lighting.buffer().binding(
-            u64::from(self.cluster_base) * WORD_BYTES + u64::from(face) * FACE_CLUSTER_BYTES,
+            u64::from(self.cluster_base) * WORD_BYTES + u64::from(face) * self.cluster_span,
             FACE_CLUSTER_BYTES,
         )
     }
@@ -351,13 +359,13 @@ impl Captures {
     pub(crate) fn cluster_region(&self) -> (u64, u64) {
         (
             u64::from(self.cluster_base) * WORD_BYTES,
-            u64::from(FACES) * FACE_CLUSTER_BYTES,
+            u64::from(FACES) * self.cluster_span,
         )
     }
 
     pub(crate) fn lighting(&self) -> BufferBinding<'_> {
         let bytes =
-            u64::from(self.cluster_base) * WORD_BYTES + u64::from(FACES) * FACE_CLUSTER_BYTES;
+            u64::from(self.cluster_base) * WORD_BYTES + u64::from(FACES) * self.cluster_span;
         self.lighting.buffer().binding(0, bytes)
     }
 
@@ -375,10 +383,17 @@ impl Captures {
             .limits()
             .min_storage_buffer_offset_alignment
             .max(WORD_BYTES);
+        self.sky_span = crate::span::padded(alignment, SKY_BYTES);
+        self.cluster_span = crate::span::padded(alignment, FACE_CLUSTER_BYTES);
         self.point_bytes = frame.points.len() as u64 * POINT_LIGHT_BYTES;
         let cluster_bytes = self.point_bytes.next_multiple_of(alignment);
         self.cluster_base = (cluster_bytes / WORD_BYTES) as u32;
-        let lighting_bytes = cluster_bytes + u64::from(FACES) * FACE_CLUSTER_BYTES;
+        self.slots = frame.slots.max(1);
+        self.batches = frame.batches.len() as u32;
+        self.drawn_span = crate::span::padded(alignment, u64::from(self.slots) * DRAW_BYTES);
+        self.argument_span =
+            crate::span::padded(alignment, u64::from(self.batches) * ARGUMENT_BYTES);
+        let lighting_bytes = cluster_bytes + u64::from(FACES) * self.cluster_span;
         self.lighting
             .fit(&frame.device, lighting_bytes.max(POINT_LIGHT_BYTES));
         if !frame.points.is_empty() {
@@ -388,7 +403,13 @@ impl Captures {
         }
         let camera = Camera::new(WIDE, NEAR, FAR);
         let instances = frame.opaque_instances;
-        let views = FACES_OF.map(|(forward, up)| face_view(frame, forward, up));
+        let axes = FACES_OF.map(|(forward, up)| {
+            (
+                frame.basis.rotate_vec3(forward),
+                frame.basis.rotate_vec3(up),
+            )
+        });
+        let views = axes.map(|(forward, up)| face_view(frame, forward, up));
         let mut records = Vec::with_capacity(VIEWS as usize);
         for (face, view) in views.iter().enumerate() {
             let screen = Screen {
@@ -401,14 +422,15 @@ impl Captures {
                 cluster_x: CLUSTER_COLUMNS,
                 cluster_y: CLUSTER_ROWS,
                 point_lights: frame.points.len() as u32,
-                cluster_offset: self.cluster_base + face as u32 * FACE_CLUSTERS * LIGHT_STRIDE,
+                cluster_offset: self.cluster_base
+                    + face as u32 * (self.cluster_span / WORD_BYTES) as u32,
                 highlight: NO_HIGHLIGHT,
             };
             records.push(record_of_main_view(
                 view,
                 instances,
                 frame.eye,
-                Vec3::Z,
+                axes[face].0,
                 camera,
                 screen,
             ));
@@ -417,38 +439,34 @@ impl Captures {
         records.push(record_of_view(&shadow, instances, Vec3::ZERO, Vec3::Z));
         self.views
             .write(&frame.queue, bytemuck::cast_slice(records.as_slice()));
-        self.skies.write(
-            &frame.queue,
-            bytemuck::cast_slice(
-                &views
-                    .iter()
-                    .map(|view| sky_record(view, frame))
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        let skies = views
+            .iter()
+            .map(|view| sky_record(view, frame))
+            .collect::<Vec<_>>();
+        let mut sky_bytes = vec![0u8; (u64::from(FACES) * self.sky_span) as usize];
+        for (face, record) in skies.iter().enumerate() {
+            let start = face * self.sky_span as usize;
+            sky_bytes[start..start + SKY_BYTES as usize]
+                .copy_from_slice(bytemuck::bytes_of(record));
+        }
+        self.skies.write(&frame.queue, &sky_bytes);
         self.cascades.write(
             &frame.queue,
             bytemuck::cast_slice(&[record_of_cascade(&frame.shadow); SHADOW_CASCADES as usize]),
         );
-        let batches = frame.batches.len() as u64;
-        self.batches = batches as u32;
-        let argument_bytes = u64::from(VIEWS) * batches * ARGUMENT_BYTES;
         self.arguments
-            .fit(&frame.device, argument_bytes.max(ARGUMENT_BYTES));
-        if batches > 0 {
-            let mut arguments = Vec::with_capacity(VIEWS as usize * frame.arguments.len());
-            for _ in 0..VIEWS {
-                arguments.extend_from_slice(frame.arguments);
+            .fit(&frame.device, u64::from(VIEWS) * self.argument_span);
+        if self.batches > 0 {
+            let mut arguments = vec![0u8; (u64::from(VIEWS) * self.argument_span) as usize];
+            let source = bytemuck::cast_slice(frame.arguments);
+            for view in 0..VIEWS {
+                let start = (u64::from(view) * self.argument_span) as usize;
+                arguments[start..start + source.len()].copy_from_slice(source);
             }
-            self.arguments
-                .buffer()
-                .write(&frame.queue, bytemuck::cast_slice(&arguments));
+            self.arguments.buffer().write(&frame.queue, &arguments);
         }
-        self.slots = frame.slots.max(1);
-        self.drawn.fit(
-            &frame.device,
-            u64::from(VIEWS) * u64::from(self.slots) * DRAW_BYTES,
-        );
+        self.drawn
+            .fit(&frame.device, u64::from(VIEWS) * self.drawn_span);
     }
 
     pub(crate) fn shadow_drawn(&self, offset: u32, count: u32) -> BufferBinding<'_> {

@@ -14,6 +14,7 @@ mod material;
 mod mesh;
 mod palette;
 mod pick;
+mod point_shadow;
 mod post;
 mod probe;
 mod program;

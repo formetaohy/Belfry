@@ -73,8 +73,8 @@ impl Camera {
         let projection = Mat4::from_cols(
             projection.col(0),
             projection.col(1),
-            projection.col(2),
-            projection.col(3) + offset,
+            projection.col(2) + Vec4::new(-offset.x, -offset.y, 0.0, 0.0),
+            projection.col(3),
         );
         View::of(projection * Mat4::look_at(eye, eye + forward, up))
     }

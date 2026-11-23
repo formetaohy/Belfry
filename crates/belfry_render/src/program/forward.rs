@@ -25,6 +25,8 @@ mod instanced {
         radiance_sampler: Sampler,
         brdf: Texture2D,
         brdf_sampler: Sampler,
+        point_shadows: Texture2D,
+        point_shadower: Sampler,
     ) {
     }
 
@@ -460,7 +462,7 @@ mod instanced {
             }
             for slot in stride(0u32, count, 1u32) {
                 let light = lights[cluster_base + 1u32 + slot];
-                let at = light * 8u32;
+                let at = light * 12u32;
                 let point_x = bitcast_f32(lights[at]);
                 let point_y = bitcast_f32(lights[at + 1u32]);
                 let point_z = bitcast_f32(lights[at + 2u32]);
@@ -470,6 +472,12 @@ mod instanced {
                     bitcast_f32(lights[at + 5u32]),
                     bitcast_f32(lights[at + 6u32]),
                     0.0,
+                );
+                let shadow = fvec4(
+                    bitcast_f32(lights[at + 8u32]),
+                    bitcast_f32(lights[at + 9u32]),
+                    bitcast_f32(lights[at + 10u32]),
+                    bitcast_f32(lights[at + 11u32]),
                 );
                 let delta = fvec4(
                     point_x - position.x,
@@ -483,10 +491,20 @@ mod instanced {
                 let n_dot_l = max(dot3(normal, direction), 0.0);
                 let falloff = max(0.0, 1.0 - pow(distance / point_range, 4.0));
                 let attenuation = falloff * falloff / max(distance2, 0.0001);
+                let slope = sqrt(max(0.0, 1.0 - n_dot_l * n_dot_l)) / max(n_dot_l, 0.2);
+                let visible = point_visible(
+                    point_shadows,
+                    point_shadower,
+                    position,
+                    fvec4(point_x, point_y, point_z, 0.0),
+                    shadow,
+                    slope,
+                );
                 let term = pbr(normal, eye_direction, direction, base, metallic, roughness);
-                emitted_x += term.x * radiance.x * n_dot_l * attenuation;
-                emitted_y += term.y * radiance.y * n_dot_l * attenuation;
-                emitted_z += term.z * radiance.z * n_dot_l * attenuation;
+                let shaded = n_dot_l * attenuation * visible;
+                emitted_x += term.x * radiance.x * shaded;
+                emitted_y += term.y * radiance.y * shaded;
+                emitted_z += term.z * radiance.z * shaded;
             }
         }
         let lit = fvec4(
@@ -782,6 +800,87 @@ mod instanced {
             + compared(shadows, shadower, fvec2(x, up), depth)
             + compared(shadows, shadower, fvec2(right, up), depth);
         total * (1.0 / 9.0)
+    }
+
+    fn point_visible(
+        atlas: Texture2D,
+        atlas_sampler: Sampler,
+        fragment: Fvec4,
+        center: Fvec4,
+        shadow: Fvec4,
+        slope: f32,
+    ) -> f32 {
+        let origin = shadow.x;
+        let scale = shadow.y;
+        let near = shadow.z;
+        let far = shadow.w;
+        let dx = fragment.x - center.x;
+        let dy = fragment.y - center.y;
+        let dz = fragment.z - center.z;
+        let across = abs(dx);
+        let rising = abs(dy);
+        let forward = abs(dz);
+        let mut index = 0.0;
+        let mut horizontal = -dz;
+        let mut sideways = -dy;
+        let mut major = across;
+        if across >= rising && across >= forward {
+            if dx < 0.0 {
+                index = 1.0;
+                horizontal = dz;
+            }
+        } else if rising >= forward {
+            major = rising;
+            index = 2.0;
+            horizontal = dx;
+            sideways = dz;
+            if dy < 0.0 {
+                index = 3.0;
+                sideways = -dz;
+            }
+        } else {
+            major = forward;
+            index = 4.0;
+            horizontal = dx;
+            sideways = -dy;
+            if dz < 0.0 {
+                index = 5.0;
+                horizontal = -dx;
+            }
+        }
+        let span = max(major, 0.000001);
+        let margin = 1.0 / 512.0;
+        let left = clamped(0.5 + 0.5 * horizontal / span, margin, 1.0 - margin);
+        let top = clamped(0.5 - 0.5 * sideways / span, margin, 1.0 - margin);
+        let at = fvec2((index + left) * (1.0 / 6.0), origin + top * scale);
+        let texel = fvec2((1.0 / 6.0) / 256.0, scale / 256.0);
+        let low = fvec2(index * (1.0 / 6.0) + texel.x * 0.5, origin + texel.y * 0.5);
+        let high = fvec2(
+            (index + 1.0) * (1.0 / 6.0) - texel.x * 0.5,
+            origin + scale - texel.y * 0.5,
+        );
+        let bias = span * (2.0 / 256.0) * (1.5 + 2.0 * slope);
+        let reach = max(span - bias, near * 0.5);
+        let depth = (far * near / reach - far) / (near - far);
+        let left_x = clamped(at.x - texel.x, low.x, high.x);
+        let right_x = clamped(at.x + texel.x, low.x, high.x);
+        let down_y = clamped(at.y - texel.y, low.y, high.y);
+        let up_y = clamped(at.y + texel.y, low.y, high.y);
+        let total = point_compared(atlas, atlas_sampler, fvec2(left_x, down_y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(at.x, down_y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(right_x, down_y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(left_x, at.y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(at.x, at.y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(right_x, at.y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(left_x, up_y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(at.x, up_y), depth)
+            + point_compared(atlas, atlas_sampler, fvec2(right_x, up_y), depth);
+        total * (1.0 / 9.0)
+    }
+
+    fn point_compared(atlas: Texture2D, atlas_sampler: Sampler, at: Fvec2, depth: f32) -> f32 {
+        let stored = sample(atlas, atlas_sampler, at);
+        if stored.x < depth { 0.0 } else { 1.0 }
     }
 
     fn clamped(value: f32, low: f32, high: f32) -> f32 {

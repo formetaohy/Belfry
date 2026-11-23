@@ -82,12 +82,14 @@ pub(crate) const SHADOW_MATERIALS: u32 = 4;
 
 pub(crate) const SHADE_TEXTURE: u32 = 0;
 pub(crate) const SHADE_SAMPLER: u32 = 1;
-pub(crate) const PROBE_TEXTURES: u32 = 6;
-pub(crate) const PROBE_SAMPLERS: u32 = 7;
 pub(crate) const SHADE_RADIANCE: u32 = 2;
 pub(crate) const SHADE_RADIANCE_SAMPLER: u32 = 3;
 pub(crate) const SHADE_BRDF: u32 = 4;
 pub(crate) const SHADE_BRDF_SAMPLER: u32 = 5;
+pub(crate) const POINT_SHADOW_TEXTURE: u32 = 6;
+pub(crate) const POINT_SHADOW_SAMPLER: u32 = 7;
+pub(crate) const PROBE_TEXTURES: u32 = 8;
+pub(crate) const PROBE_SAMPLERS: u32 = 9;
 
 pub(crate) const SKY_VIEW: u32 = 0;
 pub(crate) const SKY_RADIANCE: u32 = 0;
@@ -182,6 +184,10 @@ const _: () = assert!(
 const _: () = assert!(
     LIGHT_TILE > 0 && LIGHT_SLICES > 0,
     "a light cluster covers a tile of at least one pixel and one depth slice",
+);
+const _: () = assert!(
+    crate::point_shadow::POINT_SHADOW_SIDE == 256,
+    "the point shadow shader walks the face texels its atlas holds",
 );
 const _: () = assert!(
     IRRADIANCE_PARTIALS == 1024 && crate::abi::IRRADIANCE_WORDS == 36,

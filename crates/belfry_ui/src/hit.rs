@@ -23,6 +23,17 @@ pub(crate) fn collect<A>(
     text: &mut Text,
     theme: &Theme,
 ) {
+    walk(tree, id, hits, text, theme, false);
+}
+
+fn walk<A>(
+    tree: &Tree<A>,
+    id: NodeId,
+    hits: &mut Vec<Hit>,
+    text: &mut Text,
+    theme: &Theme,
+    within: bool,
+) {
     let node = &tree.nodes[id];
     if !node.visible {
         return;
@@ -32,7 +43,8 @@ pub(crate) fn collect<A>(
     let interactive = node.interactive();
     let scroll = node.scroll_spec.is_some();
     let popup = node.popup_spec.is_some() && node.runtime.open;
-    let blocking = node.blocks_pointer || (!interactive && !scroll && !popup && opaque(node));
+    let blocking =
+        node.blocks_pointer || (!within && !interactive && !scroll && !popup && opaque(node));
     if visible && (interactive || scroll || popup || blocking) && (node.enabled || blocking) {
         let rect = if interactive {
             crate::widget::hit_rect(node, text, theme)
@@ -48,8 +60,9 @@ pub(crate) fn collect<A>(
             blocking,
         });
     }
+    let held = within || interactive || scroll || popup;
     for child in &node.children {
-        collect(tree, *child, hits, text, theme);
+        walk(tree, *child, hits, text, theme, held);
     }
 }
 

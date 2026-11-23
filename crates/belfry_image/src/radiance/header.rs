@@ -16,9 +16,14 @@ pub(crate) fn header<'a>(bytes: &'a [u8], what: &str) -> (f64, u32, u32, &'a [u8
             format = value == "32-bit_rle_rgbe";
         }
         if let Some(value) = held.strip_prefix("EXPOSURE=") {
-            exposure = value
+            let held: f64 = value
                 .parse()
                 .unwrap_or_else(|error| panic!("{what} holds the exposure {value}: {error}"));
+            assert!(
+                held.is_finite() && held != 0.0,
+                "{what} holds the exposure {value}",
+            );
+            exposure *= held;
         }
     }
     assert!(format, "{what} holds no thirty two bit rgbe format line");
