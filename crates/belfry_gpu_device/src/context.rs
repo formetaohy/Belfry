@@ -15,6 +15,7 @@ use crate::surface::{Surface, WindowHandle};
 use belfry_gpu::shader::ComputeProgram;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
@@ -140,6 +141,7 @@ pub(crate) struct DeviceState {
     pub(crate) capability: Capability,
     pub(crate) artifacts: ArtifactCache,
     pub(crate) groups: GroupCache,
+    pub(crate) submitted: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -252,6 +254,7 @@ impl Device {
                 capability,
                 artifacts,
                 groups: GroupCache::default(),
+                submitted: AtomicU64::new(0),
             }),
         })
     }
@@ -293,6 +296,10 @@ impl Device {
 
     pub(crate) fn native(&self) -> &NativeDevice {
         &self.state.native
+    }
+
+    pub(crate) fn recording(&self) -> u64 {
+        self.state.submitted.load(Ordering::Acquire) + 1
     }
 
     pub(crate) fn same(&self, other: &Self) -> bool {
@@ -350,19 +357,26 @@ impl Queue {
             .native()
             .submit(&writes, commands, first_dispatch);
         writes.clear();
+        self.device.state.submitted.store(index, Ordering::Release);
+        self.retire();
         SubmissionIndex(index)
     }
 
     pub fn wait(&self, submission: SubmissionIndex, timeout: Duration) {
         self.device.native().wait(submission.0, timeout);
+        self.retire();
     }
 
     pub fn complete(&self, submission: SubmissionIndex) -> bool {
-        self.device.native().complete(submission.0)
+        let complete = self.device.native().complete(submission.0);
+        self.retire();
+        complete
     }
 
     pub fn seconds(&self, submission: SubmissionIndex) -> f64 {
-        self.device.native().seconds(submission.0)
+        let seconds = self.device.native().seconds(submission.0);
+        self.retire();
+        seconds
     }
 
     pub(crate) fn read(
@@ -380,6 +394,7 @@ impl Queue {
         self.device
             .native()
             .wait(submission.0, crate::readback::READBACK_TIMEOUT);
+        self.retire();
         self.device.native().read(buffer.native(), bytes)
     }
 
@@ -390,6 +405,12 @@ impl Queue {
 
     pub fn idle(&self) {
         self.device.native().idle();
+        self.retire();
+    }
+
+    fn retire(&self) {
+        let completed = self.device.native().completed();
+        self.device.state.groups.retire(completed);
     }
 }
 

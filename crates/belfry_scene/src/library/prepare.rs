@@ -523,12 +523,27 @@ pub(super) fn panic_message(payload: &(dyn Any + Send)) -> String {
 pub(super) fn image_fingerprint(entry: &ImageEntry, source: Option<Digest>) -> Digest {
     let mut digest = Digest::builder();
     digest.text("image").text(&entry.id);
+    source_digest(&mut digest, &entry.source);
     match source {
         Some(source) => digest.digest(source),
         None => digest.number(0),
     };
     sampler_digest(&mut digest, entry.sampler);
     digest.finish()
+}
+
+fn source_digest(digest: &mut DigestBuilder, source: &ImageSource) {
+    match source {
+        ImageSource::Path(path) => {
+            digest.text("path").text(&path.to_string_lossy());
+        }
+        ImageSource::Model { model, image } => {
+            digest
+                .text("model")
+                .text(model.as_str())
+                .number(u64::from(*image));
+        }
+    }
 }
 
 pub(super) fn material_fingerprint(entry: &MaterialEntry, images: &[Digest]) -> Digest {

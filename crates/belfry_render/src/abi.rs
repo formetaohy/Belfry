@@ -261,9 +261,10 @@ record!(HzbStepRecord, HZB_STEP, "HzbStep" {
     target_width: f32 => F32,
     target_height: f32 => F32,
     vertical: f32 => F32,
-    pad0: u32 => U32,
-    pad1: u32 => U32,
-    pad2: u32 => U32,
+    source_offset: u32 => U32,
+    source_stride: u32 => U32,
+    target_offset: u32 => U32,
+    target_stride: u32 => U32,
 });
 
 record!(LightRecord, LIGHT, "Light" {
@@ -399,11 +400,6 @@ record!(TonemapRecord, TONEMAP, "Tonemap" {
     intensity: f32 => F32,
     source_width: f32 => F32,
     source_height: f32 => F32,
-});
-
-record!(TransparentRecord, TRANSPARENT, "Transparent" {
-    color: u32 => U32,
-    depth_coverage: u32 => U32,
 });
 
 record!(TransparentSetupRecord, TRANSPARENT_SETTINGS, "TransparentSetup" {

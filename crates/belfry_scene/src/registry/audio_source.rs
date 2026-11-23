@@ -426,7 +426,7 @@ impl SceneComponent for AudioSourceRef {
             .map(|bus| AudioBusId::new(format!("{prefix}{bus}")));
     }
 
-    fn rebind(
+    fn refresh(
         &self,
         scene: &Scene,
         node: &str,

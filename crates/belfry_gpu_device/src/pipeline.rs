@@ -163,7 +163,8 @@ impl PipelineHandle {
         let owner = Arc::as_ptr(&self.slot) as usize;
         let key = GroupKey::new(owner, group, entries.iter().map(|entry| entry.key()));
         let device = &self.slot.device;
-        device.state.groups.fetch(key, || {
+        let submission = device.recording();
+        device.state.groups.fetch(key, submission, || {
             let resources = bounded(device, &specs, entries, label);
             let native = device
                 .native()
@@ -257,7 +258,8 @@ impl GraphicsPipeline {
         let owner = Arc::as_ptr(&self.slot) as usize;
         let key = GroupKey::new(owner, group, entries.iter().map(|entry| entry.key()));
         let device = &self.slot.device;
-        device.state.groups.fetch(key, || {
+        let submission = device.recording();
+        device.state.groups.fetch(key, submission, || {
             let resources = bounded(device, &specs, entries, label);
             let native =
                 device

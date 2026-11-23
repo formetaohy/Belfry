@@ -135,24 +135,26 @@ impl SceneSync {
             );
             for registration in scene.registry().registrations() {
                 let authored = node.component_by_name(registration.spec.name);
-                let replaced = authored.is_some_and(|component| component.stale(changed))
-                    || (!shared
-                        && (!reused
-                            || previous.is_none_or(|previous| {
-                                match (previous.component_by_name(registration.spec.name), authored)
-                                {
-                                    (None, None) => false,
-                                    (Some(authored), Some(next)) => !authored.equals(next),
-                                    _ => true,
-                                }
-                            })));
-                if !replaced {
+                let refreshed = authored.is_some_and(|component| component.stale(changed));
+                let replaced = !shared
+                    && (!reused
+                        || previous.is_none_or(|previous| {
+                            match (previous.component_by_name(registration.spec.name), authored) {
+                                (None, None) => false,
+                                (Some(held), Some(next)) => !held.equals(next),
+                                _ => true,
+                            }
+                        }));
+                if !refreshed && !replaced {
                     continue;
                 }
                 touched |= registration.spec.reach == Reach::Node;
                 sky |= registration.spec.reach == Reach::World;
                 match authored {
-                    Some(component) => component.rebind(scene, &node.id, world, entity, assets),
+                    Some(component) if replaced => {
+                        component.replace(scene, &node.id, world, entity, assets)
+                    }
+                    Some(component) => component.refresh(scene, &node.id, world, entity, assets),
                     None => (registration.remove)(world, entity),
                 }
             }
@@ -214,7 +216,7 @@ impl SceneSync {
             touched |= registration.spec.reach == Reach::Node;
             sky |= registration.spec.reach == Reach::World;
             match authored {
-                Some(component) => component.rebind(scene, &node.id, world, entity, assets),
+                Some(component) => component.replace(scene, &node.id, world, entity, assets),
                 None => (registration.remove)(world, entity),
             }
         }
@@ -244,10 +246,12 @@ fn publish(world: &mut World, nodes: Vec<Entity>, sky: bool) {
     if nodes.is_empty() && !sky {
         return;
     }
-    let stamp = world
-        .resource::<SceneDamage>()
-        .map_or(1, |held| held.stamp().wrapping_add(1));
-    world.insert_resource(SceneDamage::new(stamp, nodes, sky));
+    match world.resource_mut::<SceneDamage>() {
+        Some(held) => held.absorb(nodes, sky),
+        None => {
+            world.insert_resource(SceneDamage::new(1, nodes, sky));
+        }
+    }
 }
 
 struct Visual<'a> {

@@ -6,7 +6,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 const BINDINGS: usize = 16;
-const CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ResourceKey {
@@ -93,13 +92,12 @@ impl Hash for GroupKey {
 }
 
 struct Entry {
-    tick: u64,
+    submission: u64,
     group: BindGroup,
 }
 
 #[derive(Default)]
 struct Held {
-    tick: u64,
     groups: HashMap<GroupKey, Entry>,
 }
 
@@ -109,48 +107,39 @@ pub(crate) struct GroupCache {
 }
 
 impl GroupCache {
-    pub(crate) fn fetch(&self, key: GroupKey, build: impl FnOnce() -> BindGroup) -> BindGroup {
-        let tick = {
-            let mut held = self
-                .held
-                .lock()
-                .expect("a bind group cache is never poisoned");
-            held.tick += 1;
-            let tick = held.tick;
-            match held.groups.get_mut(&key) {
-                Some(entry) => {
-                    entry.tick = tick;
-                    return entry.group.clone();
-                }
-                None => tick,
-            }
-        };
+    pub(crate) fn fetch(
+        &self,
+        key: GroupKey,
+        submission: u64,
+        build: impl FnOnce() -> BindGroup,
+    ) -> BindGroup {
+        let mut held = self
+            .held
+            .lock()
+            .expect("a bind group cache is never poisoned");
+        if let Some(entry) = held.groups.get_mut(&key) {
+            entry.submission = submission;
+            return entry.group.clone();
+        }
+        drop(held);
         let group = build();
         let mut held = self
             .held
             .lock()
             .expect("a bind group cache is never poisoned");
-        if held.groups.len() >= CAPACITY {
-            Self::evict(&mut held);
-        }
-        held.groups.insert(
-            key,
-            Entry {
-                tick,
-                group: group.clone(),
-            },
-        );
-        group
+        let entry = held.groups.entry(key).or_insert(Entry {
+            submission,
+            group: group.clone(),
+        });
+        entry.submission = submission;
+        entry.group.clone()
     }
 
-    fn evict(held: &mut Held) {
-        let mut stamps = held
+    pub(crate) fn retire(&self, completed: u64) {
+        self.held
+            .lock()
+            .expect("a bind group cache is never poisoned")
             .groups
-            .values()
-            .map(|entry| entry.tick)
-            .collect::<Vec<_>>();
-        stamps.sort_unstable();
-        let cut = stamps[held.groups.len() / 2];
-        held.groups.retain(|_, entry| entry.tick >= cut);
+            .retain(|_, entry| entry.submission > completed);
     }
 }

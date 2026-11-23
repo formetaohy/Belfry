@@ -19,6 +19,19 @@ impl SceneDamage {
         Self { stamp, nodes, sky }
     }
 
+    pub fn absorb(&mut self, nodes: impl IntoIterator<Item = Entity>, sky: bool) {
+        let nodes = nodes.into_iter().collect::<Vec<_>>();
+        assert!(
+            !nodes.is_empty() || sky,
+            "a scene damage names the nodes or the sky it changed",
+        );
+        self.stamp = self.stamp.wrapping_add(1);
+        self.sky |= sky;
+        self.nodes.extend(nodes);
+        let mut known = HashSet::with_capacity(self.nodes.len());
+        self.nodes.retain(|node| known.insert(*node));
+    }
+
     pub fn stamp(&self) -> u64 {
         self.stamp
     }
@@ -34,7 +47,6 @@ impl SceneDamage {
 
 #[derive(Default)]
 pub(crate) struct Damage {
-    stamp: u64,
     pending: HashMap<Entity, Pending>,
 }
 
@@ -47,18 +59,14 @@ struct Pending {
 impl Damage {
     pub(crate) fn absorb(
         &mut self,
-        world: &World,
+        world: &mut World,
         current: (&[Entity], &[(Vec3, f32)]),
         previous: &[(Entity, (Vec3, f32))],
     ) {
         self.pending.retain(|probe, _| world.is_alive(*probe));
-        let Some(damage) = world.resource::<SceneDamage>() else {
+        let Some(damage) = world.remove_resource::<SceneDamage>() else {
             return;
         };
-        if damage.stamp == self.stamp {
-            return;
-        }
-        self.stamp = damage.stamp;
         let probes = probes(world);
         if damage.sky {
             for (probe, _, _) in &probes {

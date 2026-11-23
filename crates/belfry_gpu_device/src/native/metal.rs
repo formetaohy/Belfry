@@ -1662,6 +1662,13 @@ impl Device {
         index <= state.completed
     }
 
+    pub(crate) fn completed(&self) -> u64 {
+        self.state
+            .lock()
+            .expect("the Metal compute queue is never poisoned")
+            .completed
+    }
+
     pub(crate) fn seconds(&self, index: u64) -> f64 {
         let mut state = self
             .state

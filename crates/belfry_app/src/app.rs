@@ -369,7 +369,7 @@ impl Session {
             .is_some_and(|live| live.sync.applied().is_some())
     }
 
-    fn draw_window(&mut self, world: &World, clear: [f32; 4], width: u32, height: u32) {
+    fn draw_window(&mut self, world: &mut World, clear: [f32; 4], width: u32, height: u32) {
         let surface = match &mut self.presentation {
             Presentation::Window(surface) => {
                 if surface.width() != width || surface.height() != height {
@@ -390,7 +390,7 @@ impl Session {
 
     fn draw_headless(
         &mut self,
-        world: &World,
+        world: &mut World,
         clear: [f32; 4],
         screenshot: bool,
     ) -> Option<Vec<u8>> {
@@ -548,7 +548,8 @@ impl App {
             self.sync_debug();
             frame += 1;
             let last = exit || config.frames.is_some_and(|frames| frame >= frames);
-            if let Some(png) = session.draw_headless(&self.world, clear, config.screenshot && last)
+            if let Some(png) =
+                session.draw_headless(&mut self.world, clear, config.screenshot && last)
             {
                 screenshot = Some(png);
             }
@@ -740,7 +741,7 @@ impl App {
             .expect("an application keeps its clear color")
             .0;
         self.sync_debug();
-        session.draw_window(&self.world, clear, width, height);
+        session.draw_window(&mut self.world, clear, width, height);
         belfry_render::install_captures(&mut self.world, session.renderer.take_captures());
         if exit { Flow::Exit } else { Flow::Continue }
     }

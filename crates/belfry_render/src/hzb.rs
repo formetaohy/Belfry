@@ -3,12 +3,13 @@ use crate::program;
 use belfry_gpu_device::{
     BindGroup, Binding, BufferBinding, BufferUsages, Device, Draw, GpuBuffer, GraphicsPipeline,
     Pass, PipelineHandle, Queue, Sampler, Submission, Texture, TextureFormat, TextureUsages,
+    Viewport,
 };
 use std::mem::size_of;
 
 const HZB_LEVEL_BYTES: u64 = size_of::<HzbLevelRecord>() as u64;
 const HZB_STEP_BYTES: u64 = size_of::<HzbStepRecord>() as u64;
-const HZB_COPY_ALIGN: u64 = 512;
+const HZB_LEVEL_ALIGN: u64 = 16;
 const WORD_BYTES: u64 = 4;
 const FULLSCREEN_VERTICES: u32 = 3;
 const CLEAR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -17,12 +18,12 @@ pub(crate) struct Hzb {
     width: u32,
     height: u32,
     depth: Texture,
-    levels: Vec<Texture>,
+    scratch: Texture,
     records: GpuBuffer,
     depths: GpuBuffer,
     base: [BindGroup; 2],
-    reductions: Vec<[BindGroup; 2]>,
-    offsets: Vec<u64>,
+    reductions: Vec<BindGroup>,
+    dimensions: Vec<(u32, u32)>,
 }
 
 impl Hzb {
@@ -46,8 +47,6 @@ impl Hzb {
             }
             current = (current.0.div_ceil(2), current.1.div_ceil(2));
         }
-        let usage =
-            TextureUsages::RENDER_ATTACHMENT | TextureUsages::SAMPLED | TextureUsages::COPY_SRC;
         let depth = Texture::new(
             device,
             "belfry depth",
@@ -55,50 +54,43 @@ impl Hzb {
             height,
             1,
             TextureFormat::R32Float,
-            usage,
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::SAMPLED,
         );
-        let levels = dimensions
-            .iter()
-            .map(|(level_width, level_height)| {
-                Texture::new(
-                    device,
-                    "belfry hzb level",
-                    *level_width,
-                    *level_height,
-                    1,
-                    TextureFormat::R32Float,
-                    usage,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut records = Vec::with_capacity(levels.len());
-        let mut offsets = Vec::with_capacity(levels.len());
+        let scratch = Texture::new(
+            device,
+            "belfry hzb scratch",
+            dimensions[0].0,
+            dimensions[0].1,
+            1,
+            TextureFormat::R32Float,
+            TextureUsages::RENDER_ATTACHMENT,
+        );
+        let mut records = Vec::with_capacity(dimensions.len());
+        let mut offsets = Vec::with_capacity(dimensions.len());
+        let mut strides = Vec::with_capacity(dimensions.len());
         let mut total = 0u64;
-        for level in &levels {
-            let offset = total.next_multiple_of(HZB_COPY_ALIGN);
+        for (level_width, level_height) in &dimensions {
+            let offset = total.next_multiple_of(HZB_LEVEL_ALIGN);
+            let stride = u64::from(*level_width);
             records.push(HzbLevelRecord {
                 offset: (offset / WORD_BYTES) as u32,
-                width: level.width(),
-                height: level.height(),
-                stride: (level.row_stride() / WORD_BYTES) as u32,
+                width: *level_width,
+                height: *level_height,
+                stride: stride as u32,
             });
-            offsets.push(offset);
-            total = offset + level.readback_bytes();
+            offsets.push((offset / WORD_BYTES) as u32);
+            strides.push(stride as u32);
+            total = offset + u64::from(*level_height) * stride * WORD_BYTES;
         }
         assert!(
             total <= device.limits().max_storage_buffer_binding_size,
             "a {width} by {height} depth pyramid of {total} bytes outruns the device storage binding"
         );
-        let depths = GpuBuffer::new(
-            device,
-            "belfry hzb depths",
-            total,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
+        let depths = GpuBuffer::new(device, "belfry hzb depths", total, BufferUsages::STORAGE);
         let level_records = GpuBuffer::new(
             device,
             "belfry hzb levels",
-            levels.len() as u64 * HZB_LEVEL_BYTES,
+            dimensions.len() as u64 * HZB_LEVEL_BYTES,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         level_records.write(queue, bytemuck::cast_slice(&records));
@@ -119,9 +111,10 @@ impl Hzb {
                 target_width: *level_width as f32,
                 target_height: *level_height as f32,
                 vertical,
-                pad0: 0,
-                pad1: 0,
-                pad2: 0,
+                source_offset: if index == 0 { 0 } else { offsets[index - 1] },
+                source_stride: if index == 0 { 0 } else { strides[index - 1] },
+                target_offset: offsets[index],
+                target_stride: strides[index],
             })
             .collect::<Vec<_>>();
         let alignment = device
@@ -141,13 +134,16 @@ impl Hzb {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         step_records.write(queue, &bytes);
+        let depths_binding = depths.binding(0, depths.size());
+        let step_binding =
+            |index: usize| step_records.binding(index as u64 * stride, HZB_STEP_BYTES);
         let base = [
             base_pipeline.bind_group(
                 0,
-                &[Binding::buffer(
-                    program::HZB_STEP_BINDING,
-                    step_records.binding(0, HZB_STEP_BYTES),
-                )],
+                &[
+                    Binding::buffer(program::HZB_STEP_BINDING, step_binding(0)),
+                    Binding::buffer(program::HZB_DEPTHS_BINDING, depths_binding),
+                ],
             ),
             base_pipeline.bind_group(
                 1,
@@ -157,36 +153,27 @@ impl Hzb {
                 ],
             ),
         ];
-        let reductions = (1..levels.len())
+        let reductions = (1..dimensions.len())
             .map(|index| {
-                [
-                    reduce_pipeline.bind_group(
-                        0,
-                        &[Binding::buffer(
-                            program::HZB_STEP_BINDING,
-                            step_records.binding(index as u64 * stride, HZB_STEP_BYTES),
-                        )],
-                    ),
-                    reduce_pipeline.bind_group(
-                        1,
-                        &[
-                            Binding::texture(program::HZB_SOURCE_BINDING, &levels[index - 1]),
-                            Binding::sampler(program::HZB_SAMPLER_BINDING, sampler),
-                        ],
-                    ),
-                ]
+                reduce_pipeline.bind_group(
+                    0,
+                    &[
+                        Binding::buffer(program::HZB_STEP_BINDING, step_binding(index)),
+                        Binding::buffer(program::HZB_DEPTHS_BINDING, depths_binding),
+                    ],
+                )
             })
             .collect::<Vec<_>>();
         Self {
             width,
             height,
             depth,
-            levels,
+            scratch,
             records: level_records,
             depths,
             base,
             reductions,
-            offsets,
+            dimensions,
         }
     }
 
@@ -199,7 +186,7 @@ impl Hzb {
     }
 
     pub(crate) fn levels(&self) -> u32 {
-        self.levels.len() as u32
+        self.dimensions.len() as u32
     }
 
     pub(crate) fn build(
@@ -209,17 +196,20 @@ impl Hzb {
         reduce_pipeline: &GraphicsPipeline,
     ) {
         submission.render(
-            Pass::new(&self.levels[0], CLEAR),
+            Pass::new(&self.scratch, CLEAR),
             &[Draw::new(base_pipeline, &self.base, FULLSCREEN_VERTICES)],
         );
-        submission.copy_texture(&self.levels[0], &self.depths, self.offsets[0]);
         for (index, group) in self.reductions.iter().enumerate() {
-            let level = index + 1;
+            let (width, height) = self.dimensions[index + 1];
             submission.render(
-                Pass::new(&self.levels[level], CLEAR),
-                &[Draw::new(reduce_pipeline, group, FULLSCREEN_VERTICES)],
+                Pass::new(&self.scratch, CLEAR),
+                &[Draw::new(
+                    reduce_pipeline,
+                    std::slice::from_ref(group),
+                    FULLSCREEN_VERTICES,
+                )
+                .viewport(Viewport::new(0.0, 0.0, width as f32, height as f32))],
             );
-            submission.copy_texture(&self.levels[level], &self.depths, self.offsets[level]);
         }
     }
 
@@ -241,7 +231,7 @@ impl Hzb {
                 Binding::buffer(
                     program::CULL_LEVELS,
                     self.records
-                        .binding(0, self.levels.len() as u64 * HZB_LEVEL_BYTES),
+                        .binding(0, self.dimensions.len() as u64 * HZB_LEVEL_BYTES),
                 ),
                 Binding::buffer(
                     program::CULL_DEPTHS,

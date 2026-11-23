@@ -25,7 +25,7 @@ use crate::abi::{
     DebugLineRecord, DrawRecord, HzbLevelRecord, HzbStepRecord, IRRADIANCE_PARTIALS,
     InstanceRecord, IrradianceRecord, IrradianceSetupRecord, JointRecord, LIGHT_CAPACITY,
     LIGHT_SLICES, LIGHT_STRIDE, LIGHT_TILE, LightRecord, MaterialRecord, MotionRecord, ProbeRecord,
-    SHADOW_CASCADES, SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord, TransparentRecord,
+    SHADOW_CASCADES, SkinVertexRecord, SkyRecord, TemporalRecord, TonemapRecord,
     TransparentSetupRecord, VERTEX_FLOATS, ViewRecord, WORKGROUP,
 };
 use belfry_gpu::AtomicU32;
@@ -46,6 +46,7 @@ pub(crate) const DEPTH_VERTICES: u32 = 4;
 pub(crate) const DEPTH_MATERIALS: u32 = 5;
 
 pub(crate) const HZB_STEP_BINDING: u32 = 0;
+pub(crate) const HZB_DEPTHS_BINDING: u32 = 1;
 pub(crate) const HZB_SOURCE_BINDING: u32 = 0;
 pub(crate) const HZB_SAMPLER_BINDING: u32 = 1;
 
@@ -57,7 +58,7 @@ pub(crate) const DRAW_VIEW: u32 = 4;
 pub(crate) const DRAW_PALETTE: u32 = 5;
 pub(crate) const DRAW_SKINS: u32 = 6;
 pub(crate) const DRAW_FRAGMENTS: u32 = 7;
-pub(crate) const DRAW_COUNTS: u32 = 8;
+pub(crate) const DRAW_COLORS: u32 = 8;
 pub(crate) const DRAW_DROPPED: u32 = 9;
 pub(crate) const DRAW_SETTINGS: u32 = 10;
 pub(crate) const DRAW_PROBES: u32 = 11;
@@ -131,8 +132,8 @@ pub(crate) const SHADOW_SHADOW: u32 = 0;
 pub(crate) const SHADOW_SAMPLER: u32 = 1;
 
 pub(crate) const RESOLVE_SETTINGS: u32 = 0;
-pub(crate) const RESOLVE_FRAGMENTS: u32 = 1;
-pub(crate) const RESOLVE_COUNTS: u32 = 2;
+pub(crate) const RESOLVE_KEYS: u32 = 1;
+pub(crate) const RESOLVE_COLORS: u32 = 2;
 pub(crate) const RESOLVE_SOURCE: u32 = 0;
 pub(crate) const RESOLVE_FILTER: u32 = 1;
 

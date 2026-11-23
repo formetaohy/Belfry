@@ -156,7 +156,7 @@ fn a_self_transition_is_refused_while_the_graph_is_authored() {
 
 #[test]
 fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
-    let scene = Scene::parse(SCENE, ".", "the test scene");
+    let mut scene = Scene::parse(SCENE, ".", "the test scene");
     let mut world = World::new();
     let mut sync = SceneSync::new();
     sync.sync(&scene, &mut world, &Mock, &Changed::none());
@@ -274,6 +274,17 @@ fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
         rebuilt.time(),
         time,
         "a reloaded clip keeps the time its machine reached",
+    );
+    scene
+        .edit(|edit| edit.set_property(&target, "animation.playing", &Value::Bool(false)))
+        .expect("the scene stops the animation it authored");
+    sync.apply(&scene, &mut world, &Mock, 1);
+    assert!(
+        !world
+            .get::<AnimationMachine>(holder)
+            .expect("the holder plays its graph")
+            .playing(),
+        "an authored playback change replaces the machine an asset reload kept",
     );
     let written = scene.write();
     let parsed = Scene::parse(&written, ".", "the written scene");

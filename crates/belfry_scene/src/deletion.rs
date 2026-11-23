@@ -229,13 +229,15 @@ impl Planner<'_> {
             .node_index(id)
             .ok_or_else(|| format!("the scene holds no node {id}"))?;
         let held = self.scene.subtree(index);
-        if self.referenced(&Target::Node(String::from(id)), Some(&held)) {
-            return Err(format!("the scene references the node {id}"));
-        }
         let removed = held
             .iter()
             .map(|at| self.scene.nodes[*at].id.clone())
             .collect::<HashSet<_>>();
+        for name in &removed {
+            if self.referenced(&Target::Node(name.clone()), Some(&held)) {
+                return Err(format!("the scene references the node {name}"));
+            }
+        }
         self.detached_surface(ReferenceKind::Skin, "deforms a skin", &removed, id)?;
         self.detached_surface(ReferenceKind::Animation, "animates", &removed, id)?;
         for at in held {

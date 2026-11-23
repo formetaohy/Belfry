@@ -97,7 +97,9 @@ pub const NOT: u16 = 200;
 pub const DP_DX: u16 = 207;
 pub const DP_DY: u16 = 208;
 pub const CONTROL_BARRIER: u16 = 224;
+pub const ATOMIC_LOAD: u16 = 227;
 pub const ATOMIC_EXCHANGE: u16 = 229;
+pub const ATOMIC_COMPARE_EXCHANGE: u16 = 230;
 pub const ATOMIC_I_ADD: u16 = 234;
 pub const ATOMIC_I_SUB: u16 = 235;
 pub const ATOMIC_S_MIN: u16 = 236;
@@ -140,6 +142,7 @@ pub mod scope {
 
 pub mod semantics {
     pub const RELAXED: u32 = 0;
+    pub const ACQUIRE: u32 = 2;
     pub const ACQUIRE_RELEASE: u32 = 8;
     pub const UNIFORM_MEMORY: u32 = 64;
     pub const WORKGROUP_MEMORY: u32 = 256;

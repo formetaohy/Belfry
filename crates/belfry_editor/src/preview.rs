@@ -259,7 +259,7 @@ impl Preview {
         let lines = debug::viewport(&self.world, self.debug);
         self.world.insert_resource(lines);
         self.renderer
-            .render(&self.world, Target::Texture(target), clear, highlight);
+            .render(&mut self.world, Target::Texture(target), clear, highlight);
         belfry_render::install_captures(&mut self.world, self.renderer.take_captures());
     }
 }

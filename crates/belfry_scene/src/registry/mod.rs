@@ -97,7 +97,7 @@ pub trait SceneComponent: Any + Clone + PartialEq + Send + Sync {
         changed.references(|kind, id| self.references(kind, id))
     }
 
-    fn rebind(
+    fn refresh(
         &self,
         scene: &Scene,
         node: &str,
@@ -158,7 +158,16 @@ pub(crate) trait ErasedComponent: Send + Sync {
 
     fn stale(&self, changed: &Changed) -> bool;
 
-    fn rebind(
+    fn refresh(
+        &self,
+        scene: &Scene,
+        node: &str,
+        world: &mut World,
+        entity: Entity,
+        assets: &dyn Assets,
+    );
+
+    fn replace(
         &self,
         scene: &Scene,
         node: &str,
@@ -220,7 +229,7 @@ impl<T: SceneComponent> ErasedComponent for T {
         SceneComponent::stale(self, changed)
     }
 
-    fn rebind(
+    fn refresh(
         &self,
         scene: &Scene,
         node: &str,
@@ -228,7 +237,19 @@ impl<T: SceneComponent> ErasedComponent for T {
         entity: Entity,
         assets: &dyn Assets,
     ) {
-        SceneComponent::rebind(self, scene, node, world, entity, assets)
+        SceneComponent::refresh(self, scene, node, world, entity, assets)
+    }
+
+    fn replace(
+        &self,
+        scene: &Scene,
+        node: &str,
+        world: &mut World,
+        entity: Entity,
+        assets: &dyn Assets,
+    ) {
+        T::remove(world, entity);
+        SceneComponent::install(self, scene, node, world, entity, assets)
     }
 
     fn as_any(&self) -> &dyn Any {

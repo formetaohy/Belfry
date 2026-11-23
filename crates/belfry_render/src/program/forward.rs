@@ -38,8 +38,8 @@ mod instanced {
 
     #[binding]
     fn transparent(
-        fragments: ReadWrite<TransparentRecord>,
-        counts: ReadWrite<AtomicU32>,
+        keys: ReadWrite<AtomicU32>,
+        colors: ReadWrite<u32>,
         dropped: ReadWrite<AtomicU32>,
         settings: Read<TransparentSetupRecord>,
     ) {
@@ -571,13 +571,47 @@ mod instanced {
             let pixel_x = min(max(floor(screen.x * width), 0.0), width - 1.0) as u32;
             let pixel_y = min(max(floor(screen.y * height), 0.0), height - 1.0) as u32;
             let pixel = pixel_y * setup.width + pixel_x;
-            let layer = atomic_add(&counts[pixel], 1u32);
-            if layer < setup.layers {
-                let at = pixel * setup.layers + layer;
-                fragments[at].color = encoded_color(fogged.x, fogged.y, fogged.z);
-                fragments[at].depth_coverage =
-                    encoded_depth(reach, camera.near, camera.far) | encoded_coverage(coverage);
-            } else {
+            let held = pixel * setup.layers;
+            let key = encoded_depth(reach, camera.near, camera.far)
+                | encoded_coverage(coverage)
+                | 0x40000000u32;
+            let mut placed = false;
+            let mut attempts = 8u32;
+            while !placed && attempts > 0u32 {
+                attempts -= 1u32;
+                let mut free = 4u32;
+                let mut farthest = 4u32;
+                let mut deepest = 0u32;
+                for layer in stride(0u32, setup.layers, 1u32) {
+                    let occupant = atomic_load(&keys[held + layer]);
+                    if occupant == 0u32 {
+                        if free == 4u32 {
+                            free = layer;
+                        }
+                    } else if occupant > 1u32 && (farthest == 4u32 || occupant > deepest) {
+                        farthest = layer;
+                        deepest = occupant;
+                    }
+                }
+                if free == 4u32 && farthest == 4u32 {
+                    break;
+                }
+                if free == 4u32 && key >= deepest {
+                    break;
+                }
+                let chosen = select(farthest, free, free != 4u32);
+                let expected = select(deepest, 0u32, free != 4u32);
+                let previous = atomic_compare_exchange(&keys[held + chosen], expected, 1u32);
+                if previous == expected {
+                    if expected != 0u32 {
+                        atomic_add(&dropped[0u32], 1u32);
+                    }
+                    colors[held + chosen] = encoded_color(fogged.x, fogged.y, fogged.z);
+                    atomic_store(&keys[held + chosen], key);
+                    placed = true;
+                }
+            }
+            if !placed {
                 atomic_add(&dropped[0u32], 1u32);
             }
         }
@@ -601,7 +635,7 @@ mod instanced {
 
     fn encoded_depth(reach: f32, near: f32, far: f32) -> u32 {
         let normalized = min(max((reach - near) / (far - near), 0.0), 1.0);
-        encoded_fixed(normalized * 16777215.0, 16777215.0) << 8u32
+        encoded_fixed(normalized * 4194303.0, 4194303.0) << 8u32
     }
 
     fn encoded_coverage(coverage: f32) -> u32 {

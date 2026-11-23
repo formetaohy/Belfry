@@ -127,7 +127,12 @@ fn paint(backend: Backend) {
             .translation,
         belfry_math::Vec3::ZERO,
     );
-    renderer.render(&world, Target::Texture(&target), [0.0, 0.0, 0.0, 1.0], None);
+    renderer.render(
+        &mut world,
+        Target::Texture(&target),
+        [0.0, 0.0, 0.0, 1.0],
+        None,
+    );
     assert_eq!(
         renderer.visible_instances(),
         1,

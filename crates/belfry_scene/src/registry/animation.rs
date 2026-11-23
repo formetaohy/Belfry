@@ -193,7 +193,7 @@ impl SceneComponent for AnimationRef {
         changed.holds(ReferenceKind::Graph) || changed.holds(ReferenceKind::Animation)
     }
 
-    fn rebind(
+    fn refresh(
         &self,
         scene: &Scene,
         node: &str,

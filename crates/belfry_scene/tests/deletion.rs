@@ -83,6 +83,53 @@ material = "grey"
 tint = [1.0, 1.0, 1.0]
 "#;
 
+const ARMATURE: &str = r#"format = "belfry_scene"
+images = []
+meshes = []
+materials = []
+
+[[nodes]]
+id = "rig"
+
+[nodes.transform]
+translation = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[[nodes]]
+id = "tip"
+parent = "rig"
+
+[nodes.transform]
+translation = [0.0, 1.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[[nodes]]
+id = "arm"
+
+[nodes.transform]
+translation = [2.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[nodes.joint]
+other = "tip"
+kind = "hinge"
+anchor = [0.0, 0.0, 0.0]
+other_anchor = [0.0, 0.0, 0.0]
+axis = [0.0, 0.0, 1.0]
+rest_length = 0.0
+collide = false
+limit = false
+lower = 0.0
+upper = 0.0
+cone = 0.0
+motor = false
+motor_speed = 0.0
+motor_force = 0.0
+"#;
+
 #[test]
 fn deleting_a_prefab_instance_prunes_the_assets_it_owns() {
     let root = directory("deletion_instance");
@@ -158,6 +205,28 @@ fn a_refused_deletion_leaves_the_scene_as_it_stood() {
         baked,
         "a deletion that stands writes its own scene",
     );
+
+    let mut rigged = Scene::parse(ARMATURE, ".", "an armature scene");
+    let stood = rigged.write();
+    assert!(
+        edit(&mut rigged, |edit| edit
+            .remove(&Target::Node(String::from("rig"))))
+        .is_err(),
+        "a scene refuses to delete a subtree a joint of another node reaches into",
+    );
+    assert_eq!(
+        rigged.write(),
+        stood,
+        "a refused subtree deletion leaves the scene as it stood",
+    );
+    edit(&mut rigged, |edit| {
+        edit.remove(&Target::Node(String::from("arm")))
+    })
+    .expect("the node that holds the joint deletes");
+    edit(&mut rigged, |edit| {
+        edit.remove(&Target::Node(String::from("rig")))
+    })
+    .expect("a subtree no other node reaches into deletes");
 }
 
 fn directory(name: &str) -> PathBuf {

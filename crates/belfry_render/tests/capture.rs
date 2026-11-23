@@ -146,7 +146,7 @@ fn lit_probe(backend: Backend, occluder: bool) -> [Vec3; 9] {
     world.insert(probe, Transform::from_scale(Vec3::splat(12.0)));
     world.insert(probe, placeholder(&mut renderer));
     world.insert(probe, CaptureProbe::default());
-    let captures = settled(&mut renderer, &world, &target);
+    let captures = settled(&mut renderer, &mut world, &target);
     assert_eq!(captures.len(), 1, "{backend:?} captures the lit probe");
     captures[0].environment.irradiance
 }
@@ -238,7 +238,7 @@ fn capture(backend: Backend) {
     world.insert(probe, placeholder(&mut renderer));
     world.insert(probe, CaptureProbe::default());
 
-    let captures = settled(&mut renderer, &world, &target);
+    let captures = settled(&mut renderer, &mut world, &target);
     assert_eq!(
         captures.len(),
         1,
@@ -269,7 +269,7 @@ fn capture(backend: Backend) {
     belfry_render::install_captures(&mut world, captures);
 
     assert!(
-        settled(&mut renderer, &world, &target).is_empty(),
+        settled(&mut renderer, &mut world, &target).is_empty(),
         "{backend:?} captures a probe once for the box it holds",
     );
     world.insert(
@@ -281,7 +281,7 @@ fn capture(backend: Backend) {
         ),
     );
     assert_eq!(
-        settled(&mut renderer, &world, &target).len(),
+        settled(&mut renderer, &mut world, &target).len(),
         1,
         "{backend:?} captures a probe whose box moved",
     );
@@ -366,7 +366,7 @@ fn damaged(backend: Backend) {
     world.insert(right, CaptureProbe::default());
     let mut captured = Vec::new();
     while captured.len() < 2 {
-        let captures = settled(&mut renderer, &world, &target);
+        let captures = settled(&mut renderer, &mut world, &target);
         assert!(
             !captures.is_empty(),
             "{backend:?} captures both probes: {captured:?}",
@@ -375,11 +375,11 @@ fn damaged(backend: Backend) {
         belfry_render::install_captures(&mut world, captures);
     }
     assert!(
-        settled(&mut renderer, &world, &target).is_empty(),
+        settled(&mut renderer, &mut world, &target).is_empty(),
         "{backend:?} captures a probe once for the box it holds",
     );
     world.insert_resource(SceneDamage::new(1, vec![near], false));
-    let captures = settled(&mut renderer, &world, &target);
+    let captures = settled(&mut renderer, &mut world, &target);
     assert_eq!(
         captures.iter().map(|held| held.entity).collect::<Vec<_>>(),
         [left],
@@ -387,13 +387,13 @@ fn damaged(backend: Backend) {
     );
     belfry_render::install_captures(&mut world, captures);
     assert!(
-        settled(&mut renderer, &world, &target).is_empty(),
+        settled(&mut renderer, &mut world, &target).is_empty(),
         "{backend:?} leaves the probe the damage misses baked",
     );
     world.insert_resource(SceneDamage::new(2, Vec::new(), true));
     let mut again = Vec::new();
     while again.len() < 2 {
-        let captures = settled(&mut renderer, &world, &target);
+        let captures = settled(&mut renderer, &mut world, &target);
         assert!(
             !captures.is_empty(),
             "{backend:?} rebakes every probe the sky reaches: {again:?}",
@@ -410,7 +410,7 @@ fn damaged(backend: Backend) {
     );
 }
 
-fn settled(renderer: &mut Renderer, world: &World, target: &Texture) -> Vec<Capture> {
+fn settled(renderer: &mut Renderer, world: &mut World, target: &Texture) -> Vec<Capture> {
     for _ in 0..8 {
         renderer.render(world, Target::Texture(target), CLEAR, None);
         let captures = renderer.take_captures();

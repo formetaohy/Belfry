@@ -348,6 +348,28 @@ impl<'w, 'm> FunctionWriter<'w, 'm> {
             DeviceInstruction::Load { pointer, result } => {
                 let ty = self.writer.value_types[result];
                 let id = self.value(*result);
+                let pointee = self
+                    .writer
+                    .module
+                    .pointee(self.writer.module.value_ty(*pointer))
+                    .1;
+                if matches!(self.writer.module.ty(pointee), Type::Atomic(_)) {
+                    let space = self.pointer_space(*pointer);
+                    let scope = if space == Space::WorkGroup {
+                        scope::WORKGROUP
+                    } else {
+                        scope::DEVICE
+                    };
+                    let scope = self.writer.integer(Scalar::U32, scope);
+                    let ordering = self.writer.integer(Scalar::U32, semantics::RELAXED);
+                    self.push(
+                        Instruction::result(ATOMIC_LOAD, ty, id)
+                            .operand(self.value(*pointer))
+                            .operand(scope)
+                            .operand(ordering),
+                    );
+                    return;
+                }
                 let operands = self.memory_operands(*pointer, true);
                 let load = Instruction::result(LOAD, ty, id)
                     .operand(self.value(*pointer))
@@ -621,6 +643,38 @@ impl<'w, 'm> FunctionWriter<'w, 'm> {
                         .operand(scope)
                         .operand(relaxed)
                         .operand(self.value(*value)),
+                );
+            }
+            DeviceInstruction::CompareExchange {
+                pointer,
+                expected,
+                desired,
+                result,
+            } => {
+                let space = self.pointer_space(*pointer);
+                let scope = if space == Space::WorkGroup {
+                    scope::WORKGROUP
+                } else {
+                    scope::DEVICE
+                };
+                let scope = self.writer.integer(Scalar::U32, scope);
+                let ordering = self.writer.integer(
+                    Scalar::U32,
+                    semantics::ACQUIRE_RELEASE | semantics::UNIFORM_MEMORY,
+                );
+                let unequal = self
+                    .writer
+                    .integer(Scalar::U32, semantics::ACQUIRE | semantics::UNIFORM_MEMORY);
+                let ty = self.writer.value_types[result];
+                let id = self.value(*result);
+                self.push(
+                    Instruction::result(ATOMIC_COMPARE_EXCHANGE, ty, id)
+                        .operand(self.value(*pointer))
+                        .operand(scope)
+                        .operand(ordering)
+                        .operand(unequal)
+                        .operand(self.value(*desired))
+                        .operand(self.value(*expected)),
                 );
             }
             DeviceInstruction::WorkGroupUniformLoad { pointer, result } => {

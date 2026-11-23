@@ -662,6 +662,15 @@ impl NativeDevice {
         }
     }
 
+    pub(crate) fn completed(&self) -> u64 {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(device) => device.completed(),
+            #[cfg(metal_backend)]
+            Self::Metal(device) => device.completed(),
+        }
+    }
+
     pub(crate) fn seconds(&self, index: u64) -> f64 {
         match self {
             #[cfg(vulkan_backend)]

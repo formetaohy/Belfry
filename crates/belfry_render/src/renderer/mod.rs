@@ -17,7 +17,7 @@ use crate::abi::{
     SHADOW_ATLAS_COLUMNS, SHADOW_CASCADES, SHADOW_SIDE, SkinVertexRecord, SkyRecord, VERTEX_FLOATS,
     ViewRecord, WORKGROUP,
 };
-use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
+use crate::batch::{Pipelines, Shared, Slot, SlotGroups, table};
 use crate::capture::{Capture, CaptureFrame, CaptureProbe, Captures, Probe};
 use crate::damage::Damage;
 use crate::environment::{
@@ -120,8 +120,6 @@ pub struct Renderer {
     materials: MaterialLibrary,
     material_records: Growing,
     materials_dirty: bool,
-    tables: Tables,
-    groups: Groups,
     shade: BindGroup,
     transparent_shade: BindGroup,
     shadow_map: Texture,
@@ -362,8 +360,6 @@ impl Renderer {
             materials,
             material_records: Growing::new(&device, "belfry material records", storage),
             materials_dirty: true,
-            tables: Tables::new(),
-            groups: Groups::new(),
             shade,
             transparent_shade,
             shadow_map,
@@ -560,8 +556,6 @@ impl Renderer {
 
     fn materials_changed(&mut self) {
         self.materials_dirty = true;
-        self.tables.invalidate();
-        self.groups.invalidate();
     }
 
     fn flush_materials(&mut self) {
@@ -583,7 +577,7 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        world: &World,
+        world: &mut World,
         target: Target<'_>,
         clear: [f32; 4],
         highlight: Option<Entity>,
@@ -594,6 +588,8 @@ impl Renderer {
         };
         self.flush_materials();
         self.settle_captures();
+        let collection = self.collect(world, highlight);
+        self.absorb_damage(world, &collection);
         let ambient = ambient_of(world);
         let (environment, environment_transform) = match ambient.global {
             Some((environment, transform)) => (Some(environment), transform),
@@ -675,7 +671,6 @@ impl Renderer {
             eye,
             forward,
         };
-        let collection = self.collect(world, highlight);
         self.temporality.begin(
             &self.queue,
             pose,
@@ -683,7 +678,6 @@ impl Renderer {
             self.palettes.base(),
             self.palettes.previous_base(),
         );
-        self.absorb_damage(world, &collection);
         let probe = match self.captures.pending() {
             Some(_) => None,
             None => self.stale_probe(world),

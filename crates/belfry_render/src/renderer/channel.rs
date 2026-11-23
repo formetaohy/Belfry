@@ -203,44 +203,73 @@ impl Renderer {
                 }),
             });
         }
-        self.groups.prepare(
-            &pipelines,
-            &Inputs {
-                shared: Shared {
-                    view: self.views.binding(0, VIEW_BYTES),
-                    motion_view: self.temporality.view(),
-                    palette: self.palettes.binding(),
-                    materials: self
-                        .material_records
-                        .buffer()
-                        .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
-                    light: self.light.binding(0, LIGHT_BYTES),
-                    cascades: self
-                        .cascades
-                        .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
-                    lighting: self.lighting.buffer().binding(0, self.lighting_capacity),
-                    probes: self.probes.record(probe_count),
-                    fragments: self.transparency.fragments(),
-                    counts: self.transparency.counts(),
-                    dropped: self.transparency.dropped(),
-                    settings: self.transparency.settings(),
-                },
-                slots: &slots_in,
-                opaque: depth_batches,
-            },
-        );
+        let shared = Shared {
+            view: self.views.binding(0, VIEW_BYTES),
+            motion_view: self.temporality.view(),
+            palette: self.palettes.binding(),
+            materials: self
+                .material_records
+                .buffer()
+                .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES),
+            light: self.light.binding(0, LIGHT_BYTES),
+            cascades: self
+                .cascades
+                .binding(0, u64::from(CASCADE_COUNT) * CASCADE_BYTES),
+            lighting: self.lighting.buffer().binding(0, self.lighting_capacity),
+            probes: self.probes.record(probe_count),
+            keys: self.transparency.keys(),
+            colors: self.transparency.colors(),
+            dropped: self.transparency.dropped(),
+            settings: self.transparency.settings(),
+        };
+        let groups = slots_in
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                SlotGroups::build(&pipelines, &shared, slot, index >= depth_batches as usize)
+            })
+            .collect::<Vec<_>>();
         let textures = self.materials.textures();
         let samplers = self.materials.samplers();
-        let depth_tables = self.tables.depth(&pipelines, textures, samplers);
-        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
-        let tables = self.tables.opaque(&pipelines, textures, samplers);
-        let transparent_tables = self.tables.blended(&pipelines, textures, samplers);
-        let motion_tables = self.tables.motion(&pipelines, textures, samplers);
+        let depth_tables = table(
+            pipelines.depth,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
+        let shadow_tables = table(
+            pipelines.shadow,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
+        let tables = table(
+            pipelines.opaque,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
+        let transparent_tables = table(
+            pipelines.blended,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
+        let motion_tables = table(
+            pipelines.motion,
+            program::MOTION_TEXTURE,
+            program::MOTION_SAMPLER,
+            textures,
+            samplers,
+        );
         let depth_groups = (0..depth_batches as usize)
             .map(|index| {
                 [
-                    self.groups
-                        .at(index)
+                    groups[index]
                         .depth()
                         .expect("an opaque batch binds the depth pass")
                         .clone(),
@@ -250,8 +279,7 @@ impl Renderer {
             .collect::<Vec<_>>();
         let mut main_groups = Vec::with_capacity(batches.len());
         let mut motion_groups = Vec::with_capacity(batches.len());
-        for index in 0..batches.len() {
-            let slot = self.groups.at(index);
+        for (index, slot) in groups.iter().enumerate() {
             if index < depth_batches as usize {
                 main_groups.push([slot.shade().clone(), tables.clone(), self.shade.clone()]);
             } else {
@@ -265,11 +293,8 @@ impl Renderer {
         }
         let mut cast_groups = Vec::with_capacity(CASCADE_COUNT as usize * depth_batches as usize);
         for cascade in 0..CASCADE_COUNT as usize {
-            for batch in 0..depth_batches as usize {
-                cast_groups.push([
-                    self.groups.at(batch).shadow(cascade).clone(),
-                    shadow_tables.clone(),
-                ]);
+            for slot in groups.iter().take(depth_batches as usize) {
+                cast_groups.push([slot.shadow(cascade).clone(), shadow_tables.clone()]);
             }
         }
         let depth = depth_groups

@@ -1,4 +1,4 @@
-use crate::abi::{TRANSPARENT_LAYERS, TransparentRecord, TransparentSetupRecord};
+use crate::abi::{TRANSPARENT_LAYERS, TransparentSetupRecord};
 use crate::program;
 use belfry_gpu_device::{
     AddressMode, Binding, BufferBinding, BufferUsages, Device, Draw, Filter, GpuBuffer,
@@ -7,7 +7,6 @@ use belfry_gpu_device::{
 };
 use std::mem::size_of;
 
-const RECORD_BYTES: u64 = size_of::<TransparentRecord>() as u64;
 const SETTINGS_BYTES: u64 = size_of::<TransparentSetupRecord>() as u64;
 const WORD_BYTES: u64 = 4;
 const RESOLVE_VERTICES: u32 = 3;
@@ -15,12 +14,13 @@ const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const LIT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 struct Screen {
-    counts: GpuBuffer,
-    fragments: GpuBuffer,
+    keys: GpuBuffer,
+    colors: GpuBuffer,
     dropped: GpuBuffer,
     settings: GpuBuffer,
     width: u32,
     height: u32,
+    layers: u32,
 }
 
 pub(crate) struct Transparency {
@@ -68,24 +68,14 @@ impl Transparency {
             return;
         }
         let pixels = u64::from(width) * u64::from(height);
-        let fragment_bytes = pixels * u64::from(TRANSPARENT_LAYERS) * RECORD_BYTES;
+        let layer_bytes = pixels * u64::from(TRANSPARENT_LAYERS) * WORD_BYTES;
         assert!(
-            fragment_bytes <= device.limits().max_storage_buffer_binding_size,
-            "a {width} by {height} frame layers {fragment_bytes} transparent bytes beyond the device storage binding",
+            layer_bytes <= device.limits().max_storage_buffer_binding_size,
+            "a {width} by {height} frame slots {layer_bytes} transparent layers beyond the device storage binding",
         );
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let counts = GpuBuffer::new(
-            device,
-            "belfry transparent counts",
-            pixels * WORD_BYTES,
-            storage,
-        );
-        let fragments = GpuBuffer::new(
-            device,
-            "belfry transparent fragments",
-            fragment_bytes,
-            BufferUsages::STORAGE,
-        );
+        let keys = GpuBuffer::new(device, "belfry transparent keys", layer_bytes, storage);
+        let colors = GpuBuffer::new(device, "belfry transparent colors", layer_bytes, storage);
         let dropped = GpuBuffer::new(
             device,
             "belfry transparent dropped",
@@ -108,12 +98,13 @@ impl Transparency {
             }),
         );
         self.screen = Some(Screen {
-            counts,
-            fragments,
+            keys,
+            colors,
             dropped,
             settings,
             width,
             height,
+            layers: TRANSPARENT_LAYERS,
         });
     }
 
@@ -121,39 +112,33 @@ impl Transparency {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
-        submission.clear(
-            &screen.counts,
-            0,
-            u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
-        );
+            .expect("a transparent frame holds its layers");
+        let layers = u64::from(screen.width) * u64::from(screen.height) * u64::from(screen.layers);
+        submission.clear(&screen.keys, 0, layers * WORD_BYTES);
         submission.clear(&screen.dropped, 0, WORD_BYTES);
     }
 
-    pub(crate) fn fragments(&self) -> BufferBinding<'_> {
+    pub(crate) fn keys(&self) -> BufferBinding<'_> {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
-        screen.fragments.binding(0, screen.fragments.size())
+            .expect("a transparent frame holds its layers");
+        screen.keys.binding(0, screen.keys.size())
     }
 
-    pub(crate) fn counts(&self) -> BufferBinding<'_> {
+    pub(crate) fn colors(&self) -> BufferBinding<'_> {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
-        screen.counts.binding(
-            0,
-            u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
-        )
+            .expect("a transparent frame holds its layers");
+        screen.colors.binding(0, screen.colors.size())
     }
 
     pub(crate) fn dropped(&self) -> BufferBinding<'_> {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
+            .expect("a transparent frame holds its layers");
         screen.dropped.binding(0, WORD_BYTES)
     }
 
@@ -165,7 +150,7 @@ impl Transparency {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
+            .expect("a transparent frame holds its layers");
         screen.settings.binding(0, SETTINGS_BYTES)
     }
 
@@ -173,7 +158,7 @@ impl Transparency {
         let screen = self
             .screen
             .as_ref()
-            .expect("a transparent frame holds its fragments");
+            .expect("a transparent frame holds its layers");
         let frame = self.resolve.bind_group(
             0,
             &[
@@ -182,15 +167,12 @@ impl Transparency {
                     screen.settings.binding(0, SETTINGS_BYTES),
                 ),
                 Binding::buffer(
-                    program::RESOLVE_FRAGMENTS,
-                    screen.fragments.binding(0, screen.fragments.size()),
+                    program::RESOLVE_KEYS,
+                    screen.keys.binding(0, screen.keys.size()),
                 ),
                 Binding::buffer(
-                    program::RESOLVE_COUNTS,
-                    screen.counts.binding(
-                        0,
-                        u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
-                    ),
+                    program::RESOLVE_COLORS,
+                    screen.colors.binding(0, screen.colors.size()),
                 ),
             ],
         );
@@ -208,10 +190,6 @@ impl Transparency {
     }
 }
 
-const _: () = assert!(
-    RECORD_BYTES == 8,
-    "a transparent layer packs its shaded colour beside its depth and coverage",
-);
 const _: () = assert!(
     SETTINGS_BYTES == 16,
     "the transparent settings pack the layers, viewport and vertical direction",

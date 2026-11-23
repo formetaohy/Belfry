@@ -708,9 +708,18 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            Intrinsic::AtomicAdd | Intrinsic::AtomicSub | Intrinsic::AtomicExchange => {
-                self.atomic(intrinsic, args)
+            Intrinsic::AtomicLoad => {
+                let pointer = self.reference(&args[0], "an atomic load");
+                let ty = self.compiler.module().loaded_ty(pointer.ty);
+                self.emit(ty, |result| DeviceInstruction::Load {
+                    pointer: pointer.value,
+                    result,
+                })
             }
+            Intrinsic::AtomicAdd
+            | Intrinsic::AtomicSub
+            | Intrinsic::AtomicExchange
+            | Intrinsic::AtomicCompareExchange => self.atomic(intrinsic, args),
             Intrinsic::WorkgroupUniformLoad => self.workgroup_uniform_load(args),
             Intrinsic::CoopmatAccumulator => {
                 let value = self.value_with_hint(&args[0], Some(self.compiler.scalar("f32")));
@@ -821,18 +830,28 @@ impl FunctionLower<'_> {
 
     pub(super) fn atomic(&mut self, intrinsic: Intrinsic, args: &[ast::Expression]) -> Typed {
         let pointer = self.reference(&args[0], "a device atomic");
-        let fun = match intrinsic {
-            Intrinsic::AtomicAdd => AtomicOp::Add,
-            Intrinsic::AtomicSub => AtomicOp::Subtract,
-            Intrinsic::AtomicExchange => AtomicOp::Exchange,
-            other => panic!("{} is not a device atomic", other.name()),
-        };
         let ty = self.compiler.module().loaded_ty(pointer.ty);
         assert_eq!(
             self.compiler.module().ty(ty).scalar(),
             Some(Scalar::U32),
             "a device atomic counts unsigned words",
         );
+        if intrinsic == Intrinsic::AtomicCompareExchange {
+            let expected = self.value_with_hint(&args[1], Some(ty));
+            let desired = self.value_with_hint(&args[2], Some(ty));
+            return self.emit(ty, |result| DeviceInstruction::CompareExchange {
+                pointer: pointer.value,
+                expected: expected.value,
+                desired: desired.value,
+                result,
+            });
+        }
+        let fun = match intrinsic {
+            Intrinsic::AtomicAdd => AtomicOp::Add,
+            Intrinsic::AtomicSub => AtomicOp::Subtract,
+            Intrinsic::AtomicExchange => AtomicOp::Exchange,
+            other => panic!("{} is not a device atomic", other.name()),
+        };
         let value = self.value_with_hint(&args[1], Some(ty));
         self.emit(ty, |result| DeviceInstruction::Atomic {
             op: fun,

@@ -152,10 +152,13 @@ fn a_scene_sync_follows_the_structure_it_edits() {
         stamp + 1,
         "an applied node publishes the damage the probes rebake on",
     );
-    assert_eq!(
-        damage.nodes(),
-        [a],
+    assert!(
+        damage.nodes().contains(&a),
         "an applied node damages the node it moved",
+    );
+    assert!(
+        damage.nodes().contains(&b) && damage.nodes().contains(&c),
+        "a publish keeps the damage an earlier publish of the same frame left",
     );
     assert_eq!(
         world.get::<LocalTransform>(a),

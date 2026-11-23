@@ -212,7 +212,7 @@ fn paint(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     assert_eq!(
         renderer.pick(Vec2::new(16.0, 8.0)),
         Some(near),
@@ -261,7 +261,7 @@ fn paint(backend: Backend) {
         "{backend:?} draws the instance of the culled mesh"
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, Some(near));
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, Some(near));
     let pixels = read(&context, &target);
     assert!(
         (28..38).any(|y| {
@@ -270,7 +270,7 @@ fn paint(backend: Backend) {
         }),
         "{backend:?} outlines the highlighted instance along the silhouette it covers",
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, Some(culled));
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, Some(culled));
     let pixels = read(&context, &target);
     assert!(
         (28..38).all(|y| {
@@ -281,7 +281,7 @@ fn paint(backend: Backend) {
     );
 
     world.insert(near, Transform::from_translation(Vec3::new(0.0, 0.0, -0.5)));
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     assert_eq!(
         renderer.pick(Vec2::new(16.0, 8.0)),
         Some(covered),
@@ -331,7 +331,7 @@ fn paint(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     let shaded = pixels[(16 * SIDE + 16) as usize];
     let lit = pixels[(48 * SIDE + 48) as usize];
@@ -402,7 +402,7 @@ fn paint(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&far, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut far, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     let mut dark = false;
     let mut lit = false;
@@ -469,7 +469,7 @@ fn paint(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&occluded, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut occluded, Target::Texture(&target), CLEAR, None);
     let visible = renderer.visible_instances();
     assert_eq!(
         visible, 1,
@@ -577,7 +577,7 @@ fn points(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     assert_red(
         backend,
@@ -760,7 +760,6 @@ fn layers(
     );
     let blush = renderer.material(
         MaterialDesc::new(RED)
-            .alpha(0.5)
             .alpha_mode(AlphaMode::Blend)
             .base_color_image(MaterialImage::new(white, sampler)),
     );
@@ -820,7 +819,7 @@ fn layers(
         },
     );
 
-    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(target), CLEAR, None);
     let pixels = read(context, target);
     let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     assert!(
@@ -841,7 +840,7 @@ fn layers(
         },
     );
 
-    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(target), CLEAR, None);
     let pixels = read(context, target);
     assert_red(
         backend,
@@ -862,7 +861,7 @@ fn layers(
 
     world.despawn(mask);
     let mut veils = Vec::new();
-    for depth in [1.85, 1.8, 1.75, 1.7] {
+    for depth in [1.7, 1.75, 1.8, 1.85] {
         let layer = world.spawn();
         world.insert(
             layer,
@@ -881,7 +880,7 @@ fn layers(
     let overflowed = world.spawn();
     world.insert(
         overflowed,
-        Transform::from_translation(Vec3::new(0.0, 0.0, 1.65)),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 1.9)),
     );
     world.insert(
         overflowed,
@@ -891,20 +890,17 @@ fn layers(
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(target), CLEAR, None);
     let pixels = read(context, target);
     let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     assert!(
-        center[0] > 32
-            && center[1] > 32
-            && center[2] > 32
-            && i32::from(center[0]) < i32::from(center[1]) + 40,
-        "{backend:?} keeps the four layers beside the fragment beyond its capacity {center:?}",
+        center[0] > 32 && center[1] > 32 && center[2] > 32 && center[0] > center[1] + 64,
+        "{backend:?} keeps the layer nearest the eye over the four it replaces {center:?}",
     );
     assert_eq!(
         renderer.dropped_transparent_fragments(),
         SIDE * SIDE,
-        "{backend:?} counts the fragment every covered pixel drops",
+        "{backend:?} counts the layer every covered pixel loses beyond its four",
     );
 
     for veil in veils {
@@ -924,7 +920,7 @@ fn layers(
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(target), CLEAR, None);
     let pixels = read(context, target);
     let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     assert!(
@@ -1015,7 +1011,12 @@ fn crossing(
         },
     );
 
-    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+    renderer.render(
+        &mut world,
+        Target::Texture(target),
+        [0.0, 0.0, 0.0, 1.0],
+        None,
+    );
     let pixels = read(context, target);
     let left = pixels[(SIDE as usize / 2) * SIDE as usize + 20];
     let right = pixels[(SIDE as usize / 2) * SIDE as usize + 44];
@@ -1119,7 +1120,7 @@ fn glow(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     let core = pixels[((side / 2) * side + side / 2) as usize];
     let near = pixels[((side / 2) * side + side * 3 / 8) as usize];
@@ -1240,7 +1241,7 @@ fn maps(backend: Backend) {
         },
     );
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     assert_red(
         backend,
@@ -1316,7 +1317,7 @@ fn skinned(backend: Backend) {
         entity,
         Skin::new("joint", vec![joint], Arc::from([Mat4::IDENTITY])),
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     assert_eq!(renderer.visible_instances(), 1);
     assert_eq!(
         renderer.pick(Vec2::new(24.0, 32.0)),
@@ -1392,7 +1393,7 @@ fn line(backend: Backend) {
         Vec4::new(0.0, 1.0, 0.0, 1.0),
     );
     world.insert_resource(lines);
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     assert_red(
         backend,
@@ -1423,7 +1424,7 @@ fn line(backend: Backend) {
             tint: BLUE,
         },
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     assert_green(
         backend,
@@ -1502,7 +1503,7 @@ fn ambient(backend: Backend) {
     world.insert(sky_entity, Transform::IDENTITY);
     world.insert(sky_entity, environment);
 
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     let sky = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     println!("{backend:?} sky {sky:?}");
@@ -1513,7 +1514,7 @@ fn ambient(backend: Backend) {
 
     let turned = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI));
     world.insert(sky_entity, turned);
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
     let sky = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     println!("{backend:?} turned sky {sky:?}");
@@ -1549,7 +1550,7 @@ fn ambient(backend: Backend) {
                 tint: WHITE,
             },
         );
-        renderer.render(&world, Target::Texture(&target), CLEAR, None);
+        renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
         let pixels = read(&context, &target);
         let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
         println!("{backend:?} {title} {center:?}");
@@ -1575,7 +1576,7 @@ fn ambient(backend: Backend) {
                 tint: WHITE,
             },
         );
-        renderer.render(&world, Target::Texture(&target), CLEAR, None);
+        renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
         let pixels = read(&context, &target);
         let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
         println!("{backend:?} turned {title} {center:?}");
@@ -1612,7 +1613,7 @@ fn ambient(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let plain = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     let mut hazy = world
         .get::<Environment>(sky_entity)
@@ -1632,7 +1633,7 @@ fn ambient(backend: Backend) {
             Vec3::new(3.0, 0.0, -30.0),
         ),
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let near = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     world.insert(
         held,
@@ -1642,7 +1643,7 @@ fn ambient(backend: Backend) {
             Vec3::new(0.0, 0.0, -90.0),
         ),
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let far = read(&context, &target)[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
     println!("{backend:?} plain {plain:?} near {near:?} far {far:?}");
     assert!(
@@ -1751,7 +1752,7 @@ fn local(backend: Backend) {
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
 
     assert_blue(
@@ -1852,7 +1853,12 @@ fn accumulation(backend: Backend, context: &GpuContext, target: &Texture) {
         },
     );
     for _ in 0..8 {
-        renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+        renderer.render(
+            &mut world,
+            Target::Texture(target),
+            [0.0, 0.0, 0.0, 1.0],
+            None,
+        );
     }
     let pixels = read(context, target);
     let held = pixels[(SIDE * 32 + 32) as usize];
@@ -1902,7 +1908,12 @@ fn movement(backend: Backend, context: &GpuContext, target: &Texture) {
             tint: WHITE,
         },
     );
-    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+    renderer.render(
+        &mut world,
+        Target::Texture(target),
+        [0.0, 0.0, 0.0, 1.0],
+        None,
+    );
     world.insert(
         mover,
         Transform {
@@ -1911,7 +1922,12 @@ fn movement(backend: Backend, context: &GpuContext, target: &Texture) {
             scale: Vec3::splat(0.3),
         },
     );
-    renderer.render(&world, Target::Texture(target), [0.0, 0.0, 0.0, 1.0], None);
+    renderer.render(
+        &mut world,
+        Target::Texture(target),
+        [0.0, 0.0, 0.0, 1.0],
+        None,
+    );
     let pixels = read(context, target);
     let held = pixels[(SIDE * 32 + 37) as usize];
     assert!(

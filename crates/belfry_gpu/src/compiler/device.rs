@@ -76,9 +76,10 @@ vocabulary! {
     SampleLod "sample_lod" Kernel 4 true;
     Dpdx "dpdx" Kernel 1 true;
     Dpdy "dpdy" Kernel 1 true;
-    AtomicAdd "atomic_add" Kernel 2 true;
-    AtomicSub "atomic_sub" Kernel 2 true;
+    AtomicLoad "atomic_load" Kernel 1 true;
+    AtomicAdd "atomic_add" Kernel 2 true;    AtomicSub "atomic_sub" Kernel 2 true;
     AtomicExchange "atomic_exchange" Kernel 2 true;
+    AtomicCompareExchange "atomic_compare_exchange" Kernel 3 true;
     AtomicStore "atomic_store" Kernel 2 false;
     Discard "discard" Kernel 0 false;
     WorkgroupBarrier "workgroup_barrier" Kernel 0 false;
@@ -251,6 +252,10 @@ pub fn dpdy(_value: Fvec4) -> Fvec4 {
     unreachable!("a device intrinsic exists only on the device")
 }
 
+pub fn atomic_load(_pointer: &AtomicU32) -> u32 {
+    unreachable!("a device intrinsic exists only on the device")
+}
+
 pub fn atomic_add(_pointer: &AtomicU32, _value: u32) -> u32 {
     unreachable!("a device intrinsic exists only on the device")
 }
@@ -260,6 +265,10 @@ pub fn atomic_sub(_pointer: &AtomicU32, _value: u32) -> u32 {
 }
 
 pub fn atomic_exchange(_pointer: &AtomicU32, _value: u32) -> u32 {
+    unreachable!("a device intrinsic exists only on the device")
+}
+
+pub fn atomic_compare_exchange(_pointer: &AtomicU32, _expected: u32, _desired: u32) -> u32 {
     unreachable!("a device intrinsic exists only on the device")
 }
 

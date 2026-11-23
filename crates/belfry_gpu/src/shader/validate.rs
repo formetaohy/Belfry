@@ -783,6 +783,33 @@ impl<'m> Checker<'m> {
                     op.name()
                 );
             }
+            Instruction::CompareExchange {
+                pointer,
+                expected,
+                desired,
+                result,
+            } => {
+                self.writable(*pointer, "a device compare exchange");
+                let (_, base) = self.pointee(*pointer, "a compare exchange");
+                let Type::Atomic(scalar) = self.module.ty(base) else {
+                    panic!(
+                        "a device compare exchange operates on {} instead of an atomic",
+                        element_name(self.module.ty(base))
+                    );
+                };
+                assert!(
+                    scalar.integer(),
+                    "a device compare exchange operates on the {}",
+                    scalar.name()
+                );
+                for operand in [expected, desired, result] {
+                    assert_eq!(
+                        self.ty(*operand),
+                        self.module.scalar_id(*scalar),
+                        "a device compare exchange holds a different type",
+                    );
+                }
+            }
             Instruction::WorkGroupUniformLoad { pointer, .. } => assert_eq!(
                 self.pointee(*pointer, "a uniform load").0,
                 Space::WorkGroup,
@@ -997,6 +1024,9 @@ impl<'m> Checker<'m> {
             Instruction::Load { pointer, .. } => Some(self.module.loaded_ty(self.ty(*pointer))),
             Instruction::Sample { result, .. } => Some(self.ty(*result)),
             Instruction::Atomic { pointer, .. } => Some(self.module.loaded_ty(self.ty(*pointer))),
+            Instruction::CompareExchange { pointer, .. } => {
+                Some(self.module.loaded_ty(self.ty(*pointer)))
+            }
             Instruction::WorkGroupUniformLoad { pointer, .. } => {
                 Some(self.module.loaded_ty(self.ty(*pointer)))
             }

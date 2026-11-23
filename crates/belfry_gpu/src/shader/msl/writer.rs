@@ -912,6 +912,22 @@ impl<'m> Writer<'m> {
                     "{target} = {name}(&{cell}, {value}, memory_order_relaxed);"
                 ));
             }
+            Instruction::CompareExchange {
+                pointer,
+                expected,
+                desired,
+                result,
+            } => {
+                let target = self.target(*result);
+                let cell = self.place_value(*pointer);
+                let expected = self.value(*expected);
+                let desired = self.value(*desired);
+                let held = format!("expected_{target}");
+                self.out.line(format!("auto {held} = {expected};"));
+                self.out.line(format!(
+                    "{target} = atomic_compare_exchange_weak_explicit(&{cell}, &{held}, {desired}, memory_order_acq_rel, memory_order_relaxed);"
+                ));
+            }
             Instruction::WorkGroupUniformLoad { pointer, result } => {
                 self.barrier(Barrier::WorkGroup);
                 let target = self.target(*result);

@@ -1,7 +1,7 @@
 use super::*;
 
 impl Renderer {
-    pub(super) fn absorb_damage(&mut self, world: &World, collection: &Collection) {
+    pub(super) fn absorb_damage(&mut self, world: &mut World, collection: &Collection) {
         self.damage.absorb(
             world,
             (&collection.entities, &collection.spheres),
@@ -128,8 +128,20 @@ impl Renderer {
         };
         let textures = self.materials.textures();
         let samplers = self.materials.samplers();
-        let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
-        let tables = self.tables.capture(&pipelines, textures, samplers);
+        let shadow_tables = table(
+            pipelines.shadow,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
+        let tables = table(
+            pipelines.capture,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        );
         let materials = self
             .material_records
             .buffer()
@@ -220,8 +232,8 @@ impl Renderer {
                                 program::DRAW_SKINS,
                                 self.meshes.skin_binding(geometry),
                             ),
-                            Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.fragments()),
-                            Binding::buffer(program::DRAW_COUNTS, self.transparency.counts()),
+                            Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.keys()),
+                            Binding::buffer(program::DRAW_COLORS, self.transparency.colors()),
                             Binding::buffer(program::DRAW_DROPPED, self.transparency.dropped()),
                             Binding::buffer(program::DRAW_SETTINGS, self.transparency.settings()),
                             Binding::buffer(

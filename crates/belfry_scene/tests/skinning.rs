@@ -77,11 +77,11 @@ fn paint(backend: Backend) {
     scene.instantiate(&mut world, &mut renderer);
     assert_eq!(world.count::<Skin>(), 1);
     assert_eq!(world.count::<AnimationMachine>(), 1);
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     assert_eq!(renderer.pick(belfry_math::Vec2::new(45.0, 40.0)), None);
     belfry_animation::advance(&mut world, 0.5);
     propagate(&mut world);
-    renderer.render(&world, Target::Texture(&target), CLEAR, None);
+    renderer.render(&mut world, Target::Texture(&target), CLEAR, None);
     assert!(
         renderer.pick(belfry_math::Vec2::new(45.0, 40.0)).is_some(),
         "{backend:?} picks the animated skin over its rest pose",

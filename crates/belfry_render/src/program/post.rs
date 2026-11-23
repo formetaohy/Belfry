@@ -6,11 +6,10 @@ mod transparency {
     fn settings(settings: Read<TransparentSetupRecord>) {}
 
     #[binding]
-    fn fragments(fragments: Read<TransparentRecord>) {}
+    fn keys(keys: Read<u32>) {}
 
     #[binding]
-    fn counts(counts: Read<u32>) {}
-
+    fn colors(colors: Read<u32>) {}
     #[vertex]
     fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
         let setup = settings[0u32];
@@ -36,15 +35,22 @@ mod transparency {
         let pixel_y = min(max(floor(at.y * height), 0.0), height - 1.0) as u32;
         let pixel = pixel_y * setup.width + pixel_x;
         let held = pixel * setup.layers;
-        let filled = min(counts[pixel], setup.layers);
-        let mut color0 = select(0u32, fragments[held].color, filled > 0u32);
-        let mut depth0 = select(0u32, fragments[held].depth_coverage, filled > 0u32);
-        let mut color1 = select(0u32, fragments[held + 1u32].color, filled > 1u32);
-        let mut depth1 = select(0u32, fragments[held + 1u32].depth_coverage, filled > 1u32);
-        let mut color2 = select(0u32, fragments[held + 2u32].color, filled > 2u32);
-        let mut depth2 = select(0u32, fragments[held + 2u32].depth_coverage, filled > 2u32);
-        let mut color3 = select(0u32, fragments[held + 3u32].color, filled > 3u32);
-        let mut depth3 = select(0u32, fragments[held + 3u32].depth_coverage, filled > 3u32);
+        let slot0 = keys[held];
+        let slot1 = keys[held + 1u32];
+        let slot2 = keys[held + 2u32];
+        let slot3 = keys[held + 3u32];
+        let filled0 = slot0 > 1u32;
+        let filled1 = slot1 > 1u32;
+        let filled2 = slot2 > 1u32;
+        let filled3 = slot3 > 1u32;
+        let mut color0 = select(0u32, colors[held], filled0);
+        let mut depth0 = select(0u32, slot0, filled0);
+        let mut color1 = select(0u32, colors[held + 1u32], filled1);
+        let mut depth1 = select(0u32, slot1, filled1);
+        let mut color2 = select(0u32, colors[held + 2u32], filled2);
+        let mut depth2 = select(0u32, slot2, filled2);
+        let mut color3 = select(0u32, colors[held + 3u32], filled3);
+        let mut depth3 = select(0u32, slot3, filled3);
         let ordering01 = depth1 < depth0;
         let low_color01 = select(color0, color1, ordering01);
         let low_depth01 = select(depth0, depth1, ordering01);

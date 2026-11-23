@@ -369,6 +369,12 @@ pub enum Instruction {
         value: ValueId,
         result: ValueId,
     },
+    CompareExchange {
+        pointer: ValueId,
+        expected: ValueId,
+        desired: ValueId,
+        result: ValueId,
+    },
     WorkGroupUniformLoad {
         pointer: ValueId,
         result: ValueId,
@@ -476,6 +482,7 @@ impl Instruction {
             | Self::Math { result, .. }
             | Self::Compose { result, .. }
             | Self::Atomic { result, .. }
+            | Self::CompareExchange { result, .. }
             | Self::WorkGroupUniformLoad { result, .. }
             | Self::MatrixFill { result, .. }
             | Self::MatrixLoad { result, .. }
@@ -532,6 +539,12 @@ impl Instruction {
             }
             | Self::Call { arguments, .. } => arguments.clone(),
             Self::Atomic { pointer, value, .. } => vec![*pointer, *value],
+            Self::CompareExchange {
+                pointer,
+                expected,
+                desired,
+                ..
+            } => vec![*pointer, *expected, *desired],
             Self::Sample {
                 image,
                 sampler,
