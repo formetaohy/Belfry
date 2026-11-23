@@ -4,7 +4,7 @@ use crate::collider::{ColliderRef, ShapeKind};
 use crate::field::{Axis, finite, no_axis, number, positive, vector_toml, whole, with_axis};
 use crate::reference::MeshId;
 use crate::scene::Scene;
-use crate::schema::{ComponentSpec, Field, FieldKind, ReferenceKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach, ReferenceKind};
 use crate::target::valid_id;
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
@@ -100,6 +100,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: &[],
+    reach: Reach::None,
 };
 
 impl SceneComponent for ColliderRef {

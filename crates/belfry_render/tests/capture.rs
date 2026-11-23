@@ -6,7 +6,7 @@ use belfry_gpu_device::{
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_render::{
     Camera, Capture, CaptureProbe, DirectionalLight, Environment, MaterialDesc, MeshInstance,
-    Renderer, Target, Vertex,
+    Renderer, SceneDamage, Target, Vertex,
 };
 
 const WALL: [Vertex; 6] = [
@@ -45,10 +45,11 @@ const WALL: [Vertex; 6] = [
 const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 #[test]
-fn a_probe_captures_the_boxes_and_scene_it_bounds() {
+fn a_probe_captures_the_boxes_and_damage_its_box_holds() {
     for backend in belfry_gpu_device::PREFERENCE {
         capture(*backend);
         shadowed(*backend);
+        damaged(*backend);
     }
 }
 
@@ -283,6 +284,129 @@ fn capture(backend: Backend) {
         settled(&mut renderer, &world, &target).len(),
         1,
         "{backend:?} captures a probe whose box moved",
+    );
+}
+
+fn damaged(backend: Backend) {
+    let context = GpuContext::open(&GpuRequest {
+        backend: Some(backend),
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("no {backend:?} device recaptures a probe: {error}"));
+    let device = context.device();
+    let target = Texture::new(
+        device,
+        "damaged probe frame",
+        64,
+        64,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    );
+    let mut renderer = Renderer::new(&context, TextureFormat::Rgba8Unorm);
+    let quad = renderer.mesh(&WALL);
+    let white = renderer.material(MaterialDesc::new(Vec3::ONE));
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(eye, Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)));
+    world.insert(
+        eye,
+        Camera {
+            vertical_fov: std::f32::consts::FRAC_PI_2,
+            near: 0.1,
+            far: 100.0,
+        },
+    );
+    let sun = world.spawn();
+    world.insert(sun, Transform::IDENTITY);
+    world.insert(
+        sun,
+        DirectionalLight {
+            color: Vec3::ONE,
+            intensity: std::f32::consts::PI,
+            shadow_distance: 100.0,
+        },
+    );
+    let mut instance = |at: Vec3| {
+        let held = world.spawn();
+        world.insert(held, Transform::from_translation(at));
+        world.insert(
+            held,
+            MeshInstance {
+                mesh: quad,
+                material: white,
+                tint: Vec3::ONE,
+            },
+        );
+        held
+    };
+    let near = instance(Vec3::new(-8.0, 0.0, -2.0));
+    instance(Vec3::new(8.0, 0.0, -2.0));
+    let left = world.spawn();
+    world.insert(
+        left,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            Vec3::new(-8.0, 0.0, 0.0),
+        ),
+    );
+    world.insert(left, placeholder(&mut renderer));
+    world.insert(left, CaptureProbe::default());
+    let right = world.spawn();
+    world.insert(
+        right,
+        Transform::from_scale_rotation_translation(
+            Vec3::splat(4.0),
+            Quat::IDENTITY,
+            Vec3::new(8.0, 0.0, 0.0),
+        ),
+    );
+    world.insert(right, placeholder(&mut renderer));
+    world.insert(right, CaptureProbe::default());
+    let mut captured = Vec::new();
+    while captured.len() < 2 {
+        let captures = settled(&mut renderer, &world, &target);
+        assert!(
+            !captures.is_empty(),
+            "{backend:?} captures both probes: {captured:?}",
+        );
+        captured.extend(captures.iter().map(|held| held.entity));
+        belfry_render::install_captures(&mut world, captures);
+    }
+    assert!(
+        settled(&mut renderer, &world, &target).is_empty(),
+        "{backend:?} captures a probe once for the box it holds",
+    );
+    world.insert_resource(SceneDamage::new(1, vec![near], false));
+    let captures = settled(&mut renderer, &world, &target);
+    assert_eq!(
+        captures.iter().map(|held| held.entity).collect::<Vec<_>>(),
+        [left],
+        "{backend:?} rebakes the probe whose box holds the damaged mesh",
+    );
+    belfry_render::install_captures(&mut world, captures);
+    assert!(
+        settled(&mut renderer, &world, &target).is_empty(),
+        "{backend:?} leaves the probe the damage misses baked",
+    );
+    world.insert_resource(SceneDamage::new(2, Vec::new(), true));
+    let mut again = Vec::new();
+    while again.len() < 2 {
+        let captures = settled(&mut renderer, &world, &target);
+        assert!(
+            !captures.is_empty(),
+            "{backend:?} rebakes every probe the sky reaches: {again:?}",
+        );
+        again.extend(captures.iter().map(|held| held.entity));
+        belfry_render::install_captures(&mut world, captures);
+    }
+    again.sort();
+    let mut both = vec![left, right];
+    both.sort();
+    assert_eq!(
+        again, both,
+        "{backend:?} rebakes one probe per frame the sky changed",
     );
 }
 

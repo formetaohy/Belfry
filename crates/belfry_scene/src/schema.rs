@@ -145,13 +145,20 @@ impl Field {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    None,
+    Node,
+    World,
+}
+
 pub struct ComponentSpec {
     pub name: &'static str,
     pub label: &'static str,
     pub required: bool,
     pub fields: &'static [Field],
     pub runtime_fields: &'static [&'static str],
+    pub reach: Reach,
 }
 
 pub const NODE_FIELDS: &[Field] = &[Field {

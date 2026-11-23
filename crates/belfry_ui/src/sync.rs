@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::dispatch::Finish;
+use crate::dispatch::{Finish, Source};
 use crate::element::{Content, Layer};
 use crate::node::NodeId;
 use crate::ui::Ui;
@@ -98,7 +98,7 @@ impl<A: Clone> Ui<A> {
             let previous = self.tree.nodes[id].runtime.edit_prop;
             self.tree.nodes[id].runtime.edit_prop = editing;
             if editing && !active {
-                self.begin_edit(id, false);
+                self.begin_edit(id, Source::Key);
             } else if !editing && previous && active {
                 assert!(
                     self.edit == Some(id),

@@ -3,6 +3,8 @@ use crate::context::Device;
 use crate::native::NativeSurface;
 use crate::texture::{Texture, TextureFormat};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowHandle {
@@ -56,11 +58,32 @@ pub struct Surface {
     width: u32,
     height: u32,
     format: TextureFormat,
+    generation: Arc<AtomicU64>,
 }
 
 pub struct SurfaceFrame {
     pub(crate) texture: Texture,
     pub(crate) native: Option<crate::native::NativePresent>,
+    pub(crate) token: PresentToken,
+}
+
+#[derive(Clone)]
+pub(crate) struct PresentToken {
+    generation: Arc<AtomicU64>,
+    frame: u64,
+}
+
+impl PresentToken {
+    fn of(generation: &Arc<AtomicU64>) -> Self {
+        Self {
+            generation: Arc::clone(generation),
+            frame: generation.load(Ordering::Acquire),
+        }
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.generation.load(Ordering::Acquire) == self.frame
+    }
 }
 
 impl Surface {
@@ -76,6 +99,7 @@ impl Surface {
             height: native.height(),
             format: native.format(),
             native,
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -92,7 +116,15 @@ impl Surface {
     }
 
     pub fn acquire(&mut self) -> Option<SurfaceFrame> {
-        let frame = self.native.acquire()?;
+        if self.native.outdated() {
+            self.rebuild();
+        }
+        let mut frame = self.native.acquire();
+        if frame.is_none() && self.native.outdated() {
+            self.rebuild();
+            frame = self.native.acquire();
+        }
+        let frame = frame?;
         self.width = frame.width;
         self.height = frame.height;
         let texture = Texture::of(
@@ -106,6 +138,7 @@ impl Surface {
         Some(SurfaceFrame {
             texture,
             native: Some(frame.present),
+            token: PresentToken::of(&self.generation),
         })
     }
 
@@ -115,8 +148,20 @@ impl Surface {
             "a surface spans {width} by {height} texels"
         );
         self.native.resize(width, height);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.width = width;
         self.height = height;
+        self.format = self.native.format();
+    }
+
+    fn rebuild(&mut self) {
+        let width = self.native.width();
+        let height = self.native.height();
+        self.native.resize(width, height);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.width = self.native.width();
+        self.height = self.native.height();
+        self.format = self.native.format();
     }
 }
 

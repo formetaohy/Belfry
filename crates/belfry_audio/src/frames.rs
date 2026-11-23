@@ -9,7 +9,6 @@ struct Shared {
     capacity: usize,
     read: AtomicUsize,
     write: AtomicUsize,
-    ended: AtomicBool,
     closed: AtomicBool,
 }
 
@@ -38,7 +37,6 @@ pub(crate) fn channel(capacity: usize) -> (Producer, Consumer) {
         capacity,
         read: AtomicUsize::new(0),
         write: AtomicUsize::new(0),
-        ended: AtomicBool::new(false),
         closed: AtomicBool::new(false),
     });
     (
@@ -69,10 +67,6 @@ impl Producer {
         count
     }
 
-    pub(crate) fn end(&mut self) {
-        self.shared.ended.store(true, Ordering::Release);
-    }
-
     pub(crate) fn closed(&self) -> bool {
         self.shared.closed.load(Ordering::Acquire)
     }
@@ -97,10 +91,6 @@ impl Consumer {
             .read
             .store(read.wrapping_add(1), Ordering::Release);
         Some(frame)
-    }
-
-    pub(crate) fn ended(&self) -> bool {
-        self.shared.ended.load(Ordering::Acquire)
     }
 }
 

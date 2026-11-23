@@ -1,6 +1,6 @@
 use belfry_ecs::{LocalTransform, Parent, World};
 use belfry_math::{Transform, Vec3};
-use belfry_render::SceneRevision;
+use belfry_render::SceneDamage;
 use belfry_scene::{Assets, Changed, ReferenceKind, Scene, SceneSync, SkinData, Target};
 use std::sync::Arc;
 
@@ -113,15 +113,22 @@ fn a_scene_sync_follows_the_structure_it_edits() {
         edit.set_transform(a_at, Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)))
     })
     .expect("the scene moves the node a again");
-    let revision = world
-        .resource::<SceneRevision>()
-        .copied()
-        .expect("a synced scene carries its revision");
+    let stamp = world
+        .resource::<SceneDamage>()
+        .map_or(0, |held| held.stamp());
     sync.apply(&scene, &mut world, &NoAssets, a_at);
+    let damage = world
+        .resource::<SceneDamage>()
+        .expect("a synced scene carries the damage it renders");
     assert_eq!(
-        world.resource::<SceneRevision>().copied(),
-        Some(SceneRevision(revision.0 + 1)),
-        "an applied node advances the revision the probes rebake on",
+        damage.stamp(),
+        stamp + 1,
+        "an applied node publishes the damage the probes rebake on",
+    );
+    assert_eq!(
+        damage.nodes(),
+        [a],
+        "an applied node damages the node it moved",
     );
     assert_eq!(
         world.get::<LocalTransform>(a),
@@ -131,24 +138,39 @@ fn a_scene_sync_follows_the_structure_it_edits() {
         "an applied node installs the component its scene changed",
     );
     let held = world
-        .resource::<SceneRevision>()
-        .copied()
-        .expect("a synced scene carries its revision");
+        .resource::<SceneDamage>()
+        .expect("a synced scene carries its damage")
+        .stamp();
     let mut silent = Changed::none();
     silent.insert(ReferenceKind::AudioBus, "master");
     sync.sync(&scene, &mut world, &NoAssets, &silent);
     assert_eq!(
-        world.resource::<SceneRevision>().copied(),
+        world.resource::<SceneDamage>().map(|held| held.stamp()),
         Some(held),
-        "a change no probe can see leaves the revision it rebakes on",
+        "a change no probe can see publishes no damage",
     );
-    let mut visible = Changed::none();
-    visible.insert(ReferenceKind::Mesh, "cube");
-    sync.sync(&scene, &mut world, &NoAssets, &visible);
+    let mut unrendered = Changed::none();
+    unrendered.insert(ReferenceKind::Mesh, "cube");
+    sync.sync(&scene, &mut world, &NoAssets, &unrendered);
     assert_eq!(
-        world.resource::<SceneRevision>().copied(),
-        Some(SceneRevision(held.0 + 1)),
-        "a visible change advances the revision the probes rebake on",
+        world.resource::<SceneDamage>().map(|held| held.stamp()),
+        Some(held),
+        "a changed mesh no node renders publishes no damage",
+    );
+    let mut global = Changed::none();
+    global.insert(ReferenceKind::Environment, "sky");
+    sync.sync(&scene, &mut world, &NoAssets, &global);
+    let damage = world
+        .resource::<SceneDamage>()
+        .expect("a rebuilt environment damages the probes");
+    assert_eq!(
+        damage.stamp(),
+        held + 1,
+        "a rebuilt environment publishes the damage the probes rebake on",
+    );
+    assert!(
+        damage.sky(),
+        "a rebuilt environment reaches every probe it lights",
     );
 }
 fn edit<T>(

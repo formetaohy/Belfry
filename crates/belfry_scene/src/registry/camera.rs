@@ -1,7 +1,7 @@
 use super::{Assets, SceneComponent};
 use crate::field::{Axis, no_axis, positive};
 use crate::scene::Scene;
-use crate::schema::{ComponentSpec, Field, FieldKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach};
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
 use belfry_render::Camera;
@@ -42,6 +42,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::None,
 };
 
 impl SceneComponent for Camera {

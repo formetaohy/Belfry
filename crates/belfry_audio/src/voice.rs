@@ -92,14 +92,7 @@ impl Voice {
     }
 
     pub(crate) fn position(&self) -> u64 {
-        let position = self.cursor.max(0.0) as u64;
-        if self.looping {
-            return match self.input.loop_length() {
-                Some(count) => position % count.max(1),
-                None => 0,
-            };
-        }
-        position
+        self.input.playhead(self.cursor)
     }
 
     pub(crate) fn update(&mut self, gain: f32, pan: f32, cutoff: f32) {
@@ -125,6 +118,10 @@ impl Voice {
         let mut finished = false;
         let mut fade = self.fade;
         for frame in 0..frames {
+            if self.input.finished(self.cursor, self.looping) {
+                finished = true;
+                break;
+            }
             let held = self.input.sample(self.cursor, self.looping);
             self.states[0] += self.alpha * (held[0] - self.states[0]);
             self.states[1] += self.alpha * (held[1] - self.states[1]);
@@ -145,10 +142,6 @@ impl Voice {
                 && self.cursor >= count as f64
             {
                 self.cursor = self.cursor.rem_euclid(count as f64);
-            }
-            if (!self.looping || self.input.ended()) && self.input.finished(self.cursor) {
-                finished = true;
-                break;
             }
         }
         self.fade = fade;

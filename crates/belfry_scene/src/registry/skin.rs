@@ -4,7 +4,7 @@ use crate::node::SkinRef;
 use crate::reference::SkinId;
 use crate::scene::Scene;
 use crate::scene_value::SceneValue;
-use crate::schema::{ComponentSpec, Field, FieldKind, ReferenceKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach, ReferenceKind};
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
 use belfry_render::Skin;
@@ -25,6 +25,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::Node,
 };
 
 impl SceneComponent for SkinRef {

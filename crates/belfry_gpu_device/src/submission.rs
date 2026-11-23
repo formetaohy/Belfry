@@ -70,6 +70,7 @@ pub(crate) enum Command {
     Present {
         texture: Texture,
         native: crate::native::NativePresent,
+        token: crate::surface::PresentToken,
     },
 }
 
@@ -383,6 +384,7 @@ impl Submission {
         self.commands.push(Command::Present {
             texture: frame.texture.clone(),
             native,
+            token: frame.token.clone(),
         });
     }
 
@@ -391,6 +393,16 @@ impl Submission {
             self.device.same(queue.device()),
             "a submission crosses compute devices"
         );
+        for command in &self.commands {
+            if let Command::Present { texture, token, .. } = command {
+                assert!(
+                    token.valid(),
+                    "a surface frame outlived the {} by {} swapchain it was acquired from",
+                    texture.width(),
+                    texture.height(),
+                );
+            }
+        }
         queue.submit(&self.commands)
     }
 }

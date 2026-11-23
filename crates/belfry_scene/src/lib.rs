@@ -78,7 +78,7 @@ pub use scene::Scene;
 pub use scene_value::SceneValue;
 pub use schema::{
     ComponentSpec, ENVIRONMENT_ATMOSPHERE_FIELDS, ENVIRONMENT_PANORAMA_FIELDS, Field, FieldKind,
-    IMAGE_FIELDS, MATERIAL_FIELDS, MESH_FIELDS, MODEL_FIELDS, NODE_FIELDS, ReferenceKind,
+    IMAGE_FIELDS, MATERIAL_FIELDS, MESH_FIELDS, MODEL_FIELDS, NODE_FIELDS, Reach, ReferenceKind,
     SOUND_FIELDS,
 };
 pub use shape::Shape;
@@ -92,8 +92,8 @@ pub use watch::{Change, Watch};
 #[doc(hidden)]
 pub mod __private {
     pub use crate::{
-        Assets, Axis, ComponentSpec, Effect, Field, FieldKind, Scene, SceneComponent, SceneValue,
-        Value,
+        Assets, Axis, ComponentSpec, Effect, Field, FieldKind, Reach, Scene, SceneComponent,
+        SceneValue, Value,
     };
     pub use belfry_ecs::{Entity, World};
     pub use belfry_toml::{Fields, Toml, floats};

@@ -6,7 +6,7 @@ use crate::node::AnimationRef;
 use crate::reference::GraphId;
 use crate::scene::Scene;
 use crate::scene_value::SceneValue;
-use crate::schema::{ComponentSpec, Field, FieldKind, ReferenceKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach, ReferenceKind};
 use crate::value::{Effect, Value};
 use belfry_animation::{AnimationMachine, Parameter, apply};
 use belfry_ecs::{Entity, World, propagate};
@@ -41,6 +41,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::None,
 };
 
 impl SceneComponent for AnimationRef {

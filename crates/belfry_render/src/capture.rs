@@ -57,21 +57,18 @@ const FACES_OF: [(Vec3, Vec3); FACES as usize] = [
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CaptureProbe {
-    captured: Option<(Transform, u64)>,
+    captured: Option<Transform>,
 }
 
 impl CaptureProbe {
-    pub fn stale(&self, transform: Transform, revision: u64) -> bool {
-        self.captured != Some((transform, revision))
+    pub fn stale(&self, transform: Transform) -> bool {
+        self.captured != Some(transform)
     }
 
-    pub fn captured(&mut self, transform: Transform, revision: u64) {
-        self.captured = Some((transform, revision));
+    pub fn captured(&mut self, transform: Transform) {
+        self.captured = Some(transform);
     }
 }
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SceneRevision(pub u64);
 
 pub struct Capture {
     pub entity: Entity,

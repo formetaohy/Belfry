@@ -18,7 +18,8 @@ use crate::abi::{
     ViewRecord, WORKGROUP,
 };
 use crate::batch::{Groups, Inputs, Pipelines, Shared, Slot, Tables};
-use crate::capture::{Capture, CaptureFrame, CaptureProbe, Captures, Probe, SceneRevision};
+use crate::capture::{Capture, CaptureFrame, CaptureProbe, Captures, Probe};
+use crate::damage::Damage;
 use crate::environment::{
     Atmosphere, AtmosphereBaker, AtmospherePanorama, BakeJob, BakeRequest, Baked, Baker,
     Environment,
@@ -158,6 +159,8 @@ pub struct Renderer {
     transparency: Transparency,
     temporality: Temporality,
     previous: HashMap<Entity, Mat4>,
+    spheres: Vec<(Entity, (Vec3, f32))>,
+    damage: Damage,
     probes: Probes,
 }
 
@@ -391,6 +394,8 @@ impl Renderer {
             transparency: Transparency::new(&device),
             temporality: Temporality::new(&device),
             previous: HashMap::new(),
+            spheres: Vec::new(),
+            damage: Damage::default(),
             probes,
             captures,
             queue,
@@ -578,10 +583,6 @@ impl Renderer {
             Some((environment, transform)) => (Some(environment), transform),
             None => (None, Transform::IDENTITY),
         };
-        let probe = match self.captures.pending() {
-            Some(_) => None,
-            None => Self::stale_probe(world),
-        };
         let (capture_rotation, capture_intensity) = match ambient.global {
             Some((held, transform)) => (
                 Mat4::from_quat(transform.rotation.normalize().inverse()),
@@ -660,6 +661,11 @@ impl Renderer {
         };
         self.temporality.begin(&self.queue, pose, vertical);
         let collection = self.collect(world, highlight);
+        self.absorb_damage(world, &collection);
+        let probe = match self.captures.pending() {
+            Some(_) => None,
+            None => self.stale_probe(world),
+        };
         let recorded = self.record(FrameRecord {
             texture: &texture,
             clear,
@@ -735,7 +741,6 @@ impl Renderer {
             submission.submit(&self.queue);
             self.temporality.finish(pose);
             self.capture(
-                world,
                 probe,
                 &CaptureInputs {
                     batches: &[],
@@ -826,7 +831,6 @@ impl Renderer {
         submission.submit(&self.queue);
         self.temporality.finish(pose);
         self.capture(
-            world,
             probe,
             &CaptureInputs {
                 batches: &collection.batches,

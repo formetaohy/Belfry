@@ -37,6 +37,14 @@ impl Changed {
         self.entries.get(&kind).is_some_and(|ids| !ids.is_empty())
     }
 
+    pub fn ids(&self, kind: ReferenceKind) -> impl Iterator<Item = &str> {
+        self.entries
+            .get(&kind)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+    }
+
     pub fn visual(&self) -> bool {
         VISUAL.iter().any(|kind| self.holds(*kind))
     }

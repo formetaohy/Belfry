@@ -2,7 +2,7 @@ use super::audio_bus::require_bus;
 use super::{Assets, SceneComponent};
 use crate::field::{Axis, no_axis, number};
 use crate::scene::Scene;
-use crate::schema::{ComponentSpec, Field, FieldKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach};
 use crate::value::{Effect, Value};
 use belfry_audio::{AudioFilter as Held, FilterKind};
 use belfry_ecs::{Entity, World};
@@ -62,6 +62,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::None,
 };
 
 #[derive(Clone, Debug, PartialEq)]

@@ -2,8 +2,9 @@ use belfry_animation::{AnimationMachine, Clip, Interpolation, Property, Track, a
 use belfry_ecs::{LocalTransform, World};
 use belfry_math::Mat4;
 use belfry_scene::{
-    Assets, Changed, NodeId, ReferenceKind, Scene, SceneNode, SceneSync, SkinData, Target, Value,
-    observe_runtime, read_runtime_property, set_runtime_property,
+    AnimationLibrary, Assets, Changed, GraphLibrary, NodeId, ReferenceKind, Scene, SceneNode,
+    SceneSync, SkinData, Target, Value, observe_runtime, read_runtime_property,
+    set_runtime_property,
 };
 use belfry_toml::Toml;
 use std::sync::Arc;
@@ -220,9 +221,47 @@ fn a_scene_resolves_its_skin_and_graph_into_runtime_components() {
         .get::<AnimationMachine>(holder)
         .expect("the holder plays its graph");
     let (state, time) = (String::from(played.state().id()), played.time());
+    let source = |world: &World, id: &str| {
+        Arc::as_ptr(
+            &world
+                .resource::<AnimationLibrary>()
+                .expect("a synced scene holds its clips")
+                .get(id)
+                .expect("the scene holds the clip"),
+        )
+    };
+    let graph = |world: &World| {
+        Arc::as_ptr(
+            &world
+                .resource::<GraphLibrary>()
+                .expect("a synced scene holds its graphs")
+                .get("rig_graph")
+                .expect("the scene holds its graph"),
+        )
+    };
+    let held = (
+        source(&world, "rig_animation_0"),
+        source(&world, "rig_animation_1"),
+    );
+    let before = graph(&world);
     let mut changed = Changed::none();
     changed.insert(ReferenceKind::Animation, "rig_animation_1");
     sync.sync(&scene, &mut world, &Mock, &changed);
+    assert_eq!(
+        source(&world, "rig_animation_0"),
+        held.0,
+        "a clip no change names keeps the source it built",
+    );
+    assert_ne!(
+        source(&world, "rig_animation_1"),
+        held.1,
+        "a changed clip rebuilds its source",
+    );
+    assert_ne!(
+        graph(&world),
+        before,
+        "a rebuilt clip rebuilds the graph that plays it",
+    );
     let rebuilt = world
         .get::<AnimationMachine>(holder)
         .expect("the reloaded clip keeps its machine");

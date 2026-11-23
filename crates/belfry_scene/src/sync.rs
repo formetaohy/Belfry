@@ -2,12 +2,12 @@ use crate::animation_library::AnimationLibrary;
 use crate::change::Changed;
 use crate::graph_library::GraphLibrary;
 use crate::install::NodeMap;
-use crate::node::SceneNode;
+use crate::node::{Node, SceneNode};
 use crate::registry::Assets;
 use crate::scene::Scene;
-use crate::schema::ReferenceKind;
+use crate::schema::{Reach, ReferenceKind};
 use belfry_ecs::{Entity, Parent, World, propagate};
-use belfry_render::SceneRevision;
+use belfry_render::SceneDamage;
 use std::collections::{HashMap, HashSet};
 
 pub struct SceneSync {
@@ -52,7 +52,7 @@ impl SceneSync {
             return;
         }
         let scene_changed = self.applied.as_ref() != Some(scene);
-        let previous = self.applied.as_ref();
+        let applied = self.applied.as_ref();
         let mut ids = HashMap::with_capacity(scene.nodes().len());
         let mut entities = Vec::with_capacity(scene.nodes().len());
         for node in scene.nodes() {
@@ -70,9 +70,11 @@ impl SceneSync {
             entities.push((entity, reused));
         }
         let retained = ids.values().copied().collect::<HashSet<_>>();
+        let mut damaged = Vec::new();
         for entity in self.ids.values() {
             if !retained.contains(entity) {
                 world.despawn(*entity);
+                damaged.push(*entity);
             }
         }
         let nodes = NodeMap::new(ids.clone());
@@ -80,17 +82,27 @@ impl SceneSync {
             || world.resource::<GraphLibrary>().is_none()
             || changed.holds(ReferenceKind::Animation)
             || changed.holds(ReferenceKind::Graph)
-            || changed.holds(ReferenceKind::Model)
         {
-            let animations = AnimationLibrary::build(scene, assets, &nodes);
-            let graphs = GraphLibrary::build(scene, &animations);
+            let mut animations = world
+                .remove_resource::<AnimationLibrary>()
+                .unwrap_or_default();
+            let mut graphs = world.remove_resource::<GraphLibrary>().unwrap_or_default();
+            if scene_changed {
+                animations.rebuild(scene, assets, &nodes);
+                graphs.rebuild(scene, &animations);
+            } else {
+                let rebuilt = animations.revise(scene, assets, &nodes, changed);
+                graphs.revise(scene, &animations, &rebuilt, changed);
+            }
             world.insert_resource(animations);
             world.insert_resource(graphs);
         }
         world.insert_resource(nodes);
+        let visual = Visual::of(scene, changed);
+        let mut sky = visual.sky;
         for (index, node) in scene.nodes().iter().enumerate() {
             let (entity, reused) = entities[index];
-            let previous = previous.and_then(|applied| {
+            let previous = applied.and_then(|applied| {
                 let at = applied
                     .nodes()
                     .get(index)
@@ -99,6 +111,12 @@ impl SceneSync {
                 applied.nodes().get(at)
             });
             let shared = previous.is_some_and(|held| std::ptr::eq(held, node));
+            let mut touched = !reused;
+            if let Some(previous) = previous
+                && previous.parent != node.parent
+            {
+                touched = true;
+            }
             world.insert(
                 entity,
                 SceneNode {
@@ -135,18 +153,22 @@ impl SceneSync {
                 if !replaced {
                     continue;
                 }
+                touched |= registration.spec.reach == Reach::Node;
+                sky |= registration.spec.reach == Reach::World;
                 match authored {
                     Some(component) => component.rebind(scene, &node.id, world, entity, assets),
                     None => (registration.remove)(world, entity),
                 }
             }
+            touched |= visual.holds(node);
+            if touched {
+                damaged.push(entity);
+            }
         }
         self.applied = Some(scene.clone());
         self.entities = entities.into_iter().map(|(entity, _)| entity).collect();
         self.ids = ids;
-        if scene_changed || changed.visual() {
-            advance_revision(world);
-        }
+        publish(world, damaged, sky);
         belfry_animation::settle(world);
         propagate(world);
     }
@@ -167,6 +189,8 @@ impl SceneSync {
                 .and_then(|at| applied.nodes().get(at))
         });
         let shared = previous.is_some_and(|held| std::ptr::eq(held, node));
+        let mut touched = previous.is_some_and(|held| held.parent != node.parent);
+        let mut sky = false;
         match node.parent.as_deref() {
             Some(parent) => {
                 let Some(parent) = self.ids.get(parent).copied() else {
@@ -191,6 +215,8 @@ impl SceneSync {
             if !replaced {
                 continue;
             }
+            touched |= registration.spec.reach == Reach::Node;
+            sky |= registration.spec.reach == Reach::World;
             match authored {
                 Some(component) => component.rebind(scene, &node.id, world, entity, assets),
                 None => (registration.remove)(world, entity),
@@ -202,17 +228,68 @@ impl SceneSync {
         {
             applied.remember_node(at, handle);
         }
-        advance_revision(world);
+        publish(world, touched.then_some(entity).into_iter().collect(), sky);
         belfry_animation::settle(world);
         propagate(world);
     }
 }
 
-fn advance_revision(world: &mut World) {
-    let revision = world
-        .resource::<SceneRevision>()
-        .map_or(1, |held| held.0.wrapping_add(1));
-    world.insert_resource(SceneRevision(revision));
+fn publish(world: &mut World, nodes: Vec<Entity>, sky: bool) {
+    if nodes.is_empty() && !sky {
+        return;
+    }
+    let stamp = world
+        .resource::<SceneDamage>()
+        .map_or(1, |held| held.stamp().wrapping_add(1));
+    world.insert_resource(SceneDamage::new(stamp, nodes, sky));
+}
+
+struct Visual<'a> {
+    meshes: HashSet<&'a str>,
+    skins: HashSet<&'a str>,
+    materials: HashSet<&'a str>,
+    sky: bool,
+}
+
+impl<'a> Visual<'a> {
+    fn of(scene: &'a Scene, changed: &'a Changed) -> Self {
+        let materials = scene
+            .materials()
+            .iter()
+            .filter(|entry| {
+                changed.touches(ReferenceKind::Material, &entry.id)
+                    || changed
+                        .ids(ReferenceKind::Image)
+                        .any(|id| entry.asset.references_image(id))
+            })
+            .map(|entry| entry.id.as_str())
+            .collect();
+        Self {
+            meshes: changed.ids(ReferenceKind::Mesh).collect(),
+            skins: changed.ids(ReferenceKind::Skin).collect(),
+            materials,
+            sky: changed.holds(ReferenceKind::Environment),
+        }
+    }
+
+    fn holds(&self, node: &Node) -> bool {
+        if self.meshes.is_empty() && self.skins.is_empty() && self.materials.is_empty() {
+            return false;
+        }
+        node.components().any(|(_, component)| {
+            self.meshes
+                .iter()
+                .any(|id| component.references(ReferenceKind::Mesh, id))
+                || self
+                    .skins
+                    .iter()
+                    .any(|id| component.references(ReferenceKind::Skin, id))
+                || self
+                    .materials
+                    .iter()
+                    .any(|id| component.references(ReferenceKind::Material, id))
+        })
+    }
 }
 
 impl Default for SceneSync {

@@ -1472,7 +1472,9 @@ impl Device {
                     frame.resources.push(texture.clone());
                     frame.resources.push(target.clone());
                 }
-                Command::Present { texture, native } => {
+                Command::Present {
+                    texture, native, ..
+                } => {
                     let texture = native_texture(texture.native());
                     assert!(
                         !texture.targets.is_empty(),

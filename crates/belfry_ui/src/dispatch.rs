@@ -14,6 +14,12 @@ pub(crate) enum Finish {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    Pointer,
+    Key,
+}
+
 impl<A: Clone> Ui<A> {
     pub(crate) fn dispatch(&mut self) {
         if self.input.cancelled() {
@@ -155,7 +161,7 @@ impl<A: Clone> Ui<A> {
                 } else if segment {
                     self.commit_segment(press);
                 } else if clicked || (dragged && toggle) {
-                    self.activate(press);
+                    self.activate(press, Source::Pointer);
                 }
                 self.pointer_events(press, Phase::Up);
             }
@@ -518,7 +524,7 @@ impl<A: Clone> Ui<A> {
         }
     }
 
-    fn activate(&mut self, node: NodeId) {
+    fn activate(&mut self, node: NodeId, source: Source) {
         let key = self.tree.nodes[node].key;
         if let Some(&popup) = self.popup_anchors.get(&key)
             && popup != node
@@ -530,7 +536,7 @@ impl<A: Clone> Ui<A> {
         }
         if matches!(self.tree.nodes[node].interaction, Interaction::Field { .. }) {
             if self.edit != Some(node) {
-                self.begin_edit(node, true);
+                self.begin_edit(node, source);
             }
             self.focus = Some(node);
             return;
@@ -540,10 +546,16 @@ impl<A: Clone> Ui<A> {
             Content::Segment(_) | Content::Tabs(_)
         ) {
             let content = &self.tree.nodes[node].content;
-            let rect = self.tree.nodes[node].rect;
-            let pointer = self.pointer;
-            let index = crate::widget::segment::cell_at(content, rect, pointer, &mut self.text);
+            let index = match source {
+                Source::Pointer => {
+                    let rect = self.tree.nodes[node].rect;
+                    let pointer = self.pointer;
+                    crate::widget::segment::cell_at(content, rect, pointer, &mut self.text)
+                }
+                Source::Key => Some(crate::widget::segment::step_index(content, 1)),
+            };
             if let Some(index) = index
+                && index != crate::widget::segment::selected(content)
                 && let Interaction::Segment { action } = &self.tree.nodes[node].interaction
             {
                 let action = action(index);
@@ -628,7 +640,7 @@ impl<A: Clone> Ui<A> {
         self.tree.invalidate_layout(node);
     }
 
-    pub(crate) fn begin_edit(&mut self, node: NodeId, at_pointer: bool) {
+    pub(crate) fn begin_edit(&mut self, node: NodeId, source: Source) {
         if self.edit != Some(node) {
             self.finish_edit(Finish::Write);
         }
@@ -644,23 +656,24 @@ impl<A: Clone> Ui<A> {
         };
         if select_all {
             edit.select_all(self.time);
-        } else if at_pointer {
+        } else if source == Source::Pointer {
             let Content::Field(field) = &self.tree.nodes[node].content else {
                 return;
             };
             let rect = self.tree.nodes[node].rect;
             let preedit = self.preedit.clone();
+            let pointer = self.pointer;
             let caret = crate::widget::field::caret_at(
                 &edit,
                 preedit.as_deref(),
                 field.style,
                 field.multiline,
                 rect,
-                self.pointer,
+                pointer,
                 &mut self.text,
             );
             edit.place(caret, false, self.time);
-            edit.click(self.pointer, self.time);
+            edit.click(pointer, self.time);
         }
         self.tree.nodes[node].runtime.edit = Some(edit);
         self.edit = Some(node);
@@ -870,7 +883,7 @@ impl<A: Clone> Ui<A> {
                     && matches!(event.key, Some(InputKey::Enter | InputKey::Space))
             })
         {
-            self.activate(node);
+            self.activate(node, Source::Key);
         }
     }
 

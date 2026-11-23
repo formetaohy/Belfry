@@ -315,6 +315,15 @@ impl NativeSurface {
         }
     }
 
+    pub(crate) fn outdated(&self) -> bool {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(surface) => surface.outdated(),
+            #[cfg(metal_backend)]
+            Self::Metal(_) => false,
+        }
+    }
+
     pub(crate) fn resize(&mut self, width: u32, height: u32) {
         match self {
             #[cfg(vulkan_backend)]

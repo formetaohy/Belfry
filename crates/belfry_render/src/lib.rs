@@ -2,6 +2,7 @@ mod abi;
 mod batch;
 mod camera;
 mod capture;
+mod damage;
 pub mod environment;
 mod frame;
 mod growing;
@@ -32,7 +33,8 @@ pub use belfry_gpu_device::{
     AddressMode, Filter, Sampler, SamplerDesc, Texture, TextureFormat, TextureUsages,
 };
 pub use camera::Camera;
-pub use capture::{Capture, CaptureProbe, PROBE_RESOLUTION, SceneRevision, install_captures};
+pub use capture::{Capture, CaptureProbe, PROBE_RESOLUTION, install_captures};
+pub use damage::SceneDamage;
 pub use environment::{Baked, Environment};
 pub use hidden::Hidden;
 pub use instance::MeshInstance;

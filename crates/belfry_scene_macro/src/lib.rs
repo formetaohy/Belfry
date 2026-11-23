@@ -12,6 +12,14 @@ struct ComponentOptions {
     name: Option<(String, Span)>,
     label: Option<(String, Span)>,
     required: bool,
+    reach: Option<(Reach, Span)>,
+}
+
+#[derive(Clone, Copy)]
+enum Reach {
+    None,
+    Node,
+    World,
 }
 
 #[derive(Default)]
@@ -297,6 +305,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
     let runtime_fields = quote! { &[#(#runtime),*] };
+    let reach = match options.reach.map(|(reach, _)| reach).unwrap_or(Reach::None) {
+        Reach::None => quote! { ::belfry_scene::__private::Reach::None },
+        Reach::Node => quote! { ::belfry_scene::__private::Reach::Node },
+        Reach::World => quote! { ::belfry_scene::__private::Reach::World },
+    };
     let validate_choice = if checks.is_empty() {
         quote! {}
     } else {
@@ -334,6 +347,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     required: #required,
                     fields: FIELDS,
                     runtime_fields: RUNTIME_FIELDS,
+                    reach: #reach,
                 }
             };
 
@@ -456,8 +470,22 @@ fn component_options(attrs: &[Attribute]) -> syn::Result<ComponentOptions> {
                     return Err(meta.error("the scene component repeats required"));
                 }
                 options.required = true;
+            } else if meta.path.is_ident("reach") {
+                let value = meta.value()?.parse::<LitStr>()?;
+                let reach = match value.value().as_str() {
+                    "none" => Reach::None,
+                    "node" => Reach::Node,
+                    "world" => Reach::World,
+                    other => {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            format!("a scene component reaches none, node or world, not {other}"),
+                        ));
+                    }
+                };
+                set(&mut options.reach, reach, value.span(), "reach")?;
             } else {
-                return Err(meta.error("a scene component holds name, label or required"));
+                return Err(meta.error("a scene component holds name, label, required or reach"));
             }
             Ok(())
         })?;

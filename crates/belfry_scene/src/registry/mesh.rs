@@ -5,7 +5,7 @@ use crate::node::MeshRef;
 use crate::reference::{MaterialId, MeshId};
 use crate::scene::Scene;
 use crate::scene_value::SceneValue;
-use crate::schema::{ComponentSpec, Field, FieldKind, ReferenceKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach, ReferenceKind};
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
 use belfry_math::Vec3;
@@ -38,6 +38,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::Node,
 };
 
 impl SceneComponent for MeshRef {

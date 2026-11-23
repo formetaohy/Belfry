@@ -126,8 +126,9 @@ impl Stream {
             self.frames.unwrap_or(0),
         );
         let (producer, consumer) = frames::channel(LOOKAHEAD);
-        let total = Arc::new(AtomicU64::new(self.frames.unwrap_or(UNKNOWN)));
+        let total = Arc::new(AtomicU64::new(UNKNOWN));
         let held = Arc::clone(&total);
+        let period = if looping { self.frames } else { None };
         let path = self.path.clone();
         let container = self.container.clone();
         let channels = self.channels;
@@ -144,7 +145,6 @@ impl Stream {
                     &mut producer,
                     &held,
                 );
-                producer.end();
             })
             .map_err(|error| {
                 format!(
@@ -155,6 +155,7 @@ impl Stream {
         Ok(Track {
             frames: consumer,
             total,
+            period,
             sample_rate: self.sample_rate,
             channels: self.channels,
         })
@@ -164,6 +165,7 @@ impl Stream {
 pub(crate) struct Track {
     frames: frames::Consumer,
     total: Arc<AtomicU64>,
+    period: Option<u64>,
     sample_rate: u32,
     channels: Channels,
 }
@@ -175,6 +177,7 @@ impl std::fmt::Debug for Track {
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
             .field("total", &self.total())
+            .field("period", &self.period)
             .finish()
     }
 }
@@ -192,15 +195,15 @@ impl Track {
         self.frames.take()
     }
 
-    pub(crate) fn ended(&self) -> bool {
-        self.frames.ended()
-    }
-
     pub(crate) fn total(&self) -> Option<u64> {
         match self.total.load(Ordering::Acquire) {
             UNKNOWN => None,
             total => Some(total),
         }
+    }
+
+    pub(crate) fn period(&self) -> Option<u64> {
+        self.period
     }
 }
 
@@ -219,8 +222,7 @@ fn decode(
         }
         Container::Vorbis => decode_vorbis(path, looping, start, producer),
     };
-    let ending = if looping { 0 } else { start + served };
-    total.store(ending, Ordering::Release);
+    total.store(start + served, Ordering::Release);
 }
 
 fn decode_wav(
@@ -239,6 +241,8 @@ fn decode_wav(
         return 0;
     }
     let mut served = 0u64;
+    let mut from_zero = start == 0;
+    let mut progress = 0u64;
     loop {
         if producer.closed() {
             return served;
@@ -248,16 +252,19 @@ fn decode_wav(
             Err(_) => return served,
         };
         if samples.is_empty() {
-            if !looping {
+            if !looping || (from_zero && progress == 0) {
                 return served;
             }
             if reader.seek(0).is_err() {
                 return served;
             }
+            from_zero = true;
+            progress = 0;
             continue;
         }
         let frames = stereo(&samples, channels);
         served += frames.len() as u64;
+        progress += frames.len() as u64;
         if !write(producer, &frames) {
             return served;
         }
@@ -267,6 +274,7 @@ fn decode_wav(
 fn decode_vorbis(path: &Path, looping: bool, start: u64, producer: &mut frames::Producer) -> u64 {
     let mut served = 0u64;
     let mut first = true;
+    let mut from_zero = start == 0;
     loop {
         let Ok(file) = File::open(path) else {
             return served;
@@ -279,6 +287,7 @@ fn decode_vorbis(path: &Path, looping: bool, start: u64, producer: &mut frames::
         let mut pass = 0u64;
         let mut pending: Vec<[f32; 2]> = Vec::new();
         let mut broken = false;
+        let mut round = 0u64;
         loop {
             if producer.closed() {
                 return served;
@@ -296,6 +305,7 @@ fn decode_vorbis(path: &Path, looping: bool, start: u64, producer: &mut frames::
                     }
                     if !pending.is_empty() {
                         served += pending.len() as u64;
+                        round += pending.len() as u64;
                         if !write(producer, &pending) {
                             return served;
                         }
@@ -311,6 +321,7 @@ fn decode_vorbis(path: &Path, looping: bool, start: u64, producer: &mut frames::
                 let frames = std::mem::take(&mut pending);
                 served += frames.len() as u64;
                 pass += frames.len() as u64;
+                round += frames.len() as u64;
                 if !write(producer, &frames) {
                     return served;
                 }
@@ -332,10 +343,11 @@ fn decode_vorbis(path: &Path, looping: bool, start: u64, producer: &mut frames::
             };
             pending = skip_frames(frames, &mut skip);
         }
-        if broken || !looping {
+        if broken || !looping || (from_zero && round == 0) {
             return served;
         }
         first = false;
+        from_zero = true;
     }
 }
 
@@ -438,7 +450,11 @@ mod tests {
             while let Some(frame) = track.take() {
                 frames.push(frame);
             }
-            if track.ended() {
+            if let Some(total) = track.total() {
+                assert!(
+                    track.take().is_none(),
+                    "a track of {total} served frames holds none past its end",
+                );
                 break;
             }
             assert!(
@@ -480,6 +496,8 @@ mod tests {
         fs::write(&path, wave(8_000, 2, &samples)).expect("a test writes its wave");
         let stream = Stream::open(&path).expect("a test holds a wave stream");
         let mut track = stream.track(true, 0).expect("a test starts its track");
+        assert_eq!(track.period(), Some(64));
+        assert_eq!(track.total(), None);
         let mut frames = Vec::new();
         let begin = Instant::now();
         while frames.len() < 64 * 2 + 8 {
@@ -489,16 +507,18 @@ mod tests {
             assert!(begin.elapsed() < Duration::from_secs(20), "a loop restarts");
             thread::sleep(Duration::from_millis(1));
         }
+        assert_eq!(track.total(), None);
         for at in 0..8 {
             assert_eq!(frames[64 + at], frames[at]);
         }
-        let _ = fs::remove_dir_all(&root);
 
         let stream = Stream::open(TONE).expect("a test opens its vorbis stream");
         let mut track = stream.track(true, 0).expect("a test starts its track");
         let bytes = fs::read(TONE).expect("a test reads its vorbis file");
         let sound = Sound::decode(&bytes, "the tone");
         let count = sound.frame_count();
+        assert_eq!(track.period(), Some(count as u64));
+        assert_eq!(track.total(), None);
         let mut frames = Vec::new();
         let begin = Instant::now();
         while frames.len() < count * 2 + 64 {
@@ -508,9 +528,27 @@ mod tests {
             assert!(begin.elapsed() < Duration::from_secs(20), "a loop restarts");
             thread::sleep(Duration::from_millis(1));
         }
+        assert_eq!(track.total(), None);
         for at in 0..32 {
             assert_eq!(frames[count + at], frames[at]);
         }
+
+        let empty = root.join("silence.wav");
+        fs::write(&empty, wave(8_000, 2, &[])).expect("a test writes its empty wave");
+        let stream = Stream::open(&empty).expect("a test holds an empty wave stream");
+        assert_eq!(stream.frame_count(), Some(0));
+        let mut track = stream.track(true, 0).expect("a test starts its track");
+        let begin = Instant::now();
+        while track.total().is_none() {
+            assert!(
+                begin.elapsed() < Duration::from_secs(5),
+                "an empty loop ends rather than spinning",
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(track.total(), Some(0));
+        assert_eq!(track.take(), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

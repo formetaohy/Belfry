@@ -1,7 +1,7 @@
 use super::{Assets, SceneComponent};
 use crate::field::Axis;
 use crate::scene::Scene;
-use crate::schema::ComponentSpec;
+use crate::schema::{ComponentSpec, Reach};
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
 use belfry_render::Hidden;
@@ -13,6 +13,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: &[],
     runtime_fields: &[],
+    reach: Reach::Node,
 };
 
 impl SceneComponent for Hidden {

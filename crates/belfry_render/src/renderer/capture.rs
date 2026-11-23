@@ -1,12 +1,27 @@
 use super::*;
 
 impl Renderer {
-    pub(super) fn stale_probe(world: &World) -> Option<Probe> {
-        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
+    pub(super) fn absorb_damage(&mut self, world: &World, collection: &Collection) {
+        self.damage.absorb(
+            world,
+            (&collection.entities, &collection.spheres),
+            &self.spheres,
+        );
+        self.spheres.clear();
+        self.spheres.extend(
+            collection
+                .entities
+                .iter()
+                .copied()
+                .zip(collection.spheres.iter().copied()),
+        );
+    }
+
+    pub(super) fn stale_probe(&self, world: &World) -> Option<Probe> {
         world.iter::<CaptureProbe>().find_map(|(entity, probe)| {
             let transform = *world.get::<Transform>(entity)?;
             let environment = world.get::<Environment>(entity)?.clone();
-            probe.stale(transform, revision).then_some(Probe {
+            (probe.stale(transform) || self.damage.pending(entity)).then_some(Probe {
                 entity,
                 transform,
                 probe: *probe,
@@ -17,7 +32,6 @@ impl Renderer {
 
     pub(super) fn capture(
         &mut self,
-        world: &World,
         probe: Option<Probe>,
         inputs: &CaptureInputs<'_>,
         travel: &Travel,
@@ -276,9 +290,9 @@ impl Renderer {
         submission.submit(&self.queue);
         let sampler = self.shading.sampler().clone();
         let request = self.bake(&panorama, &sampler);
-        let revision = world.resource::<SceneRevision>().map_or(0, |held| held.0);
         let mut marker = probe.probe;
-        marker.captured(probe.transform, revision);
+        marker.captured(probe.transform);
+        self.damage.covered(probe.entity);
         self.captures.begin(crate::capture::Pending {
             entity: probe.entity,
             probe: marker,

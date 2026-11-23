@@ -1,8 +1,10 @@
+use crate::change::Changed;
 use crate::install::NodeMap;
 use crate::registry::Assets;
 use crate::scene::Scene;
+use crate::schema::ReferenceKind;
 use belfry_animation::ClipSource;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
@@ -11,25 +13,54 @@ pub struct AnimationLibrary {
 }
 
 impl AnimationLibrary {
-    pub(crate) fn build(scene: &Scene, assets: &dyn Assets, nodes: &NodeMap) -> Self {
-        let sources = scene
+    pub(crate) fn rebuild(&mut self, scene: &Scene, assets: &dyn Assets, nodes: &NodeMap) {
+        self.revise_with(scene, assets, nodes, |_| true);
+    }
+
+    pub(crate) fn revise(
+        &mut self,
+        scene: &Scene,
+        assets: &dyn Assets,
+        nodes: &NodeMap,
+        changed: &Changed,
+    ) -> HashSet<String> {
+        self.revise_with(scene, assets, nodes, |id| {
+            changed.touches(ReferenceKind::Animation, id)
+        })
+    }
+
+    fn revise_with(
+        &mut self,
+        scene: &Scene,
+        assets: &dyn Assets,
+        nodes: &NodeMap,
+        stale: impl Fn(&str) -> bool,
+    ) -> HashSet<String> {
+        let held = scene
             .animations()
             .iter()
-            .map(|entry| {
-                let clip = assets.animation(entry.id.as_str());
-                let targets = entry
-                    .asset
-                    .targets()
-                    .iter()
-                    .map(|target| nodes.entity(target.as_str()))
-                    .collect::<Vec<_>>();
-                (
-                    entry.id.clone(),
-                    Arc::new(ClipSource::new(entry.id.as_str(), clip, Arc::from(targets))),
-                )
-            })
-            .collect();
-        Self { sources }
+            .map(|entry| entry.id.as_str())
+            .collect::<HashSet<_>>();
+        self.sources.retain(|id, _| held.contains(id.as_str()));
+        let mut rebuilt = HashSet::new();
+        for entry in scene.animations() {
+            if self.sources.contains_key(&entry.id) && !stale(&entry.id) {
+                continue;
+            }
+            let clip = assets.animation(entry.id.as_str());
+            let targets = entry
+                .asset
+                .targets()
+                .iter()
+                .map(|target| nodes.entity(target.as_str()))
+                .collect::<Vec<_>>();
+            self.sources.insert(
+                entry.id.clone(),
+                Arc::new(ClipSource::new(entry.id.as_str(), clip, Arc::from(targets))),
+            );
+            rebuilt.insert(entry.id.clone());
+        }
+        rebuilt
     }
 
     pub fn source(&self, id: &str) -> Arc<ClipSource> {

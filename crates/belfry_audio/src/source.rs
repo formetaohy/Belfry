@@ -124,9 +124,12 @@ impl Input {
         }
     }
 
-    pub(crate) fn finished(&self, position: f64) -> bool {
+    pub(crate) fn finished(&self, position: f64, looping: bool) -> bool {
         match self {
-            Self::Decoded(sound) => position >= sound.frame_count() as f64,
+            Self::Decoded(sound) => {
+                let frames = sound.frame_count() as f64;
+                frames == 0.0 || (!looping && position >= frames)
+            }
             Self::Stream(stream) => stream
                 .track
                 .total()
@@ -134,10 +137,11 @@ impl Input {
         }
     }
 
-    pub(crate) fn ended(&self) -> bool {
+    pub(crate) fn playhead(&self, position: f64) -> u64 {
+        let at = position.max(0.0) as u64;
         match self {
-            Self::Decoded(_) => false,
-            Self::Stream(stream) => stream.track.ended(),
+            Self::Decoded(_) => at,
+            Self::Stream(stream) => stream.track.period().map_or(at, |period| at % period),
         }
     }
 
@@ -145,13 +149,6 @@ impl Input {
         match self {
             Self::Decoded(sound) => Some(sound.frame_count() as u64),
             Self::Stream(_) => None,
-        }
-    }
-
-    pub(crate) fn loop_length(&self) -> Option<u64> {
-        match self {
-            Self::Decoded(sound) => Some(sound.frame_count() as u64),
-            Self::Stream(stream) => stream.track.total(),
         }
     }
 }

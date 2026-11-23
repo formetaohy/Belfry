@@ -1,7 +1,7 @@
 use super::{Assets, SceneComponent};
 use crate::field::{Axis, no_axis, positive, unit, vector_toml, with_axis};
 use crate::scene::Scene;
-use crate::schema::{ComponentSpec, Field, FieldKind};
+use crate::schema::{ComponentSpec, Field, FieldKind, Reach};
 use crate::value::{Effect, Value};
 use belfry_ecs::{Entity, World};
 use belfry_math::Vec3;
@@ -40,6 +40,7 @@ pub(crate) static SPEC: ComponentSpec = ComponentSpec {
     required: false,
     fields: FIELDS,
     runtime_fields: RUNTIME_FIELDS,
+    reach: Reach::World,
 };
 
 impl SceneComponent for PointLight {

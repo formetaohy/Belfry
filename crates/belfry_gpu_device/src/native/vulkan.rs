@@ -2914,7 +2914,9 @@ impl Device {
                     frame.resources.push(texture.clone());
                     frame.resources.push(target.clone());
                 }
-                Command::Present { texture, native } => {
+                Command::Present {
+                    texture, native, ..
+                } => {
                     let present = native.vulkan();
                     let texture = native_texture(texture.native());
                     assert!(
@@ -3413,8 +3415,12 @@ impl Surface {
         self.format
     }
 
+    pub(crate) fn outdated(&self) -> bool {
+        self.outdated.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn acquire(&mut self) -> Option<NativeFrame> {
-        if self.outdated.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.outdated() {
             return None;
         }
         let (image, _) = match unsafe {
@@ -3424,7 +3430,7 @@ impl Surface {
             Ok(image) => image,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.outdated
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                    .store(true, std::sync::atomic::Ordering::Release);
                 return None;
             }
             Err(error) => panic!("acquiring a Vulkan swapchain image: {error:?}"),
@@ -3470,7 +3476,7 @@ impl Surface {
         self.height = height;
         self.format = format;
         self.outdated
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -3484,7 +3490,7 @@ impl Present {
             Ok(_) => {}
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self
                 .outdated
-                .store(true, std::sync::atomic::Ordering::Relaxed),
+                .store(true, std::sync::atomic::Ordering::Release),
             Err(error) => panic!("presenting a Vulkan swapchain: {error:?}"),
         }
     }
