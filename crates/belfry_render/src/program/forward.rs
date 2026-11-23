@@ -39,8 +39,8 @@ mod instanced {
     #[binding]
     fn transparent(
         fragments: ReadWrite<TransparentRecord>,
-        heads: ReadWrite<AtomicU32>,
-        counter: ReadWrite<AtomicU32>,
+        counts: ReadWrite<AtomicU32>,
+        dropped: ReadWrite<AtomicU32>,
         settings: Read<TransparentSetupRecord>,
     ) {
     }
@@ -566,20 +566,19 @@ mod instanced {
         }
         if blended {
             let setup = settings[0u32];
-            let index = atomic_add(&counter[0u32], 1u32);
-            if index < setup.capacity {
-                let width = setup.width as f32;
-                let height = setup.height as f32;
-                let pixel_x = min(max(floor(screen.x * width), 0.0), width - 1.0) as u32;
-                let pixel_y = min(max(floor(screen.y * height), 0.0), height - 1.0) as u32;
-                let pixel = pixel_y * setup.width + pixel_x;
-                let previous = atomic_exchange(&heads[pixel], index + 1u32);
-                fragments[index].red = fogged.x * coverage;
-                fragments[index].green = fogged.y * coverage;
-                fragments[index].blue = fogged.z * coverage;
-                fragments[index].alpha = coverage;
-                fragments[index].depth = reach;
-                fragments[index].next = previous;
+            let width = setup.width as f32;
+            let height = setup.height as f32;
+            let pixel_x = min(max(floor(screen.x * width), 0.0), width - 1.0) as u32;
+            let pixel_y = min(max(floor(screen.y * height), 0.0), height - 1.0) as u32;
+            let pixel = pixel_y * setup.width + pixel_x;
+            let layer = atomic_add(&counts[pixel], 1u32);
+            if layer < setup.layers {
+                let at = pixel * setup.layers + layer;
+                fragments[at].color = encoded_color(fogged.x, fogged.y, fogged.z);
+                fragments[at].depth_coverage =
+                    encoded_depth(reach, camera.near, camera.far) | encoded_coverage(coverage);
+            } else {
+                atomic_add(&dropped[0u32], 1u32);
             }
         }
         target = fvec4(
@@ -588,6 +587,33 @@ mod instanced {
             select(fogged.z, fogged.z * coverage, blended),
             select(marker, coverage, blended),
         );
+    }
+
+    fn encoded_color(red: f32, green: f32, blue: f32) -> u32 {
+        let peak = max(max(red, green), blue);
+        let exponent = min(max((bitcast_u32(peak) >> 23u32) & 255u32, 8u32), 253u32) + 2u32;
+        let unit = 255.0 / bitcast_f32((exponent - 1u32) << 23u32);
+        (exponent << 24u32)
+            | (encoded_byte(red * unit) << 16u32)
+            | (encoded_byte(green * unit) << 8u32)
+            | encoded_byte(blue * unit)
+    }
+
+    fn encoded_depth(reach: f32, near: f32, far: f32) -> u32 {
+        let normalized = min(max((reach - near) / (far - near), 0.0), 1.0);
+        encoded_fixed(normalized * 16777215.0, 16777215.0) << 8u32
+    }
+
+    fn encoded_coverage(coverage: f32) -> u32 {
+        encoded_byte(coverage * 255.0)
+    }
+
+    fn encoded_byte(value: f32) -> u32 {
+        encoded_fixed(value, 255.0)
+    }
+
+    fn encoded_fixed(value: f32, ceiling: f32) -> u32 {
+        min(max(floor(value + 0.5), 0.0), ceiling) as u32
     }
 
     fn optical(climb: f32, low: f32, span: f32, scale: f32) -> f32 {
@@ -1332,10 +1358,10 @@ mod motion {
                 + deformed(fourth.col0, fourth.col1, fourth.col2, fourth.col3, rest)
                     * skin.weights.w;
             local = fvec4(place.x, place.y, place.z, 1.0);
-            let was_first = previous[held.previous_palette + skin.joints.x];
-            let was_second = previous[held.previous_palette + skin.joints.y];
-            let was_third = previous[held.previous_palette + skin.joints.z];
-            let was_fourth = previous[held.previous_palette + skin.joints.w];
+            let was_first = previous[held.palette + skin.joints.x];
+            let was_second = previous[held.palette + skin.joints.y];
+            let was_third = previous[held.palette + skin.joints.z];
+            let was_fourth = previous[held.palette + skin.joints.w];
             let was = deformed(
                 was_first.col0,
                 was_first.col1,

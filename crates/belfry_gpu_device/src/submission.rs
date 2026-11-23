@@ -1,7 +1,8 @@
 use crate::buffer::GpuBuffer;
 use crate::capability::{BufferUsages, TextureUsages};
 use crate::context::{Device, Queue};
-use crate::graphics::{Count, Draw, Scissor, Viewport};
+use crate::depth::DepthTexture;
+use crate::graphics::{Count, DepthOps, Draw, Pass, Scissor, Viewport};
 use crate::native::NativeBuffer;
 use crate::pipeline::{BindGroup, GraphicsSlot, Owner, PipelineHandle};
 use crate::surface::SurfaceFrame;
@@ -55,6 +56,7 @@ pub(crate) enum Command {
         target: Texture,
         level: u32,
         clear: [f32; 4],
+        depth: Option<(DepthTexture, DepthOps)>,
         draws: Vec<RecordedDraw>,
     },
     CopyTexture {
@@ -190,17 +192,13 @@ impl Submission {
         });
     }
 
-    pub fn render(&mut self, target: &Texture, clear: [f32; 4], draws: &[Draw<'_>]) {
-        self.render_level(target, 0, clear, draws);
-    }
-
-    pub fn render_level(
-        &mut self,
-        target: &Texture,
-        level: u32,
-        clear: [f32; 4],
-        draws: &[Draw<'_>],
-    ) {
+    pub fn render(&mut self, pass: Pass<'_>, draws: &[Draw<'_>]) {
+        let Pass {
+            color: target,
+            level,
+            clear,
+            depth,
+        } = pass;
         assert!(
             target.device().same(&self.device),
             "a render pass crosses devices"
@@ -215,6 +213,14 @@ impl Submission {
             target.mip_count(),
         );
         let (width, height) = target.level_extent(level);
+        if let Some((held, _)) = &depth {
+            assert!(
+                held.width() == width && held.height() == height,
+                "a {width} by {height} pass loads a {} by {} depth texture",
+                held.width(),
+                held.height(),
+            );
+        }
         let draws = draws
             .iter()
             .map(|draw| {
@@ -229,6 +235,14 @@ impl Submission {
                     "a draw writes the {:?} format of its pipeline into a {:?} target",
                     pipeline.format,
                     target.format(),
+                );
+                assert_eq!(
+                    pipeline.depth,
+                    depth.is_some(),
+                    "a draw of {} declares {} depth attachment where the pass holds {}",
+                    pipeline.program.label(),
+                    if pipeline.depth { "a" } else { "no" },
+                    if depth.is_some() { "one" } else { "none" },
                 );
                 let declared = pipeline
                     .program
@@ -311,6 +325,7 @@ impl Submission {
             target: target.clone(),
             level,
             clear,
+            depth: depth.map(|(held, ops)| (held.clone(), ops)),
             draws,
         });
     }

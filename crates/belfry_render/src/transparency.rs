@@ -1,25 +1,23 @@
-use crate::abi::{TransparentRecord, TransparentSetupRecord};
+use crate::abi::{TRANSPARENT_LAYERS, TransparentRecord, TransparentSetupRecord};
 use crate::program;
 use belfry_gpu_device::{
     AddressMode, Binding, BufferBinding, BufferUsages, Device, Draw, Filter, GpuBuffer,
-    GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
+    GraphicsPipeline, Pass, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
     TextureFormat,
 };
 use std::mem::size_of;
 
 const RECORD_BYTES: u64 = size_of::<TransparentRecord>() as u64;
 const SETTINGS_BYTES: u64 = size_of::<TransparentSetupRecord>() as u64;
-const FRAGMENT_BUDGET: u64 = 128 << 20;
-const EXPECTED_LAYERS: u64 = 4;
 const WORD_BYTES: u64 = 4;
 const RESOLVE_VERTICES: u32 = 3;
 const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const LIT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 struct Screen {
-    heads: GpuBuffer,
+    counts: GpuBuffer,
     fragments: GpuBuffer,
-    counter: GpuBuffer,
+    dropped: GpuBuffer,
     settings: GpuBuffer,
     width: u32,
     height: u32,
@@ -70,46 +68,49 @@ impl Transparency {
             return;
         }
         let pixels = u64::from(width) * u64::from(height);
-        let budget = FRAGMENT_BUDGET
-            .min(device.limits().max_storage_buffer_binding_size)
-            .min(device.limits().max_buffer_size)
-            / RECORD_BYTES;
-        let capacity = (pixels * EXPECTED_LAYERS)
-            .min(budget)
-            .clamp(1, u64::from(u32::MAX));
+        let fragment_bytes = pixels * u64::from(TRANSPARENT_LAYERS) * RECORD_BYTES;
+        assert!(
+            fragment_bytes <= device.limits().max_storage_buffer_binding_size,
+            "a {width} by {height} frame layers {fragment_bytes} transparent bytes beyond the device storage binding",
+        );
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let heads = GpuBuffer::new(
+        let counts = GpuBuffer::new(
             device,
-            "belfry transparent heads",
+            "belfry transparent counts",
             pixels * WORD_BYTES,
             storage,
         );
         let fragments = GpuBuffer::new(
             device,
             "belfry transparent fragments",
-            capacity * RECORD_BYTES,
+            fragment_bytes,
             BufferUsages::STORAGE,
         );
-        let counter = GpuBuffer::new(device, "belfry transparent counter", WORD_BYTES, storage);
+        let dropped = GpuBuffer::new(
+            device,
+            "belfry transparent dropped",
+            WORD_BYTES,
+            storage | BufferUsages::COPY_SRC,
+        );
         let settings = GpuBuffer::new(
             device,
             "belfry transparent settings",
             SETTINGS_BYTES,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            storage,
         );
         settings.write(
             queue,
             bytemuck::bytes_of(&TransparentSetupRecord {
-                capacity: capacity as u32,
+                layers: TRANSPARENT_LAYERS,
                 width,
                 height,
                 vertical,
             }),
         );
         self.screen = Some(Screen {
-            heads,
+            counts,
             fragments,
-            counter,
+            dropped,
             settings,
             width,
             height,
@@ -122,11 +123,11 @@ impl Transparency {
             .as_ref()
             .expect("a transparent frame holds its fragments");
         submission.clear(
-            &screen.heads,
+            &screen.counts,
             0,
             u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
         );
-        submission.clear(&screen.counter, 0, WORD_BYTES);
+        submission.clear(&screen.dropped, 0, WORD_BYTES);
     }
 
     pub(crate) fn fragments(&self) -> BufferBinding<'_> {
@@ -137,23 +138,27 @@ impl Transparency {
         screen.fragments.binding(0, screen.fragments.size())
     }
 
-    pub(crate) fn heads(&self) -> BufferBinding<'_> {
+    pub(crate) fn counts(&self) -> BufferBinding<'_> {
         let screen = self
             .screen
             .as_ref()
             .expect("a transparent frame holds its fragments");
-        screen.heads.binding(
+        screen.counts.binding(
             0,
             u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
         )
     }
 
-    pub(crate) fn counter(&self) -> BufferBinding<'_> {
+    pub(crate) fn dropped(&self) -> BufferBinding<'_> {
         let screen = self
             .screen
             .as_ref()
             .expect("a transparent frame holds its fragments");
-        screen.counter.binding(0, WORD_BYTES)
+        screen.dropped.binding(0, WORD_BYTES)
+    }
+
+    pub(crate) fn dropped_buffer(&self) -> Option<&GpuBuffer> {
+        self.screen.as_ref().map(|screen| &screen.dropped)
     }
 
     pub(crate) fn settings(&self) -> BufferBinding<'_> {
@@ -181,8 +186,8 @@ impl Transparency {
                     screen.fragments.binding(0, screen.fragments.size()),
                 ),
                 Binding::buffer(
-                    program::RESOLVE_HEADS,
-                    screen.heads.binding(
+                    program::RESOLVE_COUNTS,
+                    screen.counts.binding(
                         0,
                         u64::from(screen.width) * u64::from(screen.height) * WORD_BYTES,
                     ),
@@ -197,18 +202,17 @@ impl Transparency {
             ],
         );
         submission.render(
-            lit,
-            CLEAR,
+            Pass::new(lit, CLEAR),
             &[Draw::new(&self.resolve, &[frame, image], RESOLVE_VERTICES)],
         );
     }
 }
 
 const _: () = assert!(
-    RECORD_BYTES == 24,
-    "a transparent fragment packs its shaded colour, depth and successor",
+    RECORD_BYTES == 8,
+    "a transparent layer packs its shaded colour beside its depth and coverage",
 );
 const _: () = assert!(
     SETTINGS_BYTES == 16,
-    "the transparent settings pack the capacity, viewport and vertical direction",
+    "the transparent settings pack the layers, viewport and vertical direction",
 );

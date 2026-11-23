@@ -4,7 +4,7 @@ use crate::program;
 use belfry_gpu::Fvec4;
 use belfry_gpu_device::{
     AddressMode, BindGroup, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GpuContext,
-    GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
+    GraphicsPipeline, Pass, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
     TextureFormat, TextureUsages,
 };
 use belfry_math::Vec3;
@@ -327,8 +327,7 @@ impl AtmosphereBaker {
         let background = panorama();
         let mut submission = Submission::new(&self.device, "belfry atmosphere");
         submission.render(
-            &self.transmittance,
-            CLEAR,
+            Pass::new(&self.transmittance, CLEAR),
             &[Draw::new(
                 &self.transmittance_pass,
                 std::slice::from_ref(&self.transmittance_group),
@@ -336,8 +335,7 @@ impl AtmosphereBaker {
             )],
         );
         submission.render(
-            &self.scattering,
-            CLEAR,
+            Pass::new(&self.scattering, CLEAR),
             &[Draw::new(
                 &self.scattering_pass,
                 &[
@@ -348,8 +346,7 @@ impl AtmosphereBaker {
             )],
         );
         submission.render(
-            &radiance,
-            CLEAR,
+            Pass::new(&radiance, CLEAR),
             &[Draw::new(
                 &self.sky,
                 &[self.radiance_group.clone(), self.sky_source.clone()],
@@ -357,8 +354,7 @@ impl AtmosphereBaker {
             )],
         );
         submission.render(
-            &background,
-            CLEAR,
+            Pass::new(&background, CLEAR),
             &[Draw::new(
                 &self.sky,
                 &[self.background_group.clone(), self.sky_source.clone()],

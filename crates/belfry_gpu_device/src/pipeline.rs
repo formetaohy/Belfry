@@ -91,6 +91,7 @@ pub(crate) struct GraphicsSlot {
     pub(crate) program: Arc<GraphicsProgram>,
     pub(crate) device: Device,
     pub(crate) format: TextureFormat,
+    pub(crate) depth: bool,
 }
 
 #[derive(Clone)]
@@ -187,6 +188,25 @@ impl GraphicsPipeline {
         format: TextureFormat,
         state: PipelineState,
     ) -> Self {
+        Self::layered(device, program, format, state, false)
+    }
+
+    pub fn new_depth(
+        device: &Device,
+        program: GraphicsProgram,
+        format: TextureFormat,
+        state: PipelineState,
+    ) -> Self {
+        Self::layered(device, program, format, state, true)
+    }
+
+    fn layered(
+        device: &Device,
+        program: GraphicsProgram,
+        format: TextureFormat,
+        state: PipelineState,
+        depth: bool,
+    ) -> Self {
         assert!(
             program
                 .bindings()
@@ -197,13 +217,14 @@ impl GraphicsPipeline {
         );
         let native = device
             .native()
-            .create_graphics_pipeline(&program, format, state);
+            .create_graphics_pipeline(&program, format, state, depth);
         Self {
             slot: Arc::new(GraphicsSlot {
                 device: device.clone(),
                 program: Arc::new(program),
                 native,
                 format,
+                depth,
             }),
         }
     }

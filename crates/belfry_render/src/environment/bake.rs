@@ -6,9 +6,9 @@ use crate::environment::{LEVELS, SPECULAR_WIDTH};
 use crate::frame::vertical;
 use crate::program;
 use belfry_gpu_device::{
-    Binding, BufferUsages, Device, Draw, GpuBuffer, GpuContext, GraphicsPipeline, PipelineHandle,
-    PipelineState, Queue, Sampler, Submission, SubmissionIndex, Texture, TextureFormat,
-    TextureUsages,
+    Binding, BufferUsages, Device, Draw, GpuBuffer, GpuContext, GraphicsPipeline, Pass,
+    PipelineHandle, PipelineState, Queue, Sampler, Submission, SubmissionIndex, Texture,
+    TextureFormat, TextureUsages,
 };
 use belfry_math::Vec3;
 use std::mem::size_of;
@@ -175,10 +175,8 @@ impl Baker {
                 )],
             );
             let groups = [level_group, source.clone()];
-            submission.render_level(
-                &radiance,
-                level,
-                CLEAR,
+            submission.render(
+                Pass::new(&radiance, CLEAR).level(level),
                 &[Draw::new(&self.prefilter, &groups, FULLSCREEN_VERTICES)],
             );
         }
@@ -203,8 +201,7 @@ impl Baker {
             self.integration.bind_group(1, &integration_source),
         ];
         submission.render(
-            &self.accumulation,
-            CLEAR,
+            Pass::new(&self.accumulation, CLEAR),
             &[Draw::new(
                 &self.integration,
                 &integration,

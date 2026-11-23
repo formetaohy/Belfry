@@ -1,5 +1,7 @@
 use crate::buffer::BufferBinding;
+use crate::depth::DepthTexture;
 use crate::pipeline::{BindGroup, GraphicsPipeline};
+use crate::texture::Texture;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
@@ -86,6 +88,7 @@ impl Scissor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepthState {
     TestWrite,
+    TestCovered,
     Test,
     Off,
 }
@@ -134,6 +137,70 @@ impl PipelineState {
         blend: BlendState::Preserve,
         alpha: false,
     };
+
+    pub const COVERED: Self = Self {
+        depth: DepthState::TestCovered,
+        blend: BlendState::Opaque,
+        alpha: true,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DepthLoad {
+    Clear,
+    Keep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DepthOps {
+    pub load: DepthLoad,
+    pub store: bool,
+}
+
+impl DepthOps {
+    pub const CLEAR: Self = Self {
+        load: DepthLoad::Clear,
+        store: false,
+    };
+
+    pub const CLEAR_STORED: Self = Self {
+        load: DepthLoad::Clear,
+        store: true,
+    };
+
+    pub const KEEP: Self = Self {
+        load: DepthLoad::Keep,
+        store: false,
+    };
+}
+
+pub struct Pass<'a> {
+    pub color: &'a Texture,
+    pub level: u32,
+    pub clear: [f32; 4],
+    pub depth: Option<(&'a DepthTexture, DepthOps)>,
+}
+
+impl<'a> Pass<'a> {
+    pub fn new(color: &'a Texture, clear: [f32; 4]) -> Self {
+        Self {
+            color,
+            level: 0,
+            clear,
+            depth: None,
+        }
+    }
+
+    pub fn level(self, level: u32) -> Self {
+        Self { level, ..self }
+    }
+
+    pub fn depth(self, texture: &'a DepthTexture, ops: DepthOps) -> Self {
+        Self {
+            depth: Some((texture, ops)),
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

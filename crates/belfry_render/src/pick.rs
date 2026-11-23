@@ -5,8 +5,9 @@ use crate::program;
 use crate::view::View;
 use belfry_ecs::Entity;
 use belfry_gpu_device::{
-    Binding, BufferUsages, ClipSpace, Device, Draw, GpuBuffer, GraphicsPipeline, PipelineState,
-    Queue, Submission, Texture, TextureFormat, TextureUsages,
+    Binding, BufferBinding, BufferUsages, ClipSpace, DepthOps, DepthTexture, Device, Draw,
+    GpuBuffer, GraphicsPipeline, Pass, PipelineState, Queue, Submission, Texture, TextureFormat,
+    TextureUsages,
 };
 use belfry_math::{Mat4, Vec2, Vec3, Vec4};
 use std::mem::size_of;
@@ -37,19 +38,20 @@ pub(crate) struct PickResources<'a> {
     pub(crate) drawn: &'a GpuBuffer,
     pub(crate) arguments: &'a GpuBuffer,
     pub(crate) meshes: &'a MeshLibrary,
-    pub(crate) palette: &'a GpuBuffer,
+    pub(crate) palette: BufferBinding<'a>,
 }
 
 pub(crate) struct Picker {
     pipeline: GraphicsPipeline,
     view: GpuBuffer,
     target: Texture,
+    depth: DepthTexture,
 }
 
 impl Picker {
     pub(crate) fn new(device: &Device) -> Self {
         Self {
-            pipeline: GraphicsPipeline::new(
+            pipeline: GraphicsPipeline::new_depth(
                 device,
                 program::picking(),
                 TextureFormat::Rgba8Unorm,
@@ -70,6 +72,7 @@ impl Picker {
                 TextureFormat::Rgba8Unorm,
                 TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
             ),
+            depth: DepthTexture::new(device, "belfry pick depth", TARGET_SIDE, TARGET_SIDE),
         }
     }
 
@@ -113,10 +116,7 @@ impl Picker {
                     0,
                     &[
                         Binding::buffer(program::PICK_VIEW, self.view.binding(0, VIEW_BYTES)),
-                        Binding::buffer(
-                            program::PICK_PALETTE,
-                            resources.palette.binding(0, resources.palette.size()),
-                        ),
+                        Binding::buffer(program::PICK_PALETTE, resources.palette),
                         Binding::buffer(
                             program::PICK_SKINS,
                             resources.meshes.skin_binding(geometry),
@@ -153,7 +153,10 @@ impl Picker {
             })
             .collect::<Vec<_>>();
         let mut submission = Submission::new(device, "belfry pick");
-        submission.render(&self.target, CLEAR, &draws);
+        submission.render(
+            Pass::new(&self.target, CLEAR).depth(&self.depth, DepthOps::CLEAR),
+            &draws,
+        );
         submission.submit(queue);
         let bytes = self.target.read(queue);
         let pixel = &bytes[..4];

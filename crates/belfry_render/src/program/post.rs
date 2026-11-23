@@ -8,6 +8,9 @@ mod transparency {
     #[binding]
     fn fragments(fragments: Read<TransparentRecord>) {}
 
+    #[binding]
+    fn counts(counts: Read<u32>) {}
+
     #[vertex]
     fn vertex(vertex: u32, position: Out<Position>, surface: Out<Fvec2>) {
         let setup = settings[0u32];
@@ -24,13 +27,7 @@ mod transparency {
     }
 
     #[fragment]
-    fn fragment(
-        source: Texture2D,
-        filter: Sampler,
-        heads: Read<u32>,
-        coverage: In<Fvec2>,
-        target: Out<Fvec4>,
-    ) {
+    fn fragment(source: Texture2D, filter: Sampler, coverage: In<Fvec2>, target: Out<Fvec4>) {
         let setup = settings[0u32];
         let at = coverage;
         let width = setup.width as f32;
@@ -38,50 +35,92 @@ mod transparency {
         let pixel_x = min(max(floor(at.x * width), 0.0), width - 1.0) as u32;
         let pixel_y = min(max(floor(at.y * height), 0.0), height - 1.0) as u32;
         let pixel = pixel_y * setup.width + pixel_x;
+        let held = pixel * setup.layers;
+        let filled = min(counts[pixel], setup.layers);
+        let mut color0 = select(0u32, fragments[held].color, filled > 0u32);
+        let mut depth0 = select(0u32, fragments[held].depth_coverage, filled > 0u32);
+        let mut color1 = select(0u32, fragments[held + 1u32].color, filled > 1u32);
+        let mut depth1 = select(0u32, fragments[held + 1u32].depth_coverage, filled > 1u32);
+        let mut color2 = select(0u32, fragments[held + 2u32].color, filled > 2u32);
+        let mut depth2 = select(0u32, fragments[held + 2u32].depth_coverage, filled > 2u32);
+        let mut color3 = select(0u32, fragments[held + 3u32].color, filled > 3u32);
+        let mut depth3 = select(0u32, fragments[held + 3u32].depth_coverage, filled > 3u32);
+        let ordering01 = depth1 < depth0;
+        let low_color01 = select(color0, color1, ordering01);
+        let low_depth01 = select(depth0, depth1, ordering01);
+        color1 = select(color1, color0, ordering01);
+        depth1 = select(depth1, depth0, ordering01);
+        color0 = low_color01;
+        depth0 = low_depth01;
+        let ordering23 = depth3 < depth2;
+        let low_color23 = select(color2, color3, ordering23);
+        let low_depth23 = select(depth2, depth3, ordering23);
+        color3 = select(color3, color2, ordering23);
+        depth3 = select(depth3, depth2, ordering23);
+        color2 = low_color23;
+        depth2 = low_depth23;
+        let ordering02 = depth2 < depth0;
+        let low_color02 = select(color0, color2, ordering02);
+        let low_depth02 = select(depth0, depth2, ordering02);
+        color2 = select(color2, color0, ordering02);
+        depth2 = select(depth2, depth0, ordering02);
+        color0 = low_color02;
+        depth0 = low_depth02;
+        let ordering13 = depth3 < depth1;
+        let low_color13 = select(color1, color3, ordering13);
+        let low_depth13 = select(depth1, depth3, ordering13);
+        color3 = select(color3, color1, ordering13);
+        depth3 = select(depth3, depth1, ordering13);
+        color1 = low_color13;
+        depth1 = low_depth13;
+        let ordering12 = depth2 < depth1;
+        let low_color12 = select(color1, color2, ordering12);
+        let low_depth12 = select(depth1, depth2, ordering12);
+        color2 = select(color2, color1, ordering12);
+        depth2 = select(depth2, depth1, ordering12);
+        color1 = low_color12;
+        depth1 = low_depth12;
+        let first = (depth0 & 255u32) as f32 * (1.0 / 255.0);
+        let second = (depth1 & 255u32) as f32 * (1.0 / 255.0);
+        let third = (depth2 & 255u32) as f32 * (1.0 / 255.0);
+        let fourth = (depth3 & 255u32) as f32 * (1.0 / 255.0);
+        let through_first = 1.0 - first;
+        let through_second = through_first * (1.0 - second);
+        let through_third = through_second * (1.0 - third);
+        let transmit = through_third * (1.0 - fourth);
+        let weight0 = first;
+        let weight1 = second * through_first;
+        let weight2 = third * through_second;
+        let weight3 = fourth * through_third;
         let base = sample(source, filter, at);
-        let mut red = 0.0;
-        let mut green = 0.0;
-        let mut blue = 0.0;
-        let head = heads[pixel];
-        let mut total = 0u32;
-        let mut node = head;
-        while node != 0u32 && total < 64u32 {
-            total += 1u32;
-            node = fragments[node - 1u32].next;
-        }
-        let mut transmit = 1.0;
-        let mut previous = 0.0;
-        for _step in stride(0u32, total, 1u32) {
-            let mut best = 1.0e30;
-            let mut found = 0u32;
-            let mut node = head;
-            while node != 0u32 {
-                let held = fragments[node - 1u32];
-                if held.depth > previous && held.depth < best {
-                    best = held.depth;
-                    found = node;
-                }
-                node = held.next;
-            }
-            if found == 0u32 {
-                break;
-            }
-            let held = fragments[found - 1u32];
-            red += held.red * transmit;
-            green += held.green * transmit;
-            blue += held.blue * transmit;
-            transmit *= max(0.0, 1.0 - held.alpha);
-            previous = best;
-            if transmit <= 0.001 {
-                break;
-            }
-        }
         target = fvec4(
-            base.x * transmit + red,
-            base.y * transmit + green,
-            base.z * transmit + blue,
+            decoded(color0, 16u32) * weight0
+                + decoded(color1, 16u32) * weight1
+                + decoded(color2, 16u32) * weight2
+                + decoded(color3, 16u32) * weight3
+                + base.x * transmit,
+            decoded(color0, 8u32) * weight0
+                + decoded(color1, 8u32) * weight1
+                + decoded(color2, 8u32) * weight2
+                + decoded(color3, 8u32) * weight3
+                + base.y * transmit,
+            decoded(color0, 0u32) * weight0
+                + decoded(color1, 0u32) * weight1
+                + decoded(color2, 0u32) * weight2
+                + decoded(color3, 0u32) * weight3
+                + base.z * transmit,
             base.w * transmit,
         );
+    }
+
+    fn decoded(color: u32, shift: u32) -> f32 {
+        let exponent = color >> 24u32;
+        let scale = select(
+            0.0,
+            bitcast_f32((exponent - 1u32) << 23u32),
+            exponent > 1u32,
+        ) * (1.0 / 255.0);
+        ((color >> shift) & 255u32) as f32 * scale
     }
 }
 pub(crate) fn transparency_resolve() -> GraphicsProgram {

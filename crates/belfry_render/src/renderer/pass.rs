@@ -1,4 +1,5 @@
 use super::*;
+use crate::renderer::scene::Upload;
 
 impl Renderer {
     pub(super) fn ensure_hzb(&mut self, width: u32, height: u32, vertical: f32) {
@@ -21,12 +22,14 @@ impl Renderer {
         ));
     }
 
-    pub(super) fn upload(&mut self, records: &[InstanceRecord], arguments: &[u32], slots: u32) {
-        let instances = records.len() as u64 * INSTANCE_BYTES;
-        self.instances.fit(&self.device, instances);
-        self.instances
-            .buffer()
-            .write(&self.queue, bytemuck::cast_slice(records));
+    pub(super) fn upload(&mut self, uploads: &[Upload], arguments: &[u32], slots: u32) {
+        for upload in uploads {
+            self.instance_buffer.buffer().write_at(
+                &self.queue,
+                upload.offset,
+                bytemuck::cast_slice(&upload.records),
+            );
+        }
         self.depth_drawn
             .fit(&self.device, u64::from(slots) * DRAW_BYTES);
         self.depth_arguments

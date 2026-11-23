@@ -1,7 +1,7 @@
 use crate::abi::{BloomRecord, BloomUpRecord, TonemapRecord};
 use crate::program;
 use belfry_gpu_device::{
-    AddressMode, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GraphicsPipeline,
+    AddressMode, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GraphicsPipeline, Pass,
     PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture, TextureFormat, TextureUsages,
 };
 use std::mem::size_of;
@@ -243,8 +243,7 @@ impl Post {
             ],
         );
         submission.render(
-            &screen.down[0],
-            CLEAR,
+            Pass::new(&screen.down[0], CLEAR),
             &[Draw::new(
                 &self.extract,
                 &[extract, source],
@@ -267,8 +266,7 @@ impl Post {
                 ],
             );
             submission.render(
-                &screen.down[index],
-                CLEAR,
+                Pass::new(&screen.down[index], CLEAR),
                 &[Draw::new(&self.down, &[frame, source], FULLSCREEN_VERTICES)],
             );
         }
@@ -293,8 +291,7 @@ impl Post {
                 ],
             );
             submission.render(
-                &screen.up[index],
-                CLEAR,
+                Pass::new(&screen.up[index], CLEAR),
                 &[Draw::new(&self.up, &[frame, source], FULLSCREEN_VERTICES)],
             );
         }
@@ -322,8 +319,7 @@ impl Post {
             ],
         );
         submission.render(
-            target,
-            CLEAR,
+            Pass::new(target, CLEAR),
             &[Draw::new(
                 &self.tonemap,
                 &[frame, source],

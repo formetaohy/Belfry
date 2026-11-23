@@ -57,8 +57,8 @@ pub(crate) const DRAW_VIEW: u32 = 4;
 pub(crate) const DRAW_PALETTE: u32 = 5;
 pub(crate) const DRAW_SKINS: u32 = 6;
 pub(crate) const DRAW_FRAGMENTS: u32 = 7;
-pub(crate) const DRAW_HEADS: u32 = 8;
-pub(crate) const DRAW_COUNTER: u32 = 9;
+pub(crate) const DRAW_COUNTS: u32 = 8;
+pub(crate) const DRAW_DROPPED: u32 = 9;
 pub(crate) const DRAW_SETTINGS: u32 = 10;
 pub(crate) const DRAW_PROBES: u32 = 11;
 pub(crate) const DRAW_VERTICES: u32 = 12;
@@ -132,7 +132,7 @@ pub(crate) const SHADOW_SAMPLER: u32 = 1;
 
 pub(crate) const RESOLVE_SETTINGS: u32 = 0;
 pub(crate) const RESOLVE_FRAGMENTS: u32 = 1;
-pub(crate) const RESOLVE_HEADS: u32 = 2;
+pub(crate) const RESOLVE_COUNTS: u32 = 2;
 pub(crate) const RESOLVE_SOURCE: u32 = 0;
 pub(crate) const RESOLVE_FILTER: u32 = 1;
 

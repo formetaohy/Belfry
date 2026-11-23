@@ -1,5 +1,11 @@
-use super::bounds::{joint_record, joint_world, skinned_bounds, static_bounds};
+use super::bounds::{joint_world, skinned_bounds, static_bounds};
 use super::*;
+use crate::instances::Source;
+
+pub(super) struct Upload {
+    pub(super) offset: u64,
+    pub(super) records: Vec<InstanceRecord>,
+}
 
 pub(super) struct Collection {
     pub(super) entities: Vec<Entity>,
@@ -7,89 +13,59 @@ pub(super) struct Collection {
     pub(super) bases: Vec<u32>,
     pub(super) slots: u32,
     pub(super) depth_batches: u32,
-    pub(super) depth_count: u32,
     pub(super) total: u32,
-    pub(super) joint_bytes: u64,
     pub(super) spheres: Vec<(Vec3, f32)>,
     pub(super) highlight: u32,
-    pub(super) records: Vec<InstanceRecord>,
+    pub(super) uploads: Vec<Upload>,
 }
 
 impl Renderer {
     pub(super) fn collect(&mut self, world: &World, highlight: Option<Entity>) -> Collection {
+        let Renderer {
+            instances,
+            meshes,
+            materials,
+            palettes,
+            ..
+        } = self;
         let mut gathered = Vec::new();
         world.for_each_pair::<Transform, MeshInstance>(|entity, transform, instance| {
             if world.contains::<Hidden>(entity) {
                 return;
             }
             gathered.push((
-                instance.mesh,
-                instance.material,
                 entity,
                 *transform,
                 *instance,
-                self.materials.mode(instance.material) == AlphaMode::Blend,
+                materials.mode(instance.material) == AlphaMode::Blend,
             ));
         });
-        let mut opaque = Vec::new();
-        let mut transparent = Vec::new();
-        for held in gathered {
-            if held.5 {
-                transparent.push(held);
-            } else {
-                opaque.push(held);
-            }
+        instances.begin();
+        for (entity, ..) in &gathered {
+            instances.claim(*entity);
         }
-        opaque.sort_by_key(|(mesh, _, entity, ..)| (mesh.index(), entity.index()));
-        transparent.sort_by_key(|(mesh, _, entity, ..)| (mesh.index(), entity.index()));
-        let depth_count = opaque.len() as u32;
-        let mut gathered = opaque;
-        gathered.extend(transparent);
-        let mut batches = Vec::new();
-        let mut batch_of = Vec::with_capacity(gathered.len());
-        let mut previous = None;
-        let mut depth_batches = 0u32;
-        for (mesh, _, _, _, _, blended) in &gathered {
-            if previous != Some((*mesh, *blended)) {
-                previous = Some((*mesh, *blended));
-                batches.push(Batch {
-                    mesh: *mesh,
-                    count: 0,
-                });
-                if !blended {
-                    depth_batches += 1;
-                }
-            }
-            let batch = batches.len() - 1;
-            batches[batch].count += 1;
-            batch_of.push(batch as u32);
+        instances.settle();
+        for (entity, transform, instance, blended) in &gathered {
+            let index = instances
+                .slot_of(*entity)
+                .expect("a claimed slot answers the entity that claimed it");
+            instances.at_mut(index as usize).staged = Some(Source {
+                transform: *transform,
+                mesh: instance.mesh,
+                material: instance.material,
+                tint: instance.tint,
+                blended: *blended,
+            });
         }
-        let counts = batches.iter().map(|batch| batch.count).collect::<Vec<_>>();
-        let total = gathered.len() as u32;
-        let highlight = highlight
-            .and_then(|held| {
-                gathered
-                    .iter()
-                    .position(|(_, _, entity, ..)| *entity == held)
-            })
-            .map_or(NO_HIGHLIGHT, |at| at as u32);
-        let alignment = self
-            .device
-            .limits()
-            .min_storage_buffer_offset_alignment
-            .max(WORD_BYTES);
-        let (bases, slots) = bases_of(&counts, span::blocks(alignment, DRAW_BYTES));
-        self.palettes.begin();
-        let mut poses = Vec::with_capacity(gathered.len());
-        let mut previous_palettes = Vec::with_capacity(gathered.len());
+        palettes.begin();
         let mut scratch = Vec::new();
-        for (_, _, entity, transform, instance, _) in &gathered {
-            let geometry = self.meshes.geometry(instance.mesh);
-            let Some(skin) = world.get::<Skin>(*entity) else {
-                poses.push(palette::NONE);
-                previous_palettes.push(0);
+        for index in 0..instances.len() {
+            let entity = instances.at(index).entity;
+            let source = instances.at(index).source();
+            let Some(skin) = world.get::<Skin>(entity) else {
                 continue;
             };
+            let geometry = meshes.geometry(source.mesh);
             assert!(
                 geometry.skin_count > 0,
                 "a skinned instance renders a mesh without skin weights",
@@ -101,73 +77,114 @@ impl Renderer {
                 skin.joints().len(),
                 skin.inverse_binds().len(),
             );
-            let model = transform.matrix();
+            let model = source.transform.matrix();
             let inverse = model.inverse();
             scratch.clear();
             for (joint, bind) in skin.joints().iter().zip(skin.inverse_binds()) {
                 let joint = joint_world(world, *joint);
                 scratch.push(inverse * joint * *bind);
             }
-            let (skinning, previous) = self.palettes.push(*entity, &scratch);
-            poses.push(skinning);
-            previous_palettes.push(previous);
+            let skinning = palettes.push(entity, &scratch);
+            let bounds = skinned_bounds(geometry, source.transform, &scratch);
+            let slot = instances.at_mut(index);
+            slot.skinning = skinning;
+            slot.bounds = Some(bounds);
         }
-        self.palettes.commit();
-        let palette = self.palettes.matrices();
-        let joint_bytes = u64::from(palette.len().max(1) as u32) * JOINT_BYTES;
-        self.joints.fit(&self.device, joint_bytes);
-        let reallocated = self.previous_joints.fit(&self.device, joint_bytes);
-        if !palette.is_empty() {
-            let records = palette.iter().map(joint_record).collect::<Vec<_>>();
-            self.joints
-                .buffer()
-                .write(&self.queue, bytemuck::cast_slice(&records));
+        palettes.commit(&self.device, &self.queue);
+        let alignment = self
+            .device
+            .limits()
+            .min_storage_buffer_offset_alignment
+            .max(WORD_BYTES);
+        let blocks = span::blocks(alignment, DRAW_BYTES);
+        let mut counted = HashMap::new();
+        for (_, _, instance, blended) in &gathered {
+            let held = counted
+                .entry((instance.mesh.index(), *blended))
+                .or_insert((instance.mesh, 0u32));
+            held.1 += 1;
         }
-        let total_joints = palette.len() as u32;
-        let mut records = Vec::with_capacity(gathered.len());
-        for (index, (_, _, entity, transform, instance, _)) in gathered.iter().enumerate() {
-            let geometry = self.meshes.geometry(instance.mesh);
-            let skinning = poses[index];
-            let bounds = if skinning.joints > 0 {
-                let at = skinning.palette as usize;
-                let held = &palette[at..at + skinning.joints as usize];
-                skinned_bounds(geometry, *transform, held)
-            } else {
-                static_bounds(geometry, *transform)
-            };
-            let previous = self
-                .previous
-                .get(entity)
-                .copied()
-                .unwrap_or_else(|| transform.matrix());
-            let carried = previous_palettes[index];
-            let previous_palette = if !reallocated && carried + skinning.joints <= total_joints {
-                carried
-            } else {
-                skinning.palette
-            };
-            records.push(record_of(
-                *entity,
-                *transform,
+        let mut pairs = counted.into_iter().collect::<Vec<_>>();
+        pairs.sort_unstable_by_key(|((mesh, blended), _)| (*blended, *mesh));
+        let counts = pairs
+            .iter()
+            .map(|(_, (_, count))| *count)
+            .collect::<Vec<_>>();
+        let (bases, slots) = bases_of(&counts, blocks);
+        let depth_batches = pairs.iter().filter(|(key, _)| !key.1).count() as u32;
+        let batches = pairs
+            .iter()
+            .map(|(_, (mesh, count))| Batch {
+                mesh: *mesh,
+                count: *count,
+            })
+            .collect::<Vec<_>>();
+        let batch_of = pairs
+            .iter()
+            .enumerate()
+            .map(|(index, (key, _))| (*key, index as u32))
+            .collect::<HashMap<_, _>>();
+        let total = instances.len() as u32;
+        if self
+            .instance_buffer
+            .fit(&self.device, u64::from(total) * INSTANCE_BYTES)
+        {
+            instances.restart();
+        }
+        for index in 0..instances.len() {
+            let slot = instances.at(index);
+            let source = slot.source();
+            let batch = batch_of[&(source.mesh.index(), source.blended)];
+            let model = source.transform.matrix();
+            let previous = slot.model.unwrap_or(model);
+            let bounds = slot
+                .bounds
+                .unwrap_or_else(|| static_bounds(meshes.geometry(source.mesh), source.transform));
+            let record = record_of(
+                slot.entity,
+                source.transform,
                 previous,
-                instance,
+                &MeshInstance {
+                    mesh: source.mesh,
+                    material: source.material,
+                    tint: source.tint,
+                },
                 bounds,
                 Placement {
-                    batch: batch_of[index],
-                    base: bases[batch_of[index] as usize],
-                    skinning,
-                    previous_palette,
-                    hzb: index < depth_count as usize,
+                    batch,
+                    base: bases[batch as usize],
+                    skinning: slot.skinning,
+                    hzb: !source.blended,
                 },
-            ));
+            );
+            if slot.record != Some(record) {
+                let slot = instances.at_mut(index);
+                slot.record = Some(record);
+                slot.model = Some(model);
+                instances.mark(index);
+            }
         }
-        self.previous = gathered
+        let mut uploads = Vec::new();
+        for run in runs_of(instances.dirty()) {
+            let records = run
+                .clone()
+                .map(|index| {
+                    instances
+                        .at(index as usize)
+                        .record
+                        .expect("a changed slot holds the record it uploads")
+                })
+                .collect::<Vec<_>>();
+            uploads.push(Upload {
+                offset: u64::from(run.start) * INSTANCE_BYTES,
+                records,
+            });
+        }
+        let spheres = instances
+            .slots()
             .iter()
-            .map(|(_, _, entity, transform, ..)| (*entity, transform.matrix()))
-            .collect();
-        let spheres = records
-            .iter()
-            .map(|record| {
+            .map(|slot| {
+                let record = slot.record.expect("a collected slot holds its record");
                 (
                     Vec3::new(record.bounds.x, record.bounds.y, record.bounds.z),
                     record.bounds.w,
@@ -179,13 +196,30 @@ impl Renderer {
             bases,
             slots,
             depth_batches,
-            depth_count,
             total,
-            joint_bytes,
             spheres,
-            highlight,
-            entities: gathered.iter().map(|(_, _, entity, ..)| *entity).collect(),
-            records,
+            highlight: highlight
+                .and_then(|held| instances.slot_of(held))
+                .unwrap_or(NO_HIGHLIGHT),
+            entities: instances.slots().iter().map(|slot| slot.entity).collect(),
+            uploads,
         }
     }
+}
+
+fn runs_of(dirty: &[u32]) -> Vec<std::ops::Range<u32>> {
+    let mut sorted = dirty.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < sorted.len() {
+        let mut end = start + 1;
+        while end < sorted.len() && sorted[end] == sorted[end - 1] + 1 {
+            end += 1;
+        }
+        runs.push(sorted[start]..sorted[end - 1] + 1);
+        start = end;
+    }
+    runs
 }

@@ -8,7 +8,6 @@ pub(super) struct ChannelFrame<'a> {
     pub(super) slots: u32,
     pub(super) total: u32,
     pub(super) depth_batches: u32,
-    pub(super) joint_bytes: u64,
     pub(super) points: &'a [PointLightRecord],
     pub(super) cluster_offset_bytes: u64,
     pub(super) cluster_bytes: u64,
@@ -18,11 +17,11 @@ pub(super) struct ChannelFrame<'a> {
     pub(super) line_groups: &'a [BindGroup],
     pub(super) line_vertices: u32,
     pub(super) probe_count: u32,
+    pub(super) depth: DepthTexture,
 }
 
 pub(super) struct Channels {
     pub(super) arguments: Vec<u32>,
-    pub(super) tables: BindGroup,
 }
 
 impl Renderer {
@@ -39,7 +38,6 @@ impl Renderer {
             slots,
             total,
             depth_batches,
-            joint_bytes,
             points,
             cluster_offset_bytes,
             cluster_bytes,
@@ -49,7 +47,9 @@ impl Renderer {
             line_groups,
             line_vertices,
             probe_count,
+            depth,
         } = frame;
+        let scene_depth = &depth;
         let point_light_count = points.len() as u32;
         submission.clear(self.lighting.buffer(), cluster_offset_bytes, cluster_bytes);
         if point_light_count > 0 {
@@ -83,12 +83,13 @@ impl Renderer {
             .collect::<Vec<u32>>();
         assert!(
             collection
-                .records
+                .uploads
                 .iter()
+                .flat_map(|upload| &upload.records)
                 .all(|record| record.material < self.materials.records().len() as u32),
             "a rendered instance names a material this renderer does not hold"
         );
-        self.upload(&collection.records, &arguments, slots);
+        self.upload(&collection.uploads, &arguments, slots);
         self.main_batches = batches.len() as u32;
         self.point_shadows.prepare(
             &self.device,
@@ -107,7 +108,7 @@ impl Renderer {
             .as_ref()
             .expect("a rendered frame owns its depth pyramid");
         let instances = self
-            .instances
+            .instance_buffer
             .buffer()
             .binding(0, u64::from(total) * INSTANCE_BYTES);
         let depth_cull = hzb.cull(
@@ -170,6 +171,7 @@ impl Renderer {
         let pipelines = Pipelines {
             depth: &self.depth,
             opaque: &self.draw,
+            capture: &self.capture_draw,
             blended: &self.transparent_draw,
             motion: self.temporality.motion(),
             shadow: &self.shadow,
@@ -206,8 +208,8 @@ impl Renderer {
                 shared: Shared {
                     view: self.views.binding(0, VIEW_BYTES),
                     motion_view: self.temporality.view(),
-                    palette: self.joints.buffer().binding(0, joint_bytes),
-                    previous_palette: self.previous_joints.buffer().binding(0, joint_bytes),
+                    palette: self.palettes.binding(),
+                    previous_palette: self.palettes.previous(),
                     materials: self
                         .material_records
                         .buffer()
@@ -219,8 +221,8 @@ impl Renderer {
                     lighting: self.lighting.buffer().binding(0, self.lighting_capacity),
                     probes: self.probes.record(probe_count),
                     fragments: self.transparency.fragments(),
-                    heads: self.transparency.heads(),
-                    counter: self.transparency.counter(),
+                    counts: self.transparency.counts(),
+                    dropped: self.transparency.dropped(),
                     settings: self.transparency.settings(),
                 },
                 slots: &slots_in,
@@ -229,15 +231,6 @@ impl Renderer {
         );
         let textures = self.materials.textures();
         let samplers = self.materials.samplers();
-        for held in self.palettes.fresh() {
-            submission.copy(
-                self.joints.buffer(),
-                u64::from(held.palette) * JOINT_BYTES,
-                self.previous_joints.buffer(),
-                u64::from(held.palette) * JOINT_BYTES,
-                u64::from(held.joints) * JOINT_BYTES,
-            );
-        }
         let depth_tables = self.tables.depth(&pipelines, textures, samplers);
         let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
         let tables = self.tables.opaque(&pipelines, textures, samplers);
@@ -292,23 +285,12 @@ impl Renderer {
                 )
             })
             .collect::<Vec<_>>();
-        submission.render(hzb.depth(), [1.0, 0.0, 0.0, 1.0], &depth);
+        submission.render(
+            Pass::new(hzb.depth(), [1.0, 0.0, 0.0, 1.0]).depth(scene_depth, DepthOps::CLEAR_STORED),
+            &depth,
+        );
         hzb.build(submission, &self.hzb_base, &self.hzb_reduce);
         submission.dispatch(&self.cull, &main_cull, [total.div_ceil(WORKGROUP), 1, 1]);
-        let motion = motion_groups
-            .iter()
-            .enumerate()
-            .map(|(index, groups)| {
-                Draw::indirect(
-                    self.temporality.motion(),
-                    groups,
-                    self.main_arguments
-                        .buffer()
-                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
-                )
-            })
-            .collect::<Vec<_>>();
-        submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &motion);
         let mut main = main_groups
             .iter()
             .enumerate()
@@ -359,9 +341,9 @@ impl Renderer {
                 ))
             })
             .collect::<Vec<_>>();
-        submission.render(&self.shadow_map, [1.0, 0.0, 0.0, 1.0], &cast);
+        submission.render(Pass::new(&self.shadow_map, [1.0, 0.0, 0.0, 1.0]), &cast);
         if point_light_count > 0 {
-            let palette = self.joints.buffer().binding(0, joint_bytes);
+            let palette = self.palettes.binding();
             let materials = self
                 .material_records
                 .buffer()
@@ -414,13 +396,34 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>();
             submission.render(
-                self.point_shadows.atlas(),
-                self.point_shadows.clear(),
+                Pass::new(self.point_shadows.atlas(), self.point_shadows.clear()),
                 &draws,
             );
         }
         self.transparency.clear(submission);
-        submission.render(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0], &main);
-        Channels { arguments, tables }
+        submission.render(
+            Pass::new(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0])
+                .depth(scene_depth, DepthOps::KEEP),
+            &main,
+        );
+        let motion = motion_groups
+            .iter()
+            .enumerate()
+            .map(|(index, groups)| {
+                Draw::indirect(
+                    self.temporality.motion(),
+                    groups,
+                    self.main_arguments
+                        .buffer()
+                        .binding(index as u64 * ARGUMENT_BYTES, ARGUMENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        submission.render(
+            Pass::new(self.temporality.target(), [0.0, 0.0, 0.0, 0.0])
+                .depth(scene_depth, DepthOps::CLEAR),
+            &motion,
+        );
+        Channels { arguments }
     }
 }

@@ -11,8 +11,9 @@ use crate::capability::{
     Limits, TextureUsages,
 };
 use crate::gate::Gate;
-use crate::graphics::{BlendState, DepthState, PipelineState};
+use crate::graphics::{BlendState, DepthLoad, DepthState, PipelineState};
 use crate::host::{HostAdvance, metal_identity};
+use crate::native::NativeDepth;
 use crate::pipeline::BoundResource;
 use crate::sampler::{AddressMode, Filter, SamplerDesc};
 use crate::submission::{Command, RecordedCount, Write};
@@ -139,7 +140,6 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
-    depths: Mutex<HashMap<(u32, u32), Weak<Depth>>>,
     pub(crate) gate: Arc<Gate>,
     window: Option<WindowHandle>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
@@ -179,12 +179,19 @@ pub(crate) struct Texture {
 
 struct Target {
     view: Retained<ProtocolObject<dyn MTLTexture>>,
-    depth: Arc<Depth>,
 }
 
-struct Depth {
+#[derive(Clone)]
+pub(crate) struct Depth {
+    raw: Arc<DepthTexture>,
+}
+
+struct DepthTexture {
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
 }
+
+unsafe impl Send for DepthTexture {}
+unsafe impl Sync for DepthTexture {}
 
 pub(crate) struct Surface {
     device: Arc<Device>,
@@ -368,6 +375,7 @@ pub(crate) struct GraphicsPipeline {
 struct GraphicsPipelineResource {
     format: TextureFormat,
     state: PipelineState,
+    depth_attachment: bool,
     compiled: OnceLock<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
     depth: OnceLock<Retained<ProtocolObject<dyn MTLDepthStencilState>>>,
 }
@@ -517,7 +525,6 @@ fn assemble(
         raw,
         queue,
         state: Mutex::new(QueueState::default()),
-        depths: Mutex::new(HashMap::new()),
         gate: Gate::of(advance),
         window,
         _keep_alive: keep_alive,
@@ -824,7 +831,6 @@ impl Device {
         let targets = if usages.contains(TextureUsages::RENDER_ATTACHMENT) {
             (0..mip_levels)
                 .map(|level| {
-                    let extent = ((width >> level).max(1), (height >> level).max(1));
                     let view = if level == 0 {
                         raw.clone()
                     } else {
@@ -846,10 +852,7 @@ impl Device {
                             })
                         }
                     };
-                    Target {
-                        view,
-                        depth: self.depth(extent.0, extent.1),
-                    }
+                    Target { view }
                 })
                 .collect()
         } else {
@@ -866,21 +869,7 @@ impl Device {
         }
     }
 
-    fn depth(self: &Arc<Self>, width: u32, height: u32) -> Arc<Depth> {
-        let key = (width, height);
-        let mut depths = self.depths.lock().unwrap_or_else(|held| held.into_inner());
-        if let Some(held) = depths.get(&key).and_then(Weak::upgrade) {
-            return held;
-        }
-        depths.retain(|_, held| held.strong_count() > 0);
-        let depth = Arc::new(Depth {
-            raw: self.depth_texture(width, height),
-        });
-        depths.insert(key, Arc::downgrade(&depth));
-        depth
-    }
-
-    fn depth_texture(&self, width: u32, height: u32) -> Retained<ProtocolObject<dyn MTLTexture>> {
+    pub(crate) fn create_depth_texture(&self, label: &str, width: u32, height: u32) -> Depth {
         let descriptor = MTLTextureDescriptor::new();
         descriptor.setTextureType(MTLTextureType::Type2D);
         descriptor.setPixelFormat(MTLPixelFormat::Depth32Float);
@@ -890,11 +879,16 @@ impl Device {
         }
         descriptor.setUsage(MTLTextureUsage::RenderTarget);
         descriptor.setStorageMode(MTLStorageMode::Private);
-        self.raw
-            .newTextureWithDescriptor(&descriptor)
-            .unwrap_or_else(|| {
-                panic!("allocating a Metal depth target of {width} by {height} failed")
-            })
+        Depth {
+            raw: Arc::new(DepthTexture {
+                raw: self
+                    .raw
+                    .newTextureWithDescriptor(&descriptor)
+                    .unwrap_or_else(|| {
+                        panic!("allocating the {label} depth texture of {width} by {height} failed")
+                    }),
+            }),
+        }
     }
 
     pub(crate) fn create_graphics_pipeline(
@@ -902,11 +896,13 @@ impl Device {
         _program: &GraphicsProgram,
         format: TextureFormat,
         state: PipelineState,
+        depth: bool,
     ) -> GraphicsPipeline {
         GraphicsPipeline {
             resource: Arc::new(GraphicsPipelineResource {
                 format,
                 state,
+                depth_attachment: depth,
                 compiled: OnceLock::new(),
                 depth: OnceLock::new(),
             }),
@@ -1008,7 +1004,9 @@ impl Device {
             } else {
                 MTLColorWriteMask::Red | MTLColorWriteMask::Green | MTLColorWriteMask::Blue
             });
-            descriptor.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+            if pipeline.resource.depth_attachment {
+                descriptor.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+            }
             self.raw
                 .newRenderPipelineStateWithDescriptor_error(&descriptor)
                 .unwrap_or_else(|error| {
@@ -1022,6 +1020,7 @@ impl Device {
             let descriptor = MTLDepthStencilDescriptor::new();
             descriptor.setDepthCompareFunction(match pipeline.resource.state.depth {
                 DepthState::TestWrite | DepthState::Test => MTLCompareFunction::Less,
+                DepthState::TestCovered => MTLCompareFunction::LessEqual,
                 DepthState::Off => MTLCompareFunction::Always,
             });
             descriptor.setDepthWriteEnabled(matches!(
@@ -1237,6 +1236,7 @@ impl Device {
                     target,
                     level,
                     clear,
+                    depth,
                     draws,
                 } => {
                     let texture = native_texture(target.native());
@@ -1255,11 +1255,24 @@ impl Device {
                         blue: f64::from(clear[2]),
                         alpha: f64::from(clear[3]),
                     });
-                    let depth = pass.depthAttachment();
-                    depth.setTexture(Some(&target.depth.raw));
-                    depth.setLoadAction(MTLLoadAction::Clear);
-                    depth.setStoreAction(MTLStoreAction::DontCare);
-                    depth.setClearDepth(1.0);
+                    if let Some((held, ops)) = depth {
+                        let NativeDepth::Metal(held) = held.native();
+                        let attachment = pass.depthAttachment();
+                        attachment.setTexture(Some(&held.raw.raw));
+                        attachment.setLoadAction(match ops.load {
+                            DepthLoad::Clear => MTLLoadAction::Clear,
+                            DepthLoad::Keep => MTLLoadAction::Load,
+                        });
+                        attachment.setStoreAction(if ops.store {
+                            MTLStoreAction::Store
+                        } else {
+                            MTLStoreAction::DontCare
+                        });
+                        attachment.setClearDepth(1.0);
+                        frame
+                            .resources
+                            .push(Arc::clone(&held.raw) as Arc<dyn Any + Send + Sync>);
+                    }
                     let encoder = command
                         .renderCommandEncoderWithDescriptor(&pass)
                         .expect("a Metal command buffer encodes a render pass");
@@ -1820,14 +1833,10 @@ impl Surface {
         let native = if let Some(held) = self.cache.get(&key) {
             held.clone()
         } else {
-            let depth = self.device.depth(width, height);
             let native = Texture {
                 resource: Arc::new(TextureResource {
                     raw: texture.clone(),
-                    targets: vec![Target {
-                        view: texture,
-                        depth,
-                    }],
+                    targets: vec![Target { view: texture }],
                     width,
                     height,
                     format: TextureFormat::Bgra8Unorm,

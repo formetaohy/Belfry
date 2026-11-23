@@ -9,6 +9,7 @@ mod growing;
 mod hidden;
 mod hzb;
 mod instance;
+mod instances;
 mod light;
 mod line;
 mod material;

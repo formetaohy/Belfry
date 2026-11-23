@@ -61,8 +61,8 @@ impl Renderer {
             shadow,
             batches: inputs.batches,
             arguments: inputs.arguments,
+            instances: inputs.instances,
             slots: inputs.slots,
-            opaque_instances: inputs.opaque_instances,
             points: inputs.points,
         });
         let mut submission = Submission::new(&self.device, "belfry capture");
@@ -71,9 +71,9 @@ impl Renderer {
                 .hzb
                 .as_ref()
                 .expect("a captured scene culls against the depth pyramid of its frame");
-            let culled = inputs.opaque_instances.div_ceil(WORKGROUP);
+            let culled = inputs.instances.div_ceil(WORKGROUP);
             let instances = self
-                .instances
+                .instance_buffer
                 .buffer()
                 .binding(0, u64::from(inputs.instances) * INSTANCE_BYTES);
             for view in 0..self.captures.view_count() {
@@ -112,7 +112,7 @@ impl Renderer {
             }
         }
         let capture_shade = self.shading.group(
-            &self.draw,
+            &self.capture_draw,
             (&self.captures.shadow, &self.captures.shadow_sampler),
             (self.point_shadows.atlas(), self.point_shadows.sampler()),
             (self.probes.textures(), self.probes.samplers()),
@@ -120,6 +120,7 @@ impl Renderer {
         let pipelines = Pipelines {
             depth: &self.depth,
             opaque: &self.draw,
+            capture: &self.capture_draw,
             blended: &self.transparent_draw,
             motion: self.temporality.motion(),
             shadow: &self.shadow,
@@ -127,11 +128,12 @@ impl Renderer {
         let textures = self.materials.textures();
         let samplers = self.materials.samplers();
         let shadow_tables = self.tables.shadow(&pipelines, textures, samplers);
+        let tables = self.tables.capture(&pipelines, textures, samplers);
         let materials = self
             .material_records
             .buffer()
             .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES);
-        let palette = self.joints.buffer().binding(0, inputs.joint_bytes);
+        let palette = self.palettes.posed();
         if inputs.opaque > 0 {
             let mut cast_groups = Vec::with_capacity(inputs.opaque as usize);
             for (index, batch) in inputs
@@ -171,7 +173,10 @@ impl Renderer {
                     )
                 })
                 .collect::<Vec<_>>();
-            submission.render(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0], &casters);
+            submission.render(
+                Pass::new(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0]),
+                &casters,
+            );
         }
         let mut skies = Vec::with_capacity(crate::capture::FACES as usize);
         for face in 0..crate::capture::FACES {
@@ -186,10 +191,6 @@ impl Renderer {
         let mut batches =
             Vec::with_capacity(crate::capture::FACES as usize * inputs.opaque as usize);
         if inputs.opaque > 0 {
-            let tables = inputs
-                .tables
-                .as_ref()
-                .expect("a captured batch binds the material table of its frame");
             let lights = self.captures.lighting();
             for face in 0..crate::capture::FACES {
                 for (index, batch) in inputs
@@ -199,7 +200,7 @@ impl Renderer {
                     .enumerate()
                 {
                     let geometry = self.meshes.geometry(batch.mesh);
-                    let shade = self.draw.bind_group(
+                    let shade = self.capture_draw.bind_group(
                         0,
                         &[
                             Binding::buffer(
@@ -219,8 +220,8 @@ impl Renderer {
                                 self.meshes.skin_binding(geometry),
                             ),
                             Binding::buffer(program::DRAW_FRAGMENTS, self.transparency.fragments()),
-                            Binding::buffer(program::DRAW_HEADS, self.transparency.heads()),
-                            Binding::buffer(program::DRAW_COUNTER, self.transparency.counter()),
+                            Binding::buffer(program::DRAW_COUNTS, self.transparency.counts()),
+                            Binding::buffer(program::DRAW_DROPPED, self.transparency.dropped()),
                             Binding::buffer(program::DRAW_SETTINGS, self.transparency.settings()),
                             Binding::buffer(
                                 program::DRAW_PROBES,
@@ -255,7 +256,7 @@ impl Renderer {
             for index in 0..inputs.opaque {
                 draws.push(
                     Draw::indirect(
-                        &self.draw,
+                        &self.capture_draw,
                         &batches[batch],
                         self.captures.arguments(face, index),
                     )
@@ -264,7 +265,11 @@ impl Renderer {
                 batch += 1;
             }
         }
-        submission.render(&self.captures.atlas, [0.0, 0.0, 0.0, 1.0], &draws);
+        submission.render(
+            Pass::new(&self.captures.atlas, [0.0, 0.0, 0.0, 1.0])
+                .depth(&self.captures.depth, DepthOps::CLEAR),
+            &draws,
+        );
         let convert = [
             self.captures.convert.bind_group(
                 0,
@@ -283,8 +288,7 @@ impl Renderer {
         ];
         let panorama = self.captures.panorama(&self.device);
         submission.render(
-            &panorama,
-            [0.0, 0.0, 0.0, 1.0],
+            Pass::new(&panorama, [0.0, 0.0, 0.0, 1.0]),
             &[Draw::new(&self.captures.convert, &convert, 3)],
         );
         submission.submit(&self.queue);

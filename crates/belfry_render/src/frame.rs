@@ -189,7 +189,6 @@ pub(crate) struct Placement {
     pub(crate) batch: u32,
     pub(crate) base: u32,
     pub(crate) skinning: Skinning,
-    pub(crate) previous_palette: u32,
     pub(crate) hzb: bool,
 }
 
@@ -235,8 +234,8 @@ pub(crate) fn record_of(
         material: instance.material.index(),
         palette: placement.skinning.palette,
         joints: placement.skinning.joints,
-        previous_palette: placement.previous_palette,
         hzb: u32::from(placement.hzb),
+        pad0: 0,
     }
 }
 

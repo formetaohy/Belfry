@@ -4,7 +4,7 @@ use crate::paint::{Instance, LayerBuffer};
 use crate::shader;
 use crate::texture::Textures;
 use belfry_gpu_device::{
-    BindGroup, Binding, BufferUsages, ClipSpace, Device, Draw, GpuBuffer, GraphicsPipeline,
+    BindGroup, Binding, BufferUsages, ClipSpace, Device, Draw, GpuBuffer, GraphicsPipeline, Pass,
     PipelineState, Queue, Submission, Texture, TextureFormat, TextureUsages,
 };
 use std::mem::size_of;
@@ -177,7 +177,7 @@ impl Renderer {
                     .instances(layer.material.len() as u32),
             );
         }
-        submission.render(target, CLEAR, &draws);
+        submission.render(Pass::new(target, CLEAR), &draws);
     }
 
     fn groups_of(&self, slot: &Slot, textures: &Textures) -> [BindGroup; 2] {

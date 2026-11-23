@@ -2,7 +2,7 @@ use crate::abi::{HZB_LEVEL, HZB_SCALE, HZB_STEP, HzbLevelRecord, HzbStepRecord};
 use crate::program;
 use belfry_gpu_device::{
     BindGroup, Binding, BufferBinding, BufferUsages, Device, Draw, GpuBuffer, GraphicsPipeline,
-    PipelineHandle, Queue, Sampler, Submission, Texture, TextureFormat, TextureUsages,
+    Pass, PipelineHandle, Queue, Sampler, Submission, Texture, TextureFormat, TextureUsages,
 };
 use std::mem::size_of;
 
@@ -217,16 +217,14 @@ impl Hzb {
         reduce_pipeline: &GraphicsPipeline,
     ) {
         submission.render(
-            &self.levels[0],
-            CLEAR,
+            Pass::new(&self.levels[0], CLEAR),
             &[Draw::new(base_pipeline, &self.base, FULLSCREEN_VERTICES)],
         );
         submission.copy_texture(&self.levels[0], &self.depths, self.offsets[0]);
         for (index, group) in self.reductions.iter().enumerate() {
             let level = index + 1;
             submission.render(
-                &self.levels[level],
-                CLEAR,
+                Pass::new(&self.levels[level], CLEAR),
                 &[Draw::new(reduce_pipeline, group, FULLSCREEN_VERTICES)],
             );
             submission.copy_texture(&self.levels[level], &self.depths, self.offsets[level]);

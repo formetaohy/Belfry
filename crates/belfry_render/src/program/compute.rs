@@ -136,7 +136,6 @@ mod cull {
                     drawn[at].pick = index;
                     drawn[at].palette = instance.palette;
                     drawn[at].joints = instance.joints;
-                    drawn[at].previous_palette = instance.previous_palette;
                 }
             }
         }

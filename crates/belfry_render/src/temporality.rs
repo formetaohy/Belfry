@@ -3,7 +3,7 @@ use crate::program;
 use belfry_gpu::Fvec4;
 use belfry_gpu_device::{
     AddressMode, Binding, BufferBinding, BufferUsages, Device, Draw, Filter, GpuBuffer,
-    GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
+    GraphicsPipeline, Pass, PipelineState, Queue, Sampler, SamplerDesc, Submission, Texture,
     TextureFormat, TextureUsages,
 };
 use belfry_math::{Mat4, Vec2, Vec3};
@@ -58,7 +58,7 @@ pub(crate) struct Temporality {
 impl Temporality {
     pub(crate) fn new(device: &Device) -> Self {
         Self {
-            motion_pipeline: GraphicsPipeline::new(
+            motion_pipeline: GraphicsPipeline::new_depth(
                 device,
                 program::motion_vectors(),
                 FORMAT,
@@ -133,7 +133,7 @@ impl Temporality {
         ];
         let mut submission = Submission::new(device, "belfry history clear");
         for texture in history.iter().chain(motion.iter()) {
-            submission.render(texture, CLEAR, &[]);
+            submission.render(Pass::new(texture, CLEAR), &[]);
         }
         submission.submit(queue);
         self.screen = Some(Screen {
@@ -247,8 +247,7 @@ impl Temporality {
             ],
         );
         submission.render(
-            &screen.history[1 - screen.history_at],
-            CLEAR,
+            Pass::new(&screen.history[1 - screen.history_at], CLEAR),
             &[Draw::new(
                 &self.temporal_pipeline,
                 &[record, image, gaze],

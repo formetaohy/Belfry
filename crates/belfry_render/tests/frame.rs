@@ -744,13 +744,25 @@ fn layers(
         MaterialDesc::new(BLUE)
             .alpha(0.5)
             .alpha_mode(AlphaMode::Blend)
-            .base_color_image(MaterialImage::new(white, sampler.clone())),
+            .base_color_image(MaterialImage::new(white.clone(), sampler.clone())),
     );
     let cutout = renderer.material(
         MaterialDesc::new(WHITE)
             .alpha_mode(AlphaMode::Mask)
             .alpha_cutoff(0.5)
-            .base_color_image(MaterialImage::new(masked, sampler)),
+            .base_color_image(MaterialImage::new(masked, sampler.clone())),
+    );
+    let veil = renderer.material(
+        MaterialDesc::new(WHITE)
+            .alpha(0.5)
+            .alpha_mode(AlphaMode::Blend)
+            .base_color_image(MaterialImage::new(white.clone(), sampler.clone())),
+    );
+    let blush = renderer.material(
+        MaterialDesc::new(RED)
+            .alpha(0.5)
+            .alpha_mode(AlphaMode::Blend)
+            .base_color_image(MaterialImage::new(white, sampler)),
     );
     let quad = renderer.mesh(&QUAD);
     let mut world = World::new();
@@ -846,6 +858,83 @@ fn layers(
         40,
         32,
         "the masked quad renders its opaque half",
+    );
+
+    world.despawn(mask);
+    let mut veils = Vec::new();
+    for depth in [1.85, 1.8, 1.75, 1.7] {
+        let layer = world.spawn();
+        world.insert(
+            layer,
+            Transform::from_translation(Vec3::new(0.0, 0.0, depth)),
+        );
+        world.insert(
+            layer,
+            MeshInstance {
+                mesh: quad,
+                material: veil,
+                tint: WHITE,
+            },
+        );
+        veils.push(layer);
+    }
+    let overflowed = world.spawn();
+    world.insert(
+        overflowed,
+        Transform::from_translation(Vec3::new(0.0, 0.0, 1.65)),
+    );
+    world.insert(
+        overflowed,
+        MeshInstance {
+            mesh: quad,
+            material: blush,
+            tint: WHITE,
+        },
+    );
+    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    let pixels = read(context, target);
+    let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    assert!(
+        center[0] > 32
+            && center[1] > 32
+            && center[2] > 32
+            && i32::from(center[0]) < i32::from(center[1]) + 40,
+        "{backend:?} keeps the four layers beside the fragment beyond its capacity {center:?}",
+    );
+    assert_eq!(
+        renderer.dropped_transparent_fragments(),
+        SIDE * SIDE,
+        "{backend:?} counts the fragment every covered pixel drops",
+    );
+
+    for veil in veils {
+        world.despawn(veil);
+    }
+    world.despawn(overflowed);
+    let single = world.spawn();
+    world.insert(
+        single,
+        Transform::from_translation(Vec3::new(0.0, 0.0, 1.6)),
+    );
+    world.insert(
+        single,
+        MeshInstance {
+            mesh: quad,
+            material: veil,
+            tint: WHITE,
+        },
+    );
+    renderer.render(&world, Target::Texture(target), CLEAR, None);
+    let pixels = read(context, target);
+    let center = pixels[(SIDE as usize / 2) * SIDE as usize + SIDE as usize / 2];
+    assert!(
+        center[0] > center[1] + 32,
+        "{backend:?} composites one layer over the stale layers of the last frame {center:?}",
+    );
+    assert_eq!(
+        renderer.dropped_transparent_fragments(),
+        0,
+        "{backend:?} drops nothing for a layer inside its capacity",
     );
 }
 
@@ -1305,11 +1394,6 @@ fn line(backend: Backend) {
     world.insert_resource(lines);
     renderer.render(&world, Target::Texture(&target), CLEAR, None);
     let pixels = read(&context, &target);
-    eprintln!(
-        "LINE PIXELS {:?} {:?}",
-        pixels[(32 * SIDE + 20) as usize],
-        pixels[(34 * SIDE + 36) as usize],
-    );
     assert_red(
         backend,
         &pixels,

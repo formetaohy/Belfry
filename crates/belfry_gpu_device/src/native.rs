@@ -100,6 +100,14 @@ pub(crate) enum NativeTexture {
     Metal(metal::Texture),
 }
 
+#[derive(Clone)]
+pub(crate) enum NativeDepth {
+    #[cfg(vulkan_backend)]
+    Vulkan(vulkan::Depth),
+    #[cfg(metal_backend)]
+    Metal(metal::Depth),
+}
+
 pub(crate) enum NativeSurface {
     #[cfg(vulkan_backend)]
     Vulkan(vulkan::Surface),
@@ -539,16 +547,30 @@ impl NativeDevice {
         program: &GraphicsProgram,
         format: crate::texture::TextureFormat,
         state: crate::graphics::PipelineState,
+        depth: bool,
     ) -> NativeGraphicsPipeline {
         match self {
             #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativeGraphicsPipeline::Vulkan(
-                device.create_graphics_pipeline(program, format, state),
+                device.create_graphics_pipeline(program, format, state, depth),
             ),
             #[cfg(metal_backend)]
             Self::Metal(device) => NativeGraphicsPipeline::Metal(
-                device.create_graphics_pipeline(program, format, state),
+                device.create_graphics_pipeline(program, format, state, depth),
             ),
+        }
+    }
+
+    pub(crate) fn create_depth_texture(&self, label: &str, width: u32, height: u32) -> NativeDepth {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(device) => {
+                NativeDepth::Vulkan(device.create_depth_texture(label, width, height))
+            }
+            #[cfg(metal_backend)]
+            Self::Metal(device) => {
+                NativeDepth::Metal(device.create_depth_texture(label, width, height))
+            }
         }
     }
 

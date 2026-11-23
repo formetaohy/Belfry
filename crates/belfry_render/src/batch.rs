@@ -9,6 +9,7 @@ const CASCADES: usize = SHADOW_CASCADES as usize;
 pub(crate) struct Pipelines<'a> {
     pub(crate) depth: &'a GraphicsPipeline,
     pub(crate) opaque: &'a GraphicsPipeline,
+    pub(crate) capture: &'a GraphicsPipeline,
     pub(crate) blended: &'a GraphicsPipeline,
     pub(crate) motion: &'a GraphicsPipeline,
     pub(crate) shadow: &'a GraphicsPipeline,
@@ -25,8 +26,8 @@ pub(crate) struct Shared<'a> {
     pub(crate) lighting: BufferBinding<'a>,
     pub(crate) probes: BufferBinding<'a>,
     pub(crate) fragments: BufferBinding<'a>,
-    pub(crate) heads: BufferBinding<'a>,
-    pub(crate) counter: BufferBinding<'a>,
+    pub(crate) counts: BufferBinding<'a>,
+    pub(crate) dropped: BufferBinding<'a>,
     pub(crate) settings: BufferBinding<'a>,
 }
 
@@ -56,8 +57,8 @@ struct SharedKey {
     lighting: BufferRange,
     probes: BufferRange,
     fragments: BufferRange,
-    heads: BufferRange,
-    counter: BufferRange,
+    counts: BufferRange,
+    dropped: BufferRange,
     settings: BufferRange,
 }
 
@@ -74,8 +75,8 @@ impl SharedKey {
             lighting: shared.lighting.range(),
             probes: shared.probes.range(),
             fragments: shared.fragments.range(),
-            heads: shared.heads.range(),
-            counter: shared.counter.range(),
+            counts: shared.counts.range(),
+            dropped: shared.dropped.range(),
             settings: shared.settings.range(),
         }
     }
@@ -148,8 +149,8 @@ impl SlotGroups {
                 Binding::buffer(program::DRAW_PALETTE, shared.palette),
                 Binding::buffer(program::DRAW_SKINS, slot.skins),
                 Binding::buffer(program::DRAW_FRAGMENTS, shared.fragments),
-                Binding::buffer(program::DRAW_HEADS, shared.heads),
-                Binding::buffer(program::DRAW_COUNTER, shared.counter),
+                Binding::buffer(program::DRAW_COUNTS, shared.counts),
+                Binding::buffer(program::DRAW_DROPPED, shared.dropped),
                 Binding::buffer(program::DRAW_SETTINGS, shared.settings),
                 Binding::buffer(program::DRAW_PROBES, shared.probes),
                 Binding::buffer(program::DRAW_VERTICES, slot.vertices),
@@ -259,6 +260,7 @@ impl SlotGroups {
 pub(crate) struct Tables {
     depth: Option<BindGroup>,
     opaque: Option<BindGroup>,
+    capture: Option<BindGroup>,
     blended: Option<BindGroup>,
     motion: Option<BindGroup>,
     shadow: Option<BindGroup>,
@@ -269,6 +271,7 @@ impl Tables {
         Self {
             depth: None,
             opaque: None,
+            capture: None,
             blended: None,
             motion: None,
             shadow: None,
@@ -277,6 +280,22 @@ impl Tables {
 
     pub(crate) fn invalidate(&mut self) {
         *self = Self::new();
+    }
+
+    pub(crate) fn capture(
+        &mut self,
+        pipelines: &Pipelines<'_>,
+        textures: &TextureTable,
+        samplers: &SamplerTable,
+    ) -> BindGroup {
+        Self::held(
+            &mut self.capture,
+            pipelines.capture,
+            program::SHADE_TEXTURE,
+            program::SHADE_SAMPLER,
+            textures,
+            samplers,
+        )
     }
 
     pub(crate) fn depth(

@@ -22,6 +22,7 @@ pub const IRRADIANCE_PARTIALS: u32 = 1024;
 pub const IRRADIANCE_WORDS: u32 = 36;
 pub const IRRADIANCE_TOTAL_BYTES: u64 = 108;
 pub const ATMOSPHERE_RECORDS: u32 = 4;
+pub const TRANSPARENT_LAYERS: u32 = 4;
 
 const _: () = assert!(
     size_of::<AtmosphereRecord>() * ATMOSPHERE_RECORDS as usize == 512,
@@ -101,10 +102,10 @@ record!(DrawRecord, DRAW, "Draw" {
     pick: u32 => U32,
     palette: u32 => U32,
     joints: u32 => U32,
-    previous_palette: u32 => U32,
     pad0: u32 => U32,
     pad1: u32 => U32,
     pad2: u32 => U32,
+    pad3: u32 => U32,
 });
 
 record!(InstanceRecord, INSTANCE, "Instance" {
@@ -127,8 +128,8 @@ record!(InstanceRecord, INSTANCE, "Instance" {
     material: u32 => U32,
     palette: u32 => U32,
     joints: u32 => U32,
-    previous_palette: u32 => U32,
     hzb: u32 => U32,
+    pad0: u32 => U32,
 });
 
 record!(SkinVertexRecord, SKIN_VERTEX, "SkinVertex" {
@@ -401,16 +402,12 @@ record!(TonemapRecord, TONEMAP, "Tonemap" {
 });
 
 record!(TransparentRecord, TRANSPARENT, "Transparent" {
-    red: f32 => F32,
-    green: f32 => F32,
-    blue: f32 => F32,
-    alpha: f32 => F32,
-    depth: f32 => F32,
-    next: u32 => U32,
+    color: u32 => U32,
+    depth_coverage: u32 => U32,
 });
 
 record!(TransparentSetupRecord, TRANSPARENT_SETTINGS, "TransparentSetup" {
-    capacity: u32 => U32,
+    layers: u32 => U32,
     width: u32 => U32,
     height: u32 => U32,
     vertical: f32 => F32,

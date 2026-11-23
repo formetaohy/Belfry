@@ -15,7 +15,7 @@ use crate::view::View;
 use belfry_ecs::{Entity, World};
 use belfry_gpu_device::ClipSpace;
 use belfry_gpu_device::{
-    AddressMode, BufferBinding, BufferUsages, Device, Filter, GpuBuffer, GpuContext,
+    AddressMode, BufferBinding, BufferUsages, DepthTexture, Device, Filter, GpuBuffer, GpuContext,
     GraphicsPipeline, PipelineState, Queue, Sampler, SamplerDesc, Texture, TextureFormat,
     TextureUsages,
 };
@@ -106,7 +106,7 @@ pub(crate) struct CaptureFrame<'a> {
     pub(crate) batches: &'a [Batch],
     pub(crate) arguments: &'a [u32],
     pub(crate) slots: u32,
-    pub(crate) opaque_instances: u32,
+    pub(crate) instances: u32,
     pub(crate) points: &'a [PointLightRecord],
 }
 
@@ -122,6 +122,7 @@ pub(crate) struct Pending {
 
 pub(crate) struct Captures {
     pub(crate) atlas: Texture,
+    pub(crate) depth: DepthTexture,
     pub(crate) shadow: Texture,
     pub(crate) shadow_sampler: Sampler,
     pub(crate) views: GpuBuffer,
@@ -170,6 +171,12 @@ impl Captures {
                 1,
                 TextureFormat::Rgba16Float,
                 attachment,
+            ),
+            depth: DepthTexture::new(
+                device,
+                "belfry capture depth",
+                PROBE_WIDTH,
+                PROBE_RESOLUTION,
             ),
             shadow: Texture::new(
                 device,
@@ -399,7 +406,7 @@ impl Captures {
                 .write(&frame.queue, bytemuck::cast_slice(frame.points));
         }
         let camera = Camera::new(WIDE, NEAR, FAR);
-        let instances = frame.opaque_instances;
+        let instances = frame.instances;
         let axes = FACES_OF.map(|(forward, up)| {
             (
                 frame.basis.rotate_vec3(forward),

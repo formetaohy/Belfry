@@ -12,15 +12,6 @@ pub(super) fn joint_world(world: &World, entity: Entity) -> Mat4 {
         .matrix()
 }
 
-pub(super) fn joint_record(matrix: &Mat4) -> JointRecord {
-    JointRecord {
-        col0: vector(matrix.col(0)),
-        col1: vector(matrix.col(1)),
-        col2: vector(matrix.col(2)),
-        col3: vector(matrix.col(3)),
-    }
-}
-
 pub(super) fn static_bounds(geometry: &crate::mesh::Geometry, transform: Transform) -> (Vec3, f32) {
     let reach = transform
         .scale

@@ -1,7 +1,7 @@
 use belfry_gpu::{Fvec2, Fvec4};
 use belfry_gpu_device::{
     AddressMode, Backend, Binding, BufferUsages, Draw, Filter, GpuBuffer, GpuContext, GpuRequest,
-    GraphicsPipeline, PipelineState, Sampler, SamplerDesc, SamplerTable, Submission, Texture,
+    GraphicsPipeline, Pass, PipelineState, Sampler, SamplerDesc, SamplerTable, Submission, Texture,
     TextureFormat, TextureTable, TextureUsages,
 };
 
@@ -206,8 +206,7 @@ fn render(
     );
     let mut submission = Submission::new(device, "quad");
     submission.render(
-        &target,
-        [0.0, 0.0, 0.0, 1.0],
+        Pass::new(&target, [0.0, 0.0, 0.0, 1.0]),
         &[Draw::new(&pipeline, &[frame, material], 6)],
     );
     let readback = GpuBuffer::new(

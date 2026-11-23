@@ -32,11 +32,12 @@ use crate::growing::Growing;
 use crate::hidden::Hidden;
 use crate::hzb::Hzb;
 use crate::instance::MeshInstance;
+use crate::instances::Instances;
 use crate::light::PointLight;
 use crate::line::Lines;
 use crate::material::{AlphaMode, Material, MaterialDesc, MaterialLibrary};
 use crate::mesh::{Mesh, MeshLibrary};
-use crate::palette::{self, Palettes};
+use crate::palette::Palettes;
 use crate::pick::{PickBatch, PickFrame, PickResources, Picker};
 use crate::point_shadow::{POINT_SHADOW_NEAR, PointShadowFrame, PointShadows};
 use crate::post::Post;
@@ -52,9 +53,9 @@ use crate::view::View;
 use belfry_ecs::{Entity, World};
 use belfry_gpu::Fvec4;
 use belfry_gpu_device::{
-    AddressMode, BindGroup, Binding, BufferUsages, Device, Draw, Filter, GpuBuffer, GpuContext,
-    GraphicsPipeline, PipelineHandle, PipelineState, Queue, Sampler, SamplerDesc, Submission,
-    SurfaceFrame, Texture, TextureFormat, TextureUsages, Viewport,
+    AddressMode, BindGroup, Binding, BufferUsages, DepthOps, DepthTexture, Device, Draw, Filter,
+    GpuBuffer, GpuContext, GraphicsPipeline, Pass, PipelineHandle, PipelineState, Queue, Sampler,
+    SamplerDesc, Submission, SurfaceFrame, Texture, TextureFormat, TextureUsages, Viewport,
 };
 use belfry_math::{Mat4, Transform, Vec2, Vec3};
 use std::collections::HashMap;
@@ -87,10 +88,7 @@ struct CaptureInputs<'a> {
     instances: u32,
     slots: u32,
     opaque: u32,
-    opaque_instances: u32,
-    joint_bytes: u64,
     probe_count: u32,
-    tables: Option<BindGroup>,
 }
 pub enum Target<'a> {
     Texture(&'a Texture),
@@ -103,7 +101,9 @@ pub struct Renderer {
     cull: PipelineHandle,
     light_clusters: PipelineHandle,
     draw: GraphicsPipeline,
+    capture_draw: GraphicsPipeline,
     transparent_draw: GraphicsPipeline,
+    scene_depth: Option<DepthTexture>,
     sky: GraphicsPipeline,
     sky_view: BindGroup,
     sky_record: GpuBuffer,
@@ -137,7 +137,8 @@ pub struct Renderer {
     captures: Captures,
     ambient: Option<(usize, usize, usize)>,
     cascades: GpuBuffer,
-    instances: Growing,
+    instance_buffer: Growing,
+    instances: Instances,
     depth_drawn: Growing,
     depth_arguments: Growing,
     main_drawn: Growing,
@@ -148,8 +149,6 @@ pub struct Renderer {
     shadow_span: u64,
     lighting: Growing,
     lighting_capacity: u64,
-    joints: Growing,
-    previous_joints: Growing,
     palettes: Palettes,
     line_records: Growing,
     picker: Picker,
@@ -158,7 +157,6 @@ pub struct Renderer {
     point_shadow_identity: usize,
     transparency: Transparency,
     temporality: Temporality,
-    previous: HashMap<Entity, Mat4>,
     spheres: Vec<(Entity, (Vec3, f32))>,
     damage: Damage,
     probes: Probes,
@@ -212,25 +210,31 @@ impl Renderer {
             belfry_gpu::SAMPLER_TABLE_CAPACITY,
             limits.max_samplers_per_shader_stage,
         );
-        let draw = GraphicsPipeline::new(
+        let draw = GraphicsPipeline::new_depth(
+            &device,
+            program::instancing(),
+            TextureFormat::Rgba16Float,
+            PipelineState::COVERED,
+        );
+        let capture_draw = GraphicsPipeline::new_depth(
             &device,
             program::instancing(),
             TextureFormat::Rgba16Float,
             PipelineState::DEPTH_WRITE,
         );
-        let transparent_draw = GraphicsPipeline::new(
+        let transparent_draw = GraphicsPipeline::new_depth(
             &device,
             program::instancing(),
             TextureFormat::Rgba16Float,
             PipelineState::TRANSPARENT,
         );
-        let line_pipeline = GraphicsPipeline::new(
+        let line_pipeline = GraphicsPipeline::new_depth(
             &device,
             program::debug_lines(),
             TextureFormat::Rgba16Float,
             PipelineState::DEBUG,
         );
-        let sky = GraphicsPipeline::new(
+        let sky = GraphicsPipeline::new_depth(
             &device,
             program::sky_program(),
             TextureFormat::Rgba16Float,
@@ -240,9 +244,9 @@ impl Renderer {
             &device,
             program::shadowing(),
             TextureFormat::R32Float,
-            PipelineState::DEPTH_WRITE,
+            PipelineState::SCREEN,
         );
-        let depth = GraphicsPipeline::new(
+        let depth = GraphicsPipeline::new_depth(
             &device,
             program::depth_prepass(),
             TextureFormat::R32Float,
@@ -314,7 +318,7 @@ impl Renderer {
             u64::from(CASCADE_COUNT) * CASCADE_BYTES,
             storage,
         );
-        let instances = Growing::new(&device, "belfry instances", storage);
+        let instance_buffer = Growing::new(&device, "belfry instances", storage);
         let depth_drawn = Growing::new(&device, "belfry depth drawn", storage);
         let depth_arguments = Growing::new(
             &device,
@@ -339,7 +343,9 @@ impl Renderer {
             cull,
             light_clusters,
             draw,
+            capture_draw,
             transparent_draw,
+            scene_depth: None,
             sky,
             sky_view,
             sky_record,
@@ -372,7 +378,8 @@ impl Renderer {
             next_bake: 0,
             ambient: None,
             cascades,
-            instances,
+            instance_buffer,
+            instances: Instances::new(),
             depth_drawn,
             depth_arguments,
             main_drawn,
@@ -382,9 +389,7 @@ impl Renderer {
             shadow_arguments,
             shadow_span: 0,
             lighting,
-            joints: Growing::new(&device, "belfry joints", storage | BufferUsages::COPY_SRC),
             lighting_capacity: 0,
-            previous_joints: Growing::new(&device, "belfry previous joints", storage),
             palettes: Palettes::new(),
             line_records: Growing::new(&device, "belfry debug lines", storage),
             picker,
@@ -393,7 +398,6 @@ impl Renderer {
             point_shadow_identity,
             transparency: Transparency::new(&device),
             temporality: Temporality::new(&device),
-            previous: HashMap::new(),
             spheres: Vec::new(),
             damage: Damage::default(),
             probes,
@@ -542,6 +546,18 @@ impl Renderer {
         self.materials_changed();
     }
 
+    fn scene_depth(&mut self, width: u32, height: u32) -> DepthTexture {
+        if let Some(held) = &self.scene_depth
+            && held.width() == width
+            && held.height() == height
+        {
+            return held.clone();
+        }
+        let depth = DepthTexture::new(&self.device, "belfry scene depth", width, height);
+        self.scene_depth = Some(depth.clone());
+        depth
+    }
+
     fn materials_changed(&mut self) {
         self.materials_dirty = true;
         self.tables.invalidate();
@@ -682,9 +698,8 @@ impl Renderer {
             aspect,
             point_lights: &point_light_records,
             probe_count,
-            total: collection.total,
-            depth_count: collection.depth_count,
             highlight: collection.highlight,
+            total: collection.total,
             world,
         });
         let FrameShared {
@@ -700,6 +715,7 @@ impl Renderer {
             ..
         } = recorded;
         self.lighting_capacity = lighting_bytes;
+        let depth = self.scene_depth(texture.width(), texture.height());
         let mut submission = Submission::new(&self.device, "belfry frame");
         if collection.total == 0 {
             self.main_batches = 0;
@@ -712,11 +728,14 @@ impl Renderer {
             if !line_groups.is_empty() {
                 debug_draws.push(Draw::new(&self.line_pipeline, &line_groups, line_vertices));
             }
-            submission.render(self.temporality.target(), [0.0, 0.0, 0.0, 0.0], &[]);
+            submission.render(
+                Pass::new(self.temporality.target(), [0.0, 0.0, 0.0, 0.0]),
+                &[],
+            );
             self.transparency.clear(&mut submission);
             submission.render(
-                self.post.hdr(),
-                [clear[0], clear[1], clear[2], 0.0],
+                Pass::new(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0])
+                    .depth(&depth, DepthOps::CLEAR),
                 &debug_draws,
             );
             self.transparency
@@ -739,6 +758,7 @@ impl Renderer {
                 submission.present(frame);
             }
             submission.submit(&self.queue);
+            self.palettes.finish();
             self.temporality.finish(pose);
             self.capture(
                 probe,
@@ -751,10 +771,7 @@ impl Renderer {
                     instances: 0,
                     slots: 0,
                     opaque: 0,
-                    opaque_instances: 0,
-                    joint_bytes: 0,
                     probe_count,
-                    tables: None,
                 },
                 &travel,
                 capture_rotation,
@@ -788,7 +805,6 @@ impl Renderer {
                 slots: collection.slots,
                 total: collection.total,
                 depth_batches: collection.depth_batches,
-                joint_bytes: collection.joint_bytes,
                 points: &point_light_records,
                 cluster_offset_bytes,
                 cluster_bytes,
@@ -798,10 +814,10 @@ impl Renderer {
                 line_groups: &line_groups,
                 line_vertices,
                 probe_count,
+                depth: depth.clone(),
             },
         );
         let arguments = channels.arguments;
-        let tables = channels.tables;
         self.transparency
             .resolve(&mut submission, self.post.hdr(), self.post.lit());
         self.temporality.resolve(
@@ -818,17 +834,11 @@ impl Renderer {
         let resolved = self.temporality.resolved().clone();
         self.post.resolve(&mut submission, &resolved);
         self.post.tonemap(&mut submission, &texture, &resolved);
-        submission.copy(
-            self.joints.buffer(),
-            0,
-            self.previous_joints.buffer(),
-            0,
-            collection.joint_bytes,
-        );
         if let Some(frame) = frame {
             submission.present(frame);
         }
         submission.submit(&self.queue);
+        self.palettes.finish();
         self.temporality.finish(pose);
         self.capture(
             probe,
@@ -841,10 +851,7 @@ impl Renderer {
                 instances: collection.total,
                 slots: collection.slots,
                 opaque: collection.depth_batches,
-                opaque_instances: collection.depth_count,
-                joint_bytes: collection.joint_bytes,
                 probe_count,
-                tables: Some(tables.clone()),
             },
             &travel,
             capture_rotation,
@@ -864,7 +871,7 @@ impl Renderer {
             drawn: self.main_drawn.buffer(),
             arguments: self.main_arguments.buffer(),
             meshes: &self.meshes,
-            palette: self.joints.buffer(),
+            palette: self.palettes.posed(),
         };
         self.picker.pick(
             &self.device,
@@ -898,6 +905,23 @@ impl Renderer {
             .iter()
             .map(|held| u32::from_ne_bytes(held[4..8].try_into().unwrap()))
             .sum()
+    }
+
+    pub fn dropped_transparent_fragments(&self) -> u32 {
+        let Some(fragments) = self.transparency.dropped_buffer() else {
+            return 0;
+        };
+        let readback = GpuBuffer::new(
+            &self.device,
+            "belfry dropped readback",
+            WORD_BYTES,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        );
+        let mut submission = Submission::new(&self.device, "belfry dropped");
+        submission.copy(fragments, 0, &readback, 0, WORD_BYTES);
+        let index = submission.submit(&self.queue);
+        let bytes = readback.read(&self.queue, index, WORD_BYTES);
+        u32::from_ne_bytes(bytes[..WORD_BYTES as usize].try_into().unwrap())
     }
 }
 

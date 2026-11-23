@@ -3,6 +3,7 @@ mod buffer;
 mod cache;
 mod capability;
 mod context;
+mod depth;
 mod gate;
 mod graphics;
 mod host;
@@ -24,8 +25,12 @@ pub use capability::{
     DeviceType, Limits, PowerPreference, TextureUsages,
 };
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
+pub use depth::DepthTexture;
 pub use gate::QueueLock;
-pub use graphics::{BlendState, Count, DepthState, Draw, PipelineState, Scissor, Viewport};
+pub use graphics::{
+    BlendState, Count, DepthLoad, DepthOps, DepthState, Draw, Pass, PipelineState, Scissor,
+    Viewport,
+};
 #[cfg(vulkan_backend)]
 pub use host::VulkanHost;
 pub use host::{HostAdvance, HostDevice, HostIdentity};

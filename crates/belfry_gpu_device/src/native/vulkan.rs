@@ -11,8 +11,9 @@ use crate::capability::{
     Limits, TextureUsages,
 };
 use crate::gate::Gate;
-use crate::graphics::{BlendState, DepthState, PipelineState};
+use crate::graphics::{BlendState, DepthLoad, DepthState, PipelineState};
 use crate::host::{HOST_SLICE, HostAdvance, VulkanHost};
+use crate::native::NativeDepth;
 use crate::pipeline::BoundResource;
 use crate::sampler::{AddressMode, Filter, SamplerDesc};
 use crate::submission::{Command, RecordedCount, Write};
@@ -688,8 +689,7 @@ pub(crate) struct Device {
     queue: vk::Queue,
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
-    render_passes: Mutex<Vec<(TextureFormat, vk::RenderPass)>>,
-    depths: Mutex<HashMap<(u32, u32), Weak<Depth>>>,
+    render_passes: Mutex<Vec<(PassKey, vk::RenderPass)>>,
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
@@ -866,14 +866,30 @@ struct GroupResource {
 struct Target {
     view: vk::ImageView,
     owned_view: bool,
-    _depth: Arc<Depth>,
-    render_pass: vk::RenderPass,
-    framebuffer: vk::Framebuffer,
     width: u32,
     height: u32,
+    framebuffers: Mutex<Vec<Framebuffer>>,
 }
 
-struct Depth {
+struct Framebuffer {
+    key: PassKey,
+    render_pass: vk::RenderPass,
+    raw: vk::Framebuffer,
+    depth: Option<Arc<DepthResource>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PassKey {
+    format: TextureFormat,
+    depth: Option<(DepthLoad, bool)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Depth {
+    resource: Arc<DepthResource>,
+}
+
+struct DepthResource {
     _block: Block,
     image: vk::Image,
     view: vk::ImageView,
@@ -891,7 +907,7 @@ struct Image<'a> {
     aspect: vk::ImageAspectFlags,
 }
 
-impl Drop for Depth {
+impl Drop for DepthResource {
     fn drop(&mut self) {
         unsafe {
             self.core.destroy_image_view(self.view, None);
@@ -1164,7 +1180,6 @@ impl Facts {
             pool: parts.pool,
             stamps: parts.stamps,
             render_passes: Mutex::new(Vec::new()),
-            depths: Mutex::new(HashMap::new()),
             ticks: self.ticks,
             bits: self.bits,
             uuid: self.uuid,
@@ -1286,10 +1301,26 @@ fn create(
     })
 }
 
-fn render_pass(raw: &ash::Device, format: vk::Format) -> Result<vk::RenderPass, String> {
-    let attachments = [
+fn render_pass(raw: &ash::Device, key: PassKey) -> Result<vk::RenderPass, String> {
+    let color_stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS;
+    let color_access =
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+    let dependencies = [vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(color_stages)
+        .dst_stage_mask(color_stages)
+        .dst_access_mask(color_access)];
+    let references = [vk::AttachmentReference::default()
+        .attachment(0)
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+    let depth_reference = vk::AttachmentReference::default()
+        .attachment(1)
+        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let mut attachments = vec![
         vk::AttachmentDescription::default()
-            .format(format)
+            .format(vk_format(key.format))
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -1297,46 +1328,39 @@ fn render_pass(raw: &ash::Device, format: vk::Format) -> Result<vk::RenderPass, 
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-        vk::AttachmentDescription::default()
-            .format(DEPTH_FORMAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
     ];
-    let references = [vk::AttachmentReference::default()
-        .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
-    let depth = vk::AttachmentReference::default()
-        .attachment(1)
-        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    let subpasses = [vk::SubpassDescription::default()
+    let mut subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&references)
-        .depth_stencil_attachment(&depth)];
-    let dependencies = [vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )];
+        .color_attachments(&references);
+    if let Some((load, store)) = key.depth {
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(DEPTH_FORMAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(match load {
+                    DepthLoad::Clear => vk::AttachmentLoadOp::CLEAR,
+                    DepthLoad::Keep => vk::AttachmentLoadOp::LOAD,
+                })
+                .store_op(if store {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(match load {
+                    DepthLoad::Clear => vk::ImageLayout::UNDEFINED,
+                    DepthLoad::Keep => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                })
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+        subpass = subpass.depth_stencil_attachment(&depth_reference);
+    }
     unsafe {
         raw.create_render_pass(
             &vk::RenderPassCreateInfo::default()
                 .attachments(&attachments)
-                .subpasses(&subpasses)
+                .subpasses(std::slice::from_ref(&subpass))
                 .dependencies(&dependencies),
             None,
         )
@@ -1975,28 +1999,12 @@ impl Device {
                                 })
                         }
                     };
-                    let depth = self.depth(extent.0, extent.1);
-                    let pass = self.render_pass(format);
-                    let framebuffer = unsafe {
-                        self.core.create_framebuffer(
-                            &vk::FramebufferCreateInfo::default()
-                                .render_pass(pass)
-                                .attachments(&[level_view, depth.view])
-                                .width(extent.0)
-                                .height(extent.1)
-                                .layers(1),
-                            None,
-                        )
-                    }
-                    .unwrap_or_else(|error| panic!("creating a Vulkan framebuffer: {error:?}"));
                     Target {
                         view: level_view,
                         owned_view: !shared,
-                        _depth: depth,
-                        render_pass: pass,
-                        framebuffer,
                         width: extent.0,
                         height: extent.1,
+                        framebuffers: Mutex::new(Vec::new()),
                     }
                 })
                 .collect()
@@ -2021,15 +2029,9 @@ impl Device {
         }
     }
 
-    fn depth(self: &Arc<Self>, width: u32, height: u32) -> Arc<Depth> {
-        let key = (width, height);
-        let mut depths = self.depths.lock().unwrap_or_else(|held| held.into_inner());
-        if let Some(held) = depths.get(&key).and_then(Weak::upgrade) {
-            return held;
-        }
-        depths.retain(|_, held| held.strong_count() > 0);
+    pub(crate) fn create_depth_texture(&self, label: &str, width: u32, height: u32) -> Depth {
         let (image, block, view) = self.attachment(Image {
-            name: "belfry depth",
+            name: label,
             width,
             height,
             mip_levels: 1,
@@ -2037,14 +2039,58 @@ impl Device {
             usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             aspect: vk::ImageAspectFlags::DEPTH,
         });
-        let depth = Arc::new(Depth {
-            _block: block,
-            core: self.core.clone(),
-            image,
-            view,
+        Depth {
+            resource: Arc::new(DepthResource {
+                _block: block,
+                core: self.core.clone(),
+                image,
+                view,
+            }),
+        }
+    }
+
+    fn framing(
+        &self,
+        target: &Target,
+        key: PassKey,
+        depth: Option<&Arc<DepthResource>>,
+    ) -> (vk::RenderPass, vk::Framebuffer) {
+        let render_pass = self.render_pass(key);
+        let mut held = target
+            .framebuffers
+            .lock()
+            .expect("the Vulkan framebuffers of a target are never poisoned");
+        let matching = held.iter().find(|frame| {
+            frame.key == key
+                && frame.depth.as_ref().map(|held| held.view) == depth.map(|held| held.view)
+                && frame.render_pass == render_pass
         });
-        depths.insert(key, Arc::downgrade(&depth));
-        depth
+        if let Some(frame) = matching {
+            return (frame.render_pass, frame.raw);
+        }
+        let attachments: Vec<vk::ImageView> = match depth {
+            Some(held) => vec![target.view, held.view],
+            None => vec![target.view],
+        };
+        let raw = unsafe {
+            self.core.create_framebuffer(
+                &vk::FramebufferCreateInfo::default()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(target.width)
+                    .height(target.height)
+                    .layers(1),
+                None,
+            )
+        }
+        .unwrap_or_else(|error| panic!("creating a Vulkan framebuffer: {error:?}"));
+        held.push(Framebuffer {
+            key,
+            render_pass,
+            raw,
+            depth: depth.cloned(),
+        });
+        (render_pass, raw)
     }
 
     pub(crate) fn has_surface(&self) -> bool {
@@ -2174,10 +2220,9 @@ impl Device {
             .unwrap_or_else(|error| panic!("creating a Vulkan swapchain: {error:?}"));
         let images = unsafe { loader.get_swapchain_images(raw) }
             .unwrap_or_else(|error| panic!("reading Vulkan swapchain images: {error:?}"));
-        let pass = self.render_pass(format);
         let textures = images
             .iter()
-            .map(|image| self.swapchain_texture(*image, extent.width, extent.height, format, pass))
+            .map(|image| self.swapchain_texture(*image, extent.width, extent.height, format))
             .collect::<Vec<_>>();
         let present = images
             .iter()
@@ -2198,7 +2243,6 @@ impl Device {
         width: u32,
         height: u32,
         format: TextureFormat,
-        pass: vk::RenderPass,
     ) -> Texture {
         let view = unsafe {
             self.core.create_image_view(
@@ -2218,19 +2262,6 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("creating a Vulkan swapchain view: {error:?}"));
-        let depth = self.depth(width, height);
-        let framebuffer = unsafe {
-            self.core.create_framebuffer(
-                &vk::FramebufferCreateInfo::default()
-                    .render_pass(pass)
-                    .attachments(&[view, depth.view])
-                    .width(width)
-                    .height(height)
-                    .layers(1),
-                None,
-            )
-        }
-        .unwrap_or_else(|error| panic!("creating a Vulkan swapchain framebuffer: {error:?}"));
         Texture {
             resource: Arc::new(TextureResource {
                 block: None,
@@ -2240,11 +2271,9 @@ impl Device {
                 targets: vec![Target {
                     view,
                     owned_view: false,
-                    _depth: depth,
-                    render_pass: pass,
-                    framebuffer,
                     width,
                     height,
+                    framebuffers: Mutex::new(Vec::new()),
                 }],
                 width,
                 height,
@@ -2339,6 +2368,7 @@ impl Device {
         program: &GraphicsProgram,
         format: TextureFormat,
         state: PipelineState,
+        depth: bool,
     ) -> GraphicsPipeline {
         let (groups, pools, layout) = self.pipeline_layout(
             program.bindings(),
@@ -2351,7 +2381,14 @@ impl Device {
                 layout,
                 groups,
                 pools,
-                render_pass: self.render_pass(format),
+                render_pass: self.render_pass(PassKey {
+                    format,
+                    depth: if depth {
+                        Some((DepthLoad::Clear, false))
+                    } else {
+                        None
+                    },
+                }),
                 format,
                 state,
                 compiled: OnceLock::new(),
@@ -2359,17 +2396,21 @@ impl Device {
         }
     }
 
-    fn render_pass(&self, format: TextureFormat) -> vk::RenderPass {
+    fn render_pass(&self, key: PassKey) -> vk::RenderPass {
         let mut passes = self
             .render_passes
             .lock()
             .expect("the Vulkan render passes are never poisoned");
-        if let Some((_, pass)) = passes.iter().find(|(held, _)| *held == format) {
+        if let Some((_, pass)) = passes.iter().find(|(held, _)| *held == key) {
             return *pass;
         }
-        let pass = render_pass(&self.core, vk_format(format))
-            .unwrap_or_else(|error| panic!("creating the {format:?} Vulkan render pass: {error}"));
-        passes.push((format, pass));
+        let pass = render_pass(&self.core, key).unwrap_or_else(|error| {
+            panic!(
+                "creating the {:?} Vulkan render pass over {:?}: {error}",
+                key.format, key.depth,
+            )
+        });
+        passes.push((key, pass));
         pass
     }
 
@@ -2478,7 +2519,10 @@ impl Device {
                     pipeline.resource.state.depth,
                     DepthState::TestWrite
                 ))
-                .depth_compare_op(vk::CompareOp::LESS);
+                .depth_compare_op(match pipeline.resource.state.depth {
+                    DepthState::TestCovered => vk::CompareOp::LESS_OR_EQUAL,
+                    _ => vk::CompareOp::LESS,
+                });
             let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
             let dynamic = vk::PipelineDynamicStateCreateInfo::default()
                 .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
@@ -2653,6 +2697,7 @@ impl Device {
                     target,
                     level,
                     clear,
+                    depth,
                     draws,
                 } => {
                     let texture = native_texture(target.native());
@@ -2664,6 +2709,15 @@ impl Device {
                         width: target_frame.width,
                         height: target_frame.height,
                     };
+                    let key = PassKey {
+                        format: texture.format,
+                        depth: depth.as_ref().map(|(_, ops)| (ops.load, ops.store)),
+                    };
+                    let held = depth.as_ref().map(|(held, _)| {
+                        let NativeDepth::Vulkan(native) = held.native();
+                        Arc::clone(&native.resource)
+                    });
+                    let (render_pass, framebuffer) = self.framing(target_frame, key, held.as_ref());
                     let clears = [
                         vk::ClearValue {
                             color: vk::ClearColorValue { float32: *clear },
@@ -2675,14 +2729,15 @@ impl Device {
                             },
                         },
                     ];
+                    let clears = &clears[..if depth.is_some() { 2 } else { 1 }];
                     let info = vk::RenderPassBeginInfo::default()
-                        .render_pass(target_frame.render_pass)
-                        .framebuffer(target_frame.framebuffer)
+                        .render_pass(render_pass)
+                        .framebuffer(framebuffer)
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent,
                         })
-                        .clear_values(&clears);
+                        .clear_values(clears);
                     for draw in draws {
                         for bindings in &draw.groups {
                             let group = group_resource(&bindings.native);
@@ -2727,6 +2782,18 @@ impl Device {
                             vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::MEMORY_WRITE,
                         ),
                     );
+                    if let Some(held) = &held {
+                        pending.touch(
+                            accesses,
+                            Resource::Image(held.image),
+                            Access::write(
+                                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                                    | vk::AccessFlags::MEMORY_WRITE,
+                            ),
+                        );
+                    }
                     pending.flush(&self.core, command);
                     unsafe {
                         self.core.cmd_begin_render_pass(
@@ -3387,7 +3454,14 @@ impl Drop for TextureResource {
     fn drop(&mut self) {
         unsafe {
             for target in &self.targets {
-                self.core.destroy_framebuffer(target.framebuffer, None);
+                for frame in target
+                    .framebuffers
+                    .lock()
+                    .expect("the Vulkan framebuffers of a target are never poisoned")
+                    .drain(..)
+                {
+                    self.core.destroy_framebuffer(frame.raw, None);
+                }
                 if target.owned_view {
                     self.core.destroy_image_view(target.view, None);
                 }

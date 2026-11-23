@@ -19,7 +19,6 @@ pub(super) struct FrameRecord<'a> {
     pub(super) point_lights: &'a [PointLightRecord],
     pub(super) probe_count: u32,
     pub(super) total: u32,
-    pub(super) depth_count: u32,
     pub(super) highlight: u32,
     pub(super) world: &'a World,
 }
@@ -55,7 +54,6 @@ impl Renderer {
             point_lights,
             probe_count,
             total,
-            depth_count,
             highlight,
             world,
         } = frame;
@@ -141,7 +139,7 @@ impl Renderer {
         );
         let depth_view = ViewRecord {
             hzb_levels: 0,
-            instances: depth_count,
+            instances: total,
             ..main_view
         };
         self.views
@@ -152,7 +150,7 @@ impl Renderer {
                 &cascades
                     .iter()
                     .map(|cascade| {
-                        record_of_view(&View::of(cascade.clip), depth_count, Vec3::ZERO, Vec3::Z)
+                        record_of_view(&View::of(cascade.clip), total, Vec3::ZERO, Vec3::Z)
                     })
                     .collect::<Vec<_>>(),
             ),
