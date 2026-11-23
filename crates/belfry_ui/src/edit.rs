@@ -181,8 +181,12 @@ impl Edit {
         if characters.is_empty() {
             return (0, 0);
         }
+        let caret = caret.min(characters.len());
         let index = caret.min(characters.len() - 1);
         let kind = class(characters[index]);
+        if kind == Class::Space {
+            return (caret, caret);
+        }
         let mut start = index;
         while start > 0 && class(characters[start - 1]) == kind {
             start -= 1;

@@ -62,6 +62,23 @@ fn key_events_reach_the_edit_they_type_into() {
     let mut edit = Edit::new(3, "", 0.0);
     assert_eq!(edit.poll(&input, &mut clipboard, 0.1), None);
     assert_eq!(edit.text(), "pasted");
+
+    let edit = Edit::new(4, "alpha beta ", 0.0);
+    assert_eq!(
+        edit.word(11),
+        (11, 11),
+        "a caret at the end of trailing space selects no blank word",
+    );
+    assert_eq!(
+        edit.word(10),
+        (10, 10),
+        "a caret inside trailing space selects no blank word",
+    );
+    assert_eq!(
+        edit.word(2),
+        (0, 5),
+        "a caret inside a word selects that whole word",
+    );
 }
 
 #[test]

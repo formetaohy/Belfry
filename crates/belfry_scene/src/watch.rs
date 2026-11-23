@@ -4,6 +4,8 @@ use crate::source::Sources;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+const SETTLE_POLLS: u32 = 2;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Change {
     pub scene: bool,
@@ -24,6 +26,7 @@ pub struct Watch {
     files: Vec<(PathBuf, Kind, Option<Digest>)>,
     errors: Vec<String>,
     pending: Option<Change>,
+    held: u32,
 }
 
 impl Watch {
@@ -34,6 +37,7 @@ impl Watch {
             files: Vec::new(),
             errors: Vec::new(),
             pending: None,
+            held: 0,
         };
         watch.renew(root);
         watch
@@ -92,6 +96,22 @@ impl Watch {
     }
 
     pub fn changed(&mut self) -> Option<Change> {
+        let changed = self.poll();
+        if changed.scene || changed.model || changed.asset {
+            let pending = self.pending.get_or_insert(Change::default());
+            pending.scene |= changed.scene;
+            pending.model |= changed.model;
+            pending.asset |= changed.asset;
+            self.held = self.held.saturating_add(1);
+            if self.held < SETTLE_POLLS {
+                return None;
+            }
+        }
+        self.held = 0;
+        self.pending.take()
+    }
+
+    fn poll(&mut self) -> Change {
         let mut changed = Change::default();
         for (path, kind, digest) in &mut self.files {
             let current = self.sources.digest(path).ok();
@@ -104,14 +124,7 @@ impl Watch {
                 }
             }
         }
-        if changed.scene || changed.model || changed.asset {
-            let pending = self.pending.get_or_insert(Change::default());
-            pending.scene |= changed.scene;
-            pending.model |= changed.model;
-            pending.asset |= changed.asset;
-            return None;
-        }
-        self.pending.take()
+        changed
     }
 
     pub fn errors(&self) -> impl Iterator<Item = &str> + '_ {
