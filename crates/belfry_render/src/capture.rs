@@ -103,6 +103,7 @@ pub(crate) struct CaptureFrame<'a> {
     pub(crate) rotation: Mat4,
     pub(crate) intensity: f32,
     pub(crate) shadow: Cascade,
+    pub(crate) palette_base: u32,
     pub(crate) batches: &'a [Batch],
     pub(crate) arguments: &'a [u32],
     pub(crate) slots: u32,
@@ -421,8 +422,6 @@ impl Captures {
                 height: PROBE_RESOLUTION,
                 vertical: crate::frame::vertical(&frame.device),
                 hzb_levels: 0,
-                hzb_width: 0.0,
-                hzb_height: 0.0,
                 cluster_x: CLUSTER_COLUMNS,
                 cluster_y: CLUSTER_ROWS,
                 point_lights: frame.points.len() as u32,
@@ -435,12 +434,19 @@ impl Captures {
                 instances,
                 frame.eye,
                 axes[face].0,
+                frame.palette_base,
                 camera,
                 screen,
             ));
         }
         let shadow = View::of(frame.shadow.clip);
-        records.push(record_of_view(&shadow, instances, Vec3::ZERO, Vec3::Z));
+        records.push(record_of_view(
+            &shadow,
+            instances,
+            Vec3::ZERO,
+            Vec3::Z,
+            frame.palette_base,
+        ));
         self.views
             .write(&frame.queue, bytemuck::cast_slice(records.as_slice()));
         let skies = views

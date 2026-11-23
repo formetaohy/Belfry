@@ -91,7 +91,12 @@ pub(super) fn argument_value(body: &[Instruction], index: usize) -> Option<Value
 
 pub(super) fn terminates(body: &[Instruction]) -> bool {
     match body.last() {
-        Some(Instruction::Return { .. } | Instruction::Break | Instruction::Continue) => true,
+        Some(
+            Instruction::Return { .. }
+            | Instruction::Break
+            | Instruction::Continue
+            | Instruction::Discard,
+        ) => true,
         Some(Instruction::If { accept, reject, .. }) => terminates(accept) && terminates(reject),
         Some(Instruction::Switch { cases, default, .. }) => {
             cases.iter().all(|(_, body)| terminates(body)) && terminates(default)

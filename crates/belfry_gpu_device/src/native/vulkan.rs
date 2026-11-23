@@ -1301,6 +1301,13 @@ fn create(
     })
 }
 
+fn depth_load_access(load: Option<DepthLoad>) -> vk::AccessFlags {
+    match load {
+        Some(DepthLoad::Keep) => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
+        _ => vk::AccessFlags::empty(),
+    }
+}
+
 fn render_pass(raw: &ash::Device, key: PassKey) -> Result<vk::RenderPass, String> {
     let color_stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
         | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS;
@@ -2790,7 +2797,8 @@ impl Device {
                                 vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
                                     | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
                                 vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
-                                    | vk::AccessFlags::MEMORY_WRITE,
+                                    | vk::AccessFlags::MEMORY_WRITE
+                                    | depth_load_access(depth.as_ref().map(|(_, ops)| ops.load)),
                             ),
                         );
                     }

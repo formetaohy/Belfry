@@ -675,8 +675,14 @@ impl Renderer {
             eye,
             forward,
         };
-        self.temporality.begin(&self.queue, pose, vertical);
         let collection = self.collect(world, highlight);
+        self.temporality.begin(
+            &self.queue,
+            pose,
+            vertical,
+            self.palettes.base(),
+            self.palettes.previous_base(),
+        );
         self.absorb_damage(world, &collection);
         let probe = match self.captures.pending() {
             Some(_) => None,
@@ -871,7 +877,7 @@ impl Renderer {
             drawn: self.main_drawn.buffer(),
             arguments: self.main_arguments.buffer(),
             meshes: &self.meshes,
-            palette: self.palettes.posed(),
+            palette: self.palettes.binding(),
         };
         self.picker.pick(
             &self.device,

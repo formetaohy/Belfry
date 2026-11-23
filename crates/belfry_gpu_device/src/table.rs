@@ -4,9 +4,11 @@ use crate::native::{NativeSamplerTable, NativeTextureTable};
 use crate::sampler::{Sampler, SamplerDesc};
 use crate::texture::Texture;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 struct TextureTableState {
     native: NativeTextureTable,
+    generation: AtomicU64,
 }
 
 pub struct TextureTable {
@@ -55,7 +57,10 @@ impl TextureTable {
             free: Vec::new(),
             grown: 0,
             filled: 0,
-            state: Arc::new(TextureTableState { native }),
+            state: Arc::new(TextureTableState {
+                native,
+                generation: AtomicU64::new(1),
+            }),
         }
     }
 
@@ -146,6 +151,14 @@ impl TextureTable {
         &self.state.native
     }
 
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.state) as usize
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.generation.load(Ordering::Relaxed)
+    }
+
     fn occupied(&self, index: u32) -> bool {
         self.occupied.get(index as usize).is_some_and(|held| *held)
     }
@@ -168,6 +181,7 @@ impl TextureTable {
             "a texture table holds sampled textures"
         );
         self.entries[index as usize] = texture.clone();
+        self.state.generation.fetch_add(1, Ordering::Relaxed);
         self.device
             .native()
             .fill_texture_table(&self.state.native, index, texture);
@@ -176,6 +190,7 @@ impl TextureTable {
 
 struct SamplerTableState {
     native: NativeSamplerTable,
+    generation: AtomicU64,
 }
 
 pub struct SamplerTable {
@@ -220,7 +235,10 @@ impl SamplerTable {
             free: Vec::new(),
             grown: 0,
             filled: 0,
-            state: Arc::new(SamplerTableState { native }),
+            state: Arc::new(SamplerTableState {
+                native,
+                generation: AtomicU64::new(1),
+            }),
         }
     }
 
@@ -314,6 +332,14 @@ impl SamplerTable {
         &self.state.native
     }
 
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.state) as usize
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.generation.load(Ordering::Relaxed)
+    }
+
     fn occupied(&self, index: u32) -> bool {
         self.occupied.get(index as usize).is_some_and(|held| *held)
     }
@@ -332,6 +358,7 @@ impl SamplerTable {
             "a sampler table fills from another device"
         );
         self.entries[index as usize] = sampler.clone();
+        self.state.generation.fetch_add(1, Ordering::Relaxed);
         self.device
             .native()
             .fill_sampler_table(&self.state.native, index, sampler);

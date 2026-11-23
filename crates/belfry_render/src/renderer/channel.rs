@@ -99,6 +99,7 @@ impl Renderer {
                 lights: points,
                 instances: total,
                 slots,
+                palette_base: self.palettes.base(),
                 arguments: &arguments,
             },
         );
@@ -209,7 +210,6 @@ impl Renderer {
                     view: self.views.binding(0, VIEW_BYTES),
                     motion_view: self.temporality.view(),
                     palette: self.palettes.binding(),
-                    previous_palette: self.palettes.previous(),
                     materials: self
                         .material_records
                         .buffer()

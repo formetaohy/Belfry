@@ -5,6 +5,7 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Capability, ClipSpace, Limits, PowerPreference,
 };
 use crate::gate::QueueLock;
+use crate::group::GroupCache;
 use crate::host::{HostDevice, HostIdentity};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
@@ -138,6 +139,7 @@ pub(crate) struct DeviceState {
     pub(crate) limits: Limits,
     pub(crate) capability: Capability,
     pub(crate) artifacts: ArtifactCache,
+    pub(crate) groups: GroupCache,
 }
 
 #[derive(Clone)]
@@ -249,6 +251,7 @@ impl Device {
                 limits,
                 capability,
                 artifacts,
+                groups: GroupCache::default(),
             }),
         })
     }

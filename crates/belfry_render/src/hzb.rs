@@ -202,14 +202,6 @@ impl Hzb {
         self.levels.len() as u32
     }
 
-    pub(crate) fn base_width(&self) -> f32 {
-        self.levels[0].width() as f32
-    }
-
-    pub(crate) fn base_height(&self) -> f32 {
-        self.levels[0].height() as f32
-    }
-
     pub(crate) fn build(
         &self,
         submission: &mut Submission,

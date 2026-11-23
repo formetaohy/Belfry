@@ -34,6 +34,7 @@ pub(crate) struct PointShadowFrame<'a> {
     pub(crate) lights: &'a [PointLightRecord],
     pub(crate) instances: u32,
     pub(crate) slots: u32,
+    pub(crate) palette_base: u32,
     pub(crate) arguments: &'a [u32],
 }
 
@@ -105,6 +106,7 @@ impl PointShadows {
             lights,
             instances,
             slots,
+            palette_base,
             arguments,
         } = *frame;
         assert!(
@@ -152,6 +154,7 @@ impl PointShadows {
                     instances,
                     Vec3::ZERO,
                     Vec3::Z,
+                    palette_base,
                 ));
             }
         }
@@ -161,6 +164,7 @@ impl PointShadows {
                 0,
                 Vec3::ZERO,
                 Vec3::Z,
+                palette_base,
             ));
         }
         self.views.write(queue, bytemuck::cast_slice(&views));

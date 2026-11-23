@@ -70,15 +70,15 @@ impl Renderer {
         );
         let direction = travel.direction();
         let radiance = light.color * light.intensity;
-        let (hzb_levels, hzb_width, hzb_height) = if total == 0 {
-            (0u32, 0.0, 0.0)
+        let hzb_levels = if total == 0 {
+            0u32
         } else {
             self.ensure_hzb(texture.width(), texture.height(), vertical);
             let hzb = self
                 .hzb
                 .as_ref()
                 .expect("a rendered frame owns its depth pyramid");
-            (hzb.levels(), hzb.base_width(), hzb.base_height())
+            hzb.levels()
         };
         let cluster_x = texture.width().div_ceil(LIGHT_TILE);
         let cluster_y = texture.height().div_ceil(LIGHT_TILE);
@@ -117,19 +117,19 @@ impl Renderer {
         self.lighting
             .buffer()
             .write(&self.queue, bytemuck::cast_slice(point_lights));
+        let palette_base = self.palettes.base();
         let main_view = record_of_main_view(
             view,
             total,
             eye,
             forward,
+            palette_base,
             camera,
             Screen {
                 width: texture.width(),
                 height: texture.height(),
                 vertical,
                 hzb_levels,
-                hzb_width,
-                hzb_height,
                 cluster_x,
                 cluster_y,
                 point_lights: point_lights.len() as u32,
@@ -150,7 +150,13 @@ impl Renderer {
                 &cascades
                     .iter()
                     .map(|cascade| {
-                        record_of_view(&View::of(cascade.clip), total, Vec3::ZERO, Vec3::Z)
+                        record_of_view(
+                            &View::of(cascade.clip),
+                            total,
+                            Vec3::ZERO,
+                            Vec3::Z,
+                            palette_base,
+                        )
                     })
                     .collect::<Vec<_>>(),
             ),

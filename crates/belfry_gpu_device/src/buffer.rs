@@ -27,7 +27,7 @@ pub struct BufferBinding<'a> {
     pub(crate) size: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferRange {
     pub allocation: u64,
     pub offset: u64,

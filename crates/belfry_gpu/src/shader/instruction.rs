@@ -37,7 +37,7 @@ impl BuiltIn {
     }
 
     pub const fn uniform(self) -> bool {
-        matches!(self, Self::WorkGroupId | Self::GlobalInvocationId)
+        matches!(self, Self::WorkGroupId)
     }
 }
 

@@ -2,6 +2,7 @@ use crate::buffer::{BufferBinding, GpuBuffer};
 use crate::capability::{BufferUsages, TextureUsages};
 use crate::context::Device;
 use crate::graphics::PipelineState;
+use crate::group::{GroupKey, ResourceKey};
 use crate::native::{NativeGraphicsPipeline, NativeGroup, NativePipeline};
 use crate::sampler::Sampler;
 use crate::table::{SamplerTable, TextureTable};
@@ -58,6 +59,16 @@ impl<'a> Binding<'a> {
         Self {
             index,
             resource: Resource::SamplerTable(table),
+        }
+    }
+
+    pub(crate) fn key(&self) -> ResourceKey {
+        match self.resource {
+            Resource::Buffer(binding) => ResourceKey::buffer(binding.range()),
+            Resource::Texture(texture) => ResourceKey::texture(texture.identity()),
+            Resource::Sampler(sampler) => ResourceKey::sampler(sampler.identity()),
+            Resource::TextureTable(table) => ResourceKey::textures(table),
+            Resource::SamplerTable(table) => ResourceKey::samplers(table),
         }
     }
 }
@@ -149,19 +160,22 @@ impl PipelineHandle {
     pub fn bind_group(&self, group: u32, entries: &[Binding<'_>]) -> BindGroup {
         let label = self.slot.program.label();
         let specs = group_specs(self.slot.program.bindings(), group, label);
-        let resources = bounded(&self.slot.device, &specs, entries, label);
-        let native = self
-            .slot
-            .device
-            .native()
-            .create_group(&self.slot.native, group, &resources);
-        BindGroup {
-            native,
-            group,
-            #[cfg(metal_backend)]
-            resources,
-            owner: Owner::Compute(self.slot.clone()),
-        }
+        let owner = Arc::as_ptr(&self.slot) as usize;
+        let key = GroupKey::new(owner, group, entries.iter().map(|entry| entry.key()));
+        let device = &self.slot.device;
+        device.state.groups.fetch(key, || {
+            let resources = bounded(device, &specs, entries, label);
+            let native = device
+                .native()
+                .create_group(&self.slot.native, group, &resources);
+            BindGroup {
+                native,
+                group,
+                #[cfg(metal_backend)]
+                resources,
+                owner: Owner::Compute(self.slot.clone()),
+            }
+        })
     }
 
     pub fn is_compiled(&self) -> bool {
@@ -240,19 +254,23 @@ impl GraphicsPipeline {
     pub fn bind_group(&self, group: u32, entries: &[Binding<'_>]) -> BindGroup {
         let label = self.slot.program.label();
         let specs = group_specs(self.slot.program.bindings(), group, label);
-        let resources = bounded(&self.slot.device, &specs, entries, label);
-        let native =
-            self.slot
-                .device
-                .native()
-                .create_graphics_group(&self.slot.native, group, &resources);
-        BindGroup {
-            native,
-            group,
-            #[cfg(metal_backend)]
-            resources,
-            owner: Owner::Graphics(self.slot.clone()),
-        }
+        let owner = Arc::as_ptr(&self.slot) as usize;
+        let key = GroupKey::new(owner, group, entries.iter().map(|entry| entry.key()));
+        let device = &self.slot.device;
+        device.state.groups.fetch(key, || {
+            let resources = bounded(device, &specs, entries, label);
+            let native =
+                device
+                    .native()
+                    .create_graphics_group(&self.slot.native, group, &resources);
+            BindGroup {
+                native,
+                group,
+                #[cfg(metal_backend)]
+                resources,
+                owner: Owner::Graphics(self.slot.clone()),
+            }
+        })
     }
 
     pub fn is_compiled(&self) -> bool {

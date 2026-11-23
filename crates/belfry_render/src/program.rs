@@ -144,8 +144,7 @@ pub(crate) const MOTION_DRAWN: u32 = 1;
 pub(crate) const MOTION_PALETTE: u32 = 2;
 pub(crate) const MOTION_SKINS: u32 = 3;
 pub(crate) const MOTION_MATERIALS: u32 = 4;
-pub(crate) const MOTION_PREVIOUS_PALETTE: u32 = 5;
-pub(crate) const MOTION_VERTICES: u32 = 6;
+pub(crate) const MOTION_VERTICES: u32 = 5;
 pub(crate) const MOTION_TEXTURE: u32 = 0;
 pub(crate) const MOTION_SAMPLER: u32 = 1;
 

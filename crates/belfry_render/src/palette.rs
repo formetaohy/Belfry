@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 const JOINT_BYTES: u64 = std::mem::size_of::<Mat4>() as u64;
 const POOL_BYTES: u64 = 4096;
+const HALVES: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Skinning {
@@ -34,11 +35,11 @@ pub(crate) struct Palettes {
     free: Vec<Range>,
     matrices: Vec<Mat4>,
     staged: Vec<Staged>,
-    joints: Option<[GpuBuffer; 2]>,
-    bytes: u64,
+    pool: Option<GpuBuffer>,
+    joints: u32,
     used: u32,
-    front: usize,
-    posed: usize,
+    at: u64,
+    posed: u32,
 }
 
 impl Palettes {
@@ -48,10 +49,10 @@ impl Palettes {
             free: Vec::new(),
             matrices: Vec::new(),
             staged: Vec::new(),
-            joints: None,
-            bytes: POOL_BYTES,
+            pool: None,
+            joints: 0,
             used: 0,
-            front: 0,
+            at: 0,
             posed: 0,
         }
     }
@@ -99,56 +100,64 @@ impl Palettes {
     }
 
     pub(crate) fn commit(&mut self, device: &Device, queue: &Queue) {
-        let bytes = u64::from(self.used) * JOINT_BYTES;
-        self.fit(device, queue, bytes);
-        self.posed = self.front;
-        let joints = self
-            .joints
+        self.fit(device, queue, self.used);
+        self.posed = self.base();
+        let pool = self
+            .pool
             .as_ref()
-            .expect("a committed frame holds the buffers its poses write");
-        let front = &joints[self.front];
-        let back = &joints[1 - self.front];
-        let mut fresh = Vec::new();
+            .expect("a committed frame holds the buffer its poses write");
+        let other = self.previous_base();
         for staged in &self.staged {
-            let matrices = &self.matrices[staged.first..staged.first + staged.joints];
-            let records = matrices.iter().map(joint_record).collect::<Vec<_>>();
-            let offset = u64::from(staged.range.palette) * JOINT_BYTES;
-            front.write_at(queue, offset, bytemuck::cast_slice(&records));
+            let records = self.records(staged);
+            let bytes = bytemuck::cast_slice(&records);
+            pool.write_at(
+                queue,
+                u64::from(self.posed + staged.range.palette) * JOINT_BYTES,
+                bytes,
+            );
             if staged.fresh {
-                fresh.push(staged);
+                pool.write_at(
+                    queue,
+                    u64::from(other + staged.range.palette) * JOINT_BYTES,
+                    bytes,
+                );
             }
         }
-        for staged in fresh {
-            let matrices = &self.matrices[staged.first..staged.first + staged.joints];
-            let records = matrices.iter().map(joint_record).collect::<Vec<_>>();
-            let offset = u64::from(staged.range.palette) * JOINT_BYTES;
-            back.write_at(queue, offset, bytemuck::cast_slice(&records));
-        }
+    }
+
+    fn records(&self, staged: &Staged) -> Vec<crate::abi::JointRecord> {
+        self.matrices[staged.first..staged.first + staged.joints]
+            .iter()
+            .map(joint_record)
+            .collect()
     }
 
     pub(crate) fn finish(&mut self) {
-        self.front = 1 - self.front;
+        self.at = 1 - self.at;
     }
 
     pub(crate) fn binding(&self) -> BufferBinding<'_> {
-        self.joints
+        let pool = self
+            .pool
             .as_ref()
-            .expect("a committed frame holds the palette it poses")[self.front]
-            .binding(0, self.bytes)
+            .expect("a committed frame holds the palette it poses");
+        pool.binding(0, self.bytes())
     }
 
-    pub(crate) fn previous(&self) -> BufferBinding<'_> {
-        self.joints
-            .as_ref()
-            .expect("a committed frame holds the palette it poses")[1 - self.front]
-            .binding(0, self.bytes)
+    pub(crate) fn base(&self) -> u32 {
+        self.at as u32 * self.joints
     }
 
-    pub(crate) fn posed(&self) -> BufferBinding<'_> {
-        self.joints
-            .as_ref()
-            .expect("a committed frame holds the palette it poses")[self.posed]
-            .binding(0, self.bytes)
+    pub(crate) fn previous_base(&self) -> u32 {
+        (1 - self.at) as u32 * self.joints
+    }
+
+    pub(crate) fn posed(&self) -> u32 {
+        self.posed
+    }
+
+    fn bytes(&self) -> u64 {
+        HALVES * u64::from(self.joints) * JOINT_BYTES
     }
 
     fn claim(&mut self, entity: Entity, joints: u32) {
@@ -186,34 +195,30 @@ impl Palettes {
         })
     }
 
-    fn fit(&mut self, device: &Device, queue: &Queue, bytes: u64) {
-        if self.joints.is_none() {
-            let grown = bytes.next_multiple_of(POOL_BYTES).max(POOL_BYTES);
-            self.joints = Some([
-                GpuBuffer::new(device, "belfry joints", grown, storage()),
-                GpuBuffer::new(device, "belfry previous joints", grown, storage()),
-            ]);
-            self.bytes = grown;
+    fn fit(&mut self, device: &Device, queue: &Queue, joints: u32) {
+        let wanted = HALVES * u64::from(joints) * JOINT_BYTES;
+        let held = HALVES * u64::from(self.joints) * JOINT_BYTES;
+        if self.pool.is_some() && wanted <= held {
             return;
         }
-        if bytes <= self.bytes {
-            return;
-        }
-        let grown = bytes
-            .next_multiple_of(POOL_BYTES)
-            .max(self.bytes.saturating_mul(2));
-        let joints = self
-            .joints
-            .as_mut()
-            .expect("a grown palette pool replaces the buffers it holds");
-        for held in joints.iter_mut() {
-            let grown_buffer = GpuBuffer::new(device, "belfry joints", grown, storage());
+        let grown = wanted
+            .next_multiple_of(POOL_BYTES * HALVES)
+            .max(held.saturating_mul(2))
+            .max(POOL_BYTES * HALVES);
+        let pool = GpuBuffer::new(device, "belfry joints", grown, storage());
+        if let Some(previous) = &self.pool {
             let mut submission = Submission::new(device, "belfry palette growth");
-            submission.copy(held, 0, &grown_buffer, 0, self.bytes);
+            let span = u64::from(self.joints) * JOINT_BYTES;
+            let half = grown / HALVES;
+            for at in 0..HALVES {
+                if span > 0 {
+                    submission.copy(previous, at * span, &pool, at * half, span);
+                }
+            }
             submission.submit(queue);
-            *held = grown_buffer;
         }
-        self.bytes = grown;
+        self.joints = (grown / HALVES / JOINT_BYTES) as u32;
+        self.pool = Some(pool);
     }
 }
 

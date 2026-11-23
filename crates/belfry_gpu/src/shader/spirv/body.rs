@@ -958,7 +958,7 @@ fn binary_opcode(op: BinaryOp, scalar: Scalar) -> u16 {
         (BinaryOp::Equal, Scalar::F32 | Scalar::F16) => F_ORD_EQUAL,
         (BinaryOp::Equal, Scalar::Bool) => LOGICAL_EQUAL,
         (BinaryOp::Equal, _) => I_EQUAL,
-        (BinaryOp::NotEqual, Scalar::F32 | Scalar::F16) => F_ORD_NOT_EQUAL,
+        (BinaryOp::NotEqual, Scalar::F32 | Scalar::F16) => F_UNORD_NOT_EQUAL,
         (BinaryOp::NotEqual, Scalar::Bool) => LOGICAL_NOT_EQUAL,
         (BinaryOp::NotEqual, _) => I_NOT_EQUAL,
         (BinaryOp::Less, Scalar::F32 | Scalar::F16) => F_ORD_LESS_THAN,

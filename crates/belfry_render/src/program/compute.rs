@@ -134,7 +134,7 @@ mod cull {
                     drawn[at].tint = instance.tint;
                     drawn[at].material = instance.material;
                     drawn[at].pick = index;
-                    drawn[at].palette = instance.palette;
+                    drawn[at].palette = instance.palette + held.palette_base;
                     drawn[at].joints = instance.joints;
                 }
             }

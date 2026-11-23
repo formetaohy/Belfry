@@ -1005,7 +1005,13 @@ impl<'m> Writer<'m> {
                 None => self.out.line("return;"),
             },
             Instruction::Block(body) => self.block(body),
-            Instruction::Discard => self.out.line("discard_fragment();"),
+            Instruction::Discard => {
+                self.out.line("discard_fragment();");
+                match self.stage {
+                    Some(_) => self.out.line("return d_out;"),
+                    None => self.out.line("return;"),
+                }
+            }
             Instruction::MatrixFill { value, result } => {
                 let target = self.target(*result);
                 let value = self.value(*value);

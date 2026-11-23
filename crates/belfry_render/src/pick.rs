@@ -105,6 +105,7 @@ impl Picker {
             frame.entities.len() as u32,
             Vec3::ZERO,
             Vec3::Z,
+            0,
         );
         self.view.write(queue, bytemuck::bytes_of(&record));
         let groups = frame

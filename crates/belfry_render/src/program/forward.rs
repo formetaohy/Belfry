@@ -1317,9 +1317,6 @@ mod motion {
     #[binding]
     fn materials(materials: Read<MaterialRecord>) {}
 
-    #[binding]
-    fn previous(previous: Read<JointRecord>) {}
-
     fn deformed(col0: Fvec4, col1: Fvec4, col2: Fvec4, col3: Fvec4, point: Fvec4) -> Fvec4 {
         col0 * point.x + col1 * point.y + col2 * point.z + col3 * point.w
     }
@@ -1358,10 +1355,11 @@ mod motion {
                 + deformed(fourth.col0, fourth.col1, fourth.col2, fourth.col3, rest)
                     * skin.weights.w;
             local = fvec4(place.x, place.y, place.z, 1.0);
-            let was_first = previous[held.palette + skin.joints.x];
-            let was_second = previous[held.palette + skin.joints.y];
-            let was_third = previous[held.palette + skin.joints.z];
-            let was_fourth = previous[held.palette + skin.joints.w];
+            let before = held.palette - camera.base + camera.previous;
+            let was_first = palette[before + skin.joints.x];
+            let was_second = palette[before + skin.joints.y];
+            let was_third = palette[before + skin.joints.z];
+            let was_fourth = palette[before + skin.joints.w];
             let was = deformed(
                 was_first.col0,
                 was_first.col1,

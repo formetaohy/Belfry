@@ -72,8 +72,8 @@ record!(ViewRecord, VIEW, "View" {
     tan_vertical: f32 => F32,
     aspect: f32 => F32,
     vertical: f32 => F32,
-    hzb_width: f32 => F32,
-    hzb_height: f32 => F32,
+    palette_base: u32 => U32,
+    pad0: u32 => U32,
     cluster_x: u32 => U32,
     cluster_y: u32 => U32,
     point_lights: u32 => U32,
@@ -220,9 +220,9 @@ record!(MotionRecord, MOTION, "Motion" {
     eye: Fvec4 => F32x4,
     forward: Fvec4 => F32x4,
     vertical: f32 => F32,
+    base: u32 => U32,
+    previous: u32 => U32,
     pad0: u32 => U32,
-    pad1: u32 => U32,
-    pad2: u32 => U32,
 });
 
 record!(TemporalRecord, TEMPORAL, "Temporal" {

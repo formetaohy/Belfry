@@ -23,8 +23,6 @@ pub(crate) struct Screen {
     pub(crate) height: u32,
     pub(crate) vertical: f32,
     pub(crate) hzb_levels: u32,
-    pub(crate) hzb_width: f32,
-    pub(crate) hzb_height: f32,
     pub(crate) cluster_x: u32,
     pub(crate) cluster_y: u32,
     pub(crate) point_lights: u32,
@@ -101,7 +99,13 @@ pub(crate) fn ambient_of(world: &World) -> Ambient<'_> {
     ambient
 }
 
-pub(crate) fn record_of_view(view: &View, instances: u32, eye: Vec3, forward: Vec3) -> ViewRecord {
+pub(crate) fn record_of_view(
+    view: &View,
+    instances: u32,
+    eye: Vec3,
+    forward: Vec3,
+    palette_base: u32,
+) -> ViewRecord {
     ViewRecord {
         clip0: vector(view.clip.col(0)),
         clip1: vector(view.clip.col(1)),
@@ -124,8 +128,8 @@ pub(crate) fn record_of_view(view: &View, instances: u32, eye: Vec3, forward: Ve
         tan_vertical: 0.0,
         aspect: 0.0,
         vertical: 0.0,
-        hzb_width: 0.0,
-        hzb_height: 0.0,
+        palette_base,
+        pad0: 0,
         cluster_x: 0,
         cluster_y: 0,
         point_lights: 0,
@@ -139,6 +143,7 @@ pub(crate) fn record_of_main_view(
     instances: u32,
     eye: Vec3,
     forward: Vec3,
+    palette_base: u32,
     camera: Camera,
     screen: Screen,
 ) -> ViewRecord {
@@ -151,14 +156,12 @@ pub(crate) fn record_of_main_view(
         tan_vertical: (camera.vertical_fov * 0.5).tan(),
         aspect: screen.width as f32 / screen.height as f32,
         vertical: screen.vertical,
-        hzb_width: screen.hzb_width,
-        hzb_height: screen.hzb_height,
         cluster_x: screen.cluster_x,
         cluster_y: screen.cluster_y,
         point_lights: screen.point_lights,
         cluster_offset: screen.cluster_offset,
         highlight: screen.highlight,
-        ..record_of_view(view, instances, eye, forward)
+        ..record_of_view(view, instances, eye, forward, palette_base)
     }
 }
 

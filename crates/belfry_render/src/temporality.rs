@@ -165,21 +165,21 @@ impl Temporality {
         &screen.motion[screen.motion_at]
     }
 
-    pub(crate) fn begin(&self, queue: &Queue, pose: Pose, vertical: f32) {
-        let previous = self.previous.unwrap_or(pose);
+    pub(crate) fn begin(&self, queue: &Queue, pose: Pose, vertical: f32, base: u32, previous: u32) {
+        let held = self.previous.unwrap_or(pose);
         self.motion_record.write(
             queue,
             bytemuck::bytes_of(&MotionRecord {
-                previous0: column(previous.clip, 0),
-                previous1: column(previous.clip, 1),
-                previous2: column(previous.clip, 2),
-                previous3: column(previous.clip, 3),
+                previous0: column(held.clip, 0),
+                previous1: column(held.clip, 1),
+                previous2: column(held.clip, 2),
+                previous3: column(held.clip, 3),
                 eye: direction(pose.eye),
                 forward: direction(pose.forward),
                 vertical,
+                base,
+                previous,
                 pad0: 0,
-                pad1: 0,
-                pad2: 0,
             }),
         );
     }

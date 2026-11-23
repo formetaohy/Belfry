@@ -59,6 +59,7 @@ impl Renderer {
             rotation,
             intensity,
             shadow,
+            palette_base: self.palettes.posed(),
             batches: inputs.batches,
             arguments: inputs.arguments,
             instances: inputs.instances,
@@ -133,7 +134,7 @@ impl Renderer {
             .material_records
             .buffer()
             .binding(0, self.materials.records().len() as u64 * MATERIAL_BYTES);
-        let palette = self.palettes.posed();
+        let palette = self.palettes.binding();
         if inputs.opaque > 0 {
             let mut cast_groups = Vec::with_capacity(inputs.opaque as usize);
             for (index, batch) in inputs
