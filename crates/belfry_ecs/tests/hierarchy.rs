@@ -1,4 +1,4 @@
-use belfry_ecs::{LocalTransform, Parent, World, propagate};
+use belfry_ecs::{LocalTransform, World, children, propagate, set_parent};
 use belfry_math::{Quat, Transform, Vec3};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -29,7 +29,7 @@ fn allocations() -> usize {
 }
 
 #[test]
-fn a_parent_carries_its_child_into_world_space() {
+fn a_parent_carries_its_child_into_world_space_and_takes_it_down() {
     let mut world = World::new();
     let root = world.spawn();
     world.insert(
@@ -45,13 +45,18 @@ fn a_parent_carries_its_child_into_world_space() {
         child,
         LocalTransform(Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))),
     );
-    world.insert(child, Parent(root));
+    set_parent(&mut world, child, root);
+    assert_eq!(children(&world, root), [child]);
     propagate(&mut world);
     let held = *world
         .get::<Transform>(child)
         .expect("the child holds its world transform");
     assert_eq!(held.translation, Vec3::new(3.0, 2.0, 3.0));
     assert_eq!(held.scale, Vec3::splat(2.0));
+    assert!(world.despawn(root), "a live root goes down");
+    assert!(!world.is_alive(child), "a child goes down with its parent");
+    propagate(&mut world);
+    assert_eq!(world.len(), 0);
 }
 
 #[test]
@@ -70,7 +75,7 @@ fn a_settled_hierarchy_propagates_without_touching_the_heap() {
                 0.0,
             ))),
         );
-        world.insert(child, Parent(deepest));
+        set_parent(&mut world, child, deepest);
         deepest = child;
     }
     propagate(&mut world);

@@ -6,7 +6,7 @@ use crate::node::{Node, SceneNode};
 use crate::registry::Assets;
 use crate::scene::Scene;
 use crate::schema::{Reach, ReferenceKind};
-use belfry_ecs::{Entity, Parent, World, propagate};
+use belfry_ecs::{Entity, World, clear_parent, propagate, set_parent};
 use belfry_render::SceneDamage;
 use std::collections::{HashMap, HashSet};
 
@@ -71,6 +71,23 @@ impl SceneSync {
         }
         let retained = ids.values().copied().collect::<HashSet<_>>();
         let mut damaged = Vec::new();
+        for (index, node) in scene.nodes().iter().enumerate() {
+            let (entity, _) = entities[index];
+            match node.parent.as_deref() {
+                Some(parent) => {
+                    let parent = *ids.get(parent).unwrap_or_else(|| {
+                        panic!(
+                            "the scene parents {} to {parent}, which it does not hold",
+                            node.id,
+                        )
+                    });
+                    set_parent(world, entity, parent);
+                }
+                None => {
+                    clear_parent(world, entity);
+                }
+            }
+        }
         for entity in self.ids.values() {
             if !retained.contains(entity) {
                 world.despawn(*entity);
@@ -102,14 +119,7 @@ impl SceneSync {
         let mut sky = visual.sky;
         for (index, node) in scene.nodes().iter().enumerate() {
             let (entity, reused) = entities[index];
-            let previous = applied.and_then(|applied| {
-                let at = applied
-                    .nodes()
-                    .get(index)
-                    .filter(|held| held.id == node.id)
-                    .map_or_else(|| applied.node_index(&node.id), |_| Some(index))?;
-                applied.nodes().get(at)
-            });
+            let previous = previous(applied, index, node);
             let shared = previous.is_some_and(|held| std::ptr::eq(held, node));
             let mut touched = !reused;
             if let Some(previous) = previous
@@ -123,20 +133,6 @@ impl SceneSync {
                     id: node.id.clone(),
                 },
             );
-            match node.parent.as_deref() {
-                Some(parent) => {
-                    let parent = *ids.get(parent).unwrap_or_else(|| {
-                        panic!(
-                            "the scene parents {} to {parent}, which it does not hold",
-                            node.id,
-                        )
-                    });
-                    world.insert(entity, Parent(parent));
-                }
-                None => {
-                    world.remove::<Parent>(entity);
-                }
-            }
             for registration in scene.registry().registrations() {
                 let authored = node.component_by_name(registration.spec.name);
                 let replaced = authored.is_some_and(|component| component.stale(changed))
@@ -196,10 +192,10 @@ impl SceneSync {
                 let Some(parent) = self.ids.get(parent).copied() else {
                     return;
                 };
-                world.insert(entity, Parent(parent));
+                set_parent(world, entity, parent);
             }
             None => {
-                world.remove::<Parent>(entity);
+                clear_parent(world, entity);
             }
         }
         for registration in scene.registry().registrations() {
@@ -232,6 +228,16 @@ impl SceneSync {
         belfry_animation::settle(world);
         propagate(world);
     }
+}
+
+fn previous<'a>(applied: Option<&'a Scene>, index: usize, node: &Node) -> Option<&'a Node> {
+    let applied = applied?;
+    let at = applied
+        .nodes()
+        .get(index)
+        .filter(|held| held.id == node.id)
+        .map_or_else(|| applied.node_index(&node.id), |_| Some(index))?;
+    applied.nodes().get(at)
 }
 
 fn publish(world: &mut World, nodes: Vec<Entity>, sky: bool) {

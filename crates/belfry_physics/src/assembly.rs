@@ -1,14 +1,13 @@
 use crate::RigidBody;
-use crate::body::{Body, ParentFrame};
+use crate::body::{Body, LastPose, Velocity};
 use crate::collider::Collider;
 use crate::joint::Joint;
 use crate::part::Part;
-use belfry_ecs::{Entity, LocalTransform, Parent, World, world_transform};
+use belfry_ecs::{Entity, LocalTransform, Parent, World, children, world_transform};
 use belfry_math::Transform;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-pub(crate) fn gather(world: &World) -> Vec<Body> {
-    let child_index = child_index(world);
+pub(crate) fn gather(world: &World, delta: f32) -> Vec<Body> {
     let mut roots = BTreeSet::new();
     for (entity, _) in world.iter::<RigidBody>() {
         assert!(
@@ -40,7 +39,7 @@ pub(crate) fn gather(world: &World) -> Vec<Body> {
     }
     roots
         .into_iter()
-        .map(|entity| assemble(world, &child_index, entity))
+        .map(|entity| assemble(world, entity, delta))
         .collect()
 }
 
@@ -104,11 +103,11 @@ pub(crate) fn wake(bodies: &mut [Body], pairs: &[(usize, usize)]) {
     }
 }
 
-fn assemble(world: &World, child_index: &BTreeMap<Entity, Vec<Entity>>, root: Entity) -> Body {
+fn assemble(world: &World, root: Entity, delta: f32) -> Body {
     let rigid = world.get::<RigidBody>(root).copied();
     let frame = world
         .get::<Parent>(root)
-        .map(|parent| world_transform(world, parent.0));
+        .map(|parent| world_transform(world, parent.entity()));
     let transform = match frame {
         Some(frame) => frame.compose(local_transform(world, root)),
         None => local_transform(world, root),
@@ -143,7 +142,7 @@ fn assemble(world: &World, child_index: &BTreeMap<Entity, Vec<Entity>>, root: En
                 transform.scale,
             ));
         }
-        for child in child_index.get(&entity).into_iter().flatten() {
+        for child in children(world, entity) {
             let local = world.get::<LocalTransform>(*child).unwrap_or_else(|| {
                 panic!(
                     "the node of entity {} holds no local transform",
@@ -153,13 +152,21 @@ fn assemble(world: &World, child_index: &BTreeMap<Entity, Vec<Entity>>, root: En
             stack.push((*child, relative.compose(local.0), depth + 1));
         }
     }
-    let mut body = Body::new(root, rigid, parts, transform, frame);
-    body.parent_moved = frame.is_some_and(|frame| {
-        world
-            .get::<ParentFrame>(root)
-            .is_none_or(|held| held.0 != frame)
-    });
-    body
+    Body::new(
+        root,
+        rigid,
+        parts,
+        transform,
+        frame,
+        carried(world, root, transform, delta),
+    )
+}
+
+fn carried(world: &World, entity: Entity, transform: Transform, delta: f32) -> Velocity {
+    match world.get::<LastPose>(entity) {
+        Some(previous) => Velocity::of(previous.0, transform, delta),
+        None => Velocity::STILL,
+    }
 }
 
 fn local_transform(world: &World, entity: Entity) -> Transform {
@@ -182,7 +189,7 @@ fn local_transform(world: &World, entity: Entity) -> Transform {
 }
 
 fn under_body(world: &World, entity: Entity) -> bool {
-    let mut ancestor = world.get::<Parent>(entity).map(|parent| parent.0);
+    let mut ancestor = world.get::<Parent>(entity).map(Parent::entity);
     let mut steps = 0;
     while let Some(held) = ancestor {
         steps += 1;
@@ -197,18 +204,7 @@ fn under_body(world: &World, entity: Entity) -> bool {
         {
             return true;
         }
-        ancestor = world.get::<Parent>(held).map(|parent| parent.0);
+        ancestor = world.get::<Parent>(held).map(Parent::entity);
     }
     false
-}
-
-fn child_index(world: &World) -> BTreeMap<Entity, Vec<Entity>> {
-    let mut children = BTreeMap::<Entity, Vec<Entity>>::new();
-    for (entity, parent) in world.iter::<Parent>() {
-        children.entry(parent.0).or_default().push(entity);
-    }
-    for held in children.values_mut() {
-        held.sort_by_key(|entity| (entity.index(), entity.generation()));
-    }
-    children
 }

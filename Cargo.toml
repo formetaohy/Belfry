@@ -14,6 +14,7 @@ ash = "0.38"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 flate2 = "1"
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
 half = "2"
 jpeg-decoder = "0.3"
 lewton = "0.10"

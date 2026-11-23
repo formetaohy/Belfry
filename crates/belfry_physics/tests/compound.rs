@@ -1,4 +1,4 @@
-use belfry_ecs::{Entity, LocalTransform, Parent, World};
+use belfry_ecs::{Entity, LocalTransform, World, set_parent};
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_physics::{
     BodyKind, Collider, CollisionFilter, Gravity, RigidBody, Shape, raycast, step,
@@ -19,7 +19,7 @@ fn node(world: &mut World, parent: Option<Entity>, translation: Vec3) -> Entity 
     world.insert(entity, LocalTransform(transform));
     world.insert(entity, transform);
     if let Some(parent) = parent {
-        world.insert(entity, Parent(parent));
+        set_parent(world, entity, parent);
     }
     entity
 }

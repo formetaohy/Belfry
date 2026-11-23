@@ -1,4 +1,4 @@
-use belfry_ecs::{LocalTransform, Parent, World};
+use belfry_ecs::{LocalTransform, Parent, World, children};
 use belfry_math::{Transform, Vec3};
 use belfry_render::SceneDamage;
 use belfry_scene::{Assets, Changed, ReferenceKind, Scene, SceneSync, SkinData, Target};
@@ -99,16 +99,43 @@ fn a_scene_sync_follows_the_structure_it_edits() {
     );
     let c = sync.id("c").expect("the sync spawns the added node");
     assert!(world.is_alive(c));
-    assert_eq!(world.get::<Parent>(b), Some(&Parent(c)));
+    assert_eq!(world.get::<Parent>(b).map(Parent::entity), Some(c));
+
+    edit(&mut scene, |edit| {
+        edit.insert_node(belfry_scene::Node::new("d"))
+    })
+    .expect("the scene adds the node d");
+    let c_at = scene.node_index("c").expect("the scene holds c");
+    let d_at = scene.node_index("d").expect("the scene holds d");
+    edit(&mut scene, |edit| {
+        edit.reparent(d_at, Some(c_at));
+        Ok(())
+    })
+    .expect("the scene hangs the node d under c");
+    sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
+    let d = sync.id("d").expect("the sync spawns the node d");
+    assert_eq!(world.get::<Parent>(d).map(Parent::entity), Some(c));
 
     edit(&mut scene, |edit| {
         edit.remove(&Target::Node(String::from("b")))
     })
     .expect("the scene removes the node b");
+    let a_at = scene.node_index("a").expect("the scene holds a");
+    let d_at = scene.node_index("d").expect("the scene holds d");
+    edit(&mut scene, |edit| {
+        edit.reparent(d_at, Some(a_at));
+        edit.remove(&Target::Node(String::from("c")))
+    })
+    .expect("the scene moves d out of c before it removes c");
     sync.sync(&scene, &mut world, &NoAssets, &Changed::none());
     assert!(!world.is_alive(b));
+    assert!(
+        world.is_alive(d),
+        "a node that moved out outlives its parent"
+    );
+    assert_eq!(world.get::<Parent>(d).map(Parent::entity), Some(a));
+    assert_eq!(children(&world, a), [d]);
 
-    let a_at = scene.node_index("a").expect("the scene holds a");
     edit(&mut scene, |edit| {
         edit.set_transform(a_at, Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)))
     })

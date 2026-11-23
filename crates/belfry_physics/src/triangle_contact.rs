@@ -1,4 +1,4 @@
-use crate::contact::Manifold;
+use crate::contact::{Manifold, RawPoint};
 use crate::segment::closest_segment_segment;
 use belfry_math::Vec3;
 
@@ -7,6 +7,7 @@ const DISTANCE_EPSILON: f32 = 1e-6;
 const PARALLEL_AXIS: f32 = 1e-10;
 const EDGE_DISTANCE: f32 = 1e-8;
 const EDGE_BIAS: f32 = 1.05;
+const SUPPORT: u32 = 1 << 8;
 
 pub(crate) struct Contact {
     pub manifold: Manifold,
@@ -25,7 +26,7 @@ pub(crate) fn sphere(triangle: [Vec3; 3], center: Vec3, radius: f32, gap: f32) -
     let separation = distance - radius;
     let point = closest + normal * (separation * 0.5);
     Some(Contact {
-        manifold: Manifold::new(normal, vec![(point, separation)], gap)?,
+        manifold: Manifold::new(normal, vec![(point, separation, 0)], gap)?,
         edges: edge_mask(closest, triangle),
     })
 }
@@ -50,13 +51,13 @@ pub(crate) fn capsule(
         return None;
     }
     let axis = end - start;
-    let mut points = vec![(held + normal * (separation * 0.5), separation)];
+    let mut points = vec![(held + normal * (separation * 0.5), separation, 0u64)];
     if axis.length_squared() > DISTANCE_EPSILON {
-        for endpoint in [start, end] {
+        for (endpoint, id) in [(start, 1u64), (end, 2u64)] {
             let closest = closest_point(endpoint, triangle);
             let held = (endpoint - closest).length() - radius;
             if held <= gap {
-                points.push((endpoint - normal * (radius + held * 0.5), held));
+                points.push((endpoint - normal * (radius + held * 0.5), held, id));
             }
         }
     }
@@ -291,25 +292,38 @@ fn box_face(
     triangle: [Vec3; 3],
     axis: usize,
     gap: f32,
-) -> Vec<(Vec3, f32)> {
+) -> Vec<RawPoint> {
     let face_normal = -best.normal;
     let extents = half_extents.to_array();
-    let mut polygon = triangle.to_vec();
+    let mut polygon = triangle
+        .iter()
+        .enumerate()
+        .map(|(at, &vertex)| (vertex, 1u32 << at))
+        .collect::<Vec<_>>();
+    let mut plane = 0;
     for other in 0..3 {
         if other == axis {
             continue;
         }
         let bound = extents[other];
-        polygon = clip(polygon, AXES[other], bound);
-        polygon = clip(polygon, -AXES[other], bound);
+        polygon = clip(polygon, AXES[other], bound, 1 << (4 + plane));
+        plane += 1;
+        polygon = clip(polygon, -AXES[other], bound, 1 << (4 + plane));
+        plane += 1;
         if polygon.is_empty() {
             break;
         }
     }
     let mut points = polygon
         .into_iter()
-        .map(|point| (point, point.dot(face_normal) - extents[axis]))
-        .filter(|(_, separation)| *separation <= gap)
+        .map(|(point, feature)| {
+            (
+                point,
+                point.dot(face_normal) - extents[axis],
+                u64::from(feature),
+            )
+        })
+        .filter(|(_, separation, _)| *separation <= gap)
         .collect::<Vec<_>>();
     if points.is_empty() {
         let deepest = triangle.into_iter().min_by(|left, right| {
@@ -319,19 +333,14 @@ fn box_face(
         if let Some(point) = deepest {
             let separation = point.dot(face_normal) - extents[axis];
             if separation <= gap {
-                points.push((point, separation));
+                points.push((point, separation, u64::from(SUPPORT)));
             }
         }
     }
     points
 }
 
-fn triangle_face(
-    best: &Axis,
-    half_extents: Vec3,
-    triangle: [Vec3; 3],
-    gap: f32,
-) -> Vec<(Vec3, f32)> {
+fn triangle_face(best: &Axis, half_extents: Vec3, triangle: [Vec3; 3], gap: f32) -> Vec<RawPoint> {
     let normal = best.normal;
     let mut axis = 0;
     let mut largest: f32 = 0.0;
@@ -356,14 +365,16 @@ fn triangle_face(
     let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
     let mut polygon = corners
         .iter()
-        .map(|(first_side, second_side)| {
+        .enumerate()
+        .map(|(at, (first_side, second_side))| {
             let mut local = [0.0; 3];
             local[axis] = sign * extents[axis];
             local[first] = first_side * extents[first];
             local[second] = second_side * extents[second];
-            Vec3::from_array(local)
+            (Vec3::from_array(local), 1u32 << at)
         })
         .collect::<Vec<_>>();
+    let mut plane = 0;
     for edge in 0..3 {
         let start = triangle[edge];
         let end = triangle[(edge + 1) % 3];
@@ -375,21 +386,22 @@ fn triangle_face(
         if side.dot(other - start) > 0.0 {
             side = -side;
         }
-        polygon = clip(polygon, side, side.dot(start));
+        polygon = clip(polygon, side, side.dot(start), 1 << (4 + plane));
+        plane += 1;
         if polygon.is_empty() {
             break;
         }
     }
     let mut points = polygon
         .into_iter()
-        .map(|point| (point, (point - triangle[0]).dot(normal)))
-        .filter(|(_, separation)| *separation <= gap)
+        .map(|(point, feature)| (point, (point - triangle[0]).dot(normal), u64::from(feature)))
+        .filter(|(_, separation, _)| *separation <= gap)
         .collect::<Vec<_>>();
     if points.is_empty() {
         let support = support(half_extents, -normal);
         let separation = (support - triangle[0]).dot(normal);
         if separation <= gap {
-            points.push((support, separation));
+            points.push((support, separation, u64::from(SUPPORT)));
         }
     }
     points
@@ -401,7 +413,7 @@ fn edge_contact(
     triangle: [Vec3; 3],
     edge: usize,
     axis: usize,
-) -> Vec<(Vec3, f32)> {
+) -> Vec<RawPoint> {
     let (start, end) = (triangle[edge], triangle[(edge + 1) % 3]);
     let normal = best.normal;
     let extents = half_extents.to_array();
@@ -424,7 +436,7 @@ fn edge_contact(
             Vec3::from_array(corner) + reach,
         ),
     );
-    vec![((held + other) * 0.5, -best.overlap)]
+    vec![((held + other) * 0.5, -best.overlap, 0)]
 }
 
 fn support(half_extents: Vec3, direction: Vec3) -> Vec3 {
@@ -439,19 +451,22 @@ fn support(half_extents: Vec3, direction: Vec3) -> Vec3 {
     Vec3::from_array(local)
 }
 
-fn clip(polygon: Vec<Vec3>, normal: Vec3, offset: f32) -> Vec<Vec3> {
+fn clip(polygon: Vec<(Vec3, u32)>, normal: Vec3, offset: f32, plane: u32) -> Vec<(Vec3, u32)> {
     let mut clipped = Vec::with_capacity(polygon.len() + 1);
     for index in 0..polygon.len() {
-        let current = polygon[index];
-        let next = polygon[(index + 1) % polygon.len()];
+        let (current, current_feature) = polygon[index];
+        let (next, next_feature) = polygon[(index + 1) % polygon.len()];
         let current_value = current.dot(normal) - offset;
         let next_value = next.dot(normal) - offset;
         if current_value <= 0.0 {
-            clipped.push(current);
+            clipped.push((current, current_feature));
         }
         if (current_value <= 0.0) != (next_value <= 0.0) {
             let phase = current_value / (current_value - next_value);
-            clipped.push(current.lerp(next, phase));
+            clipped.push((
+                current.lerp(next, phase),
+                current_feature | next_feature | plane,
+            ));
         }
     }
     clipped

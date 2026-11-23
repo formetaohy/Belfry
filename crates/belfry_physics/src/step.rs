@@ -1,10 +1,10 @@
 use crate::Gravity;
 use crate::assembly;
-use crate::body::ParentFrame;
 use crate::broadphase;
 use crate::cache::{self, ContactCache};
 use crate::contact;
 use crate::event::Collisions;
+use crate::island;
 use crate::joint_solver;
 use crate::solver;
 use belfry_ecs::World;
@@ -23,7 +23,7 @@ pub fn step(world: &mut World, delta: f32) {
     let mut collisions = world.remove_resource::<Collisions>().unwrap_or_default();
     let mut held_cache = world.remove_resource::<ContactCache>().unwrap_or_default();
     let joints = assembly::joints(world);
-    let mut bodies = assembly::gather(world);
+    let mut bodies = assembly::gather(world, delta);
     if bodies.is_empty() {
         collisions.settle(BTreeMap::new());
         world.insert_resource(collisions);
@@ -31,7 +31,7 @@ pub fn step(world: &mut World, delta: f32) {
         return;
     }
     for body in &mut bodies {
-        if body.parent_moved {
+        if body.carried.moves() {
             body.wake();
         }
     }
@@ -194,7 +194,7 @@ pub fn step(world: &mut World, delta: f32) {
             bodies[contact.second].entity,
             contact.first_part,
             contact.second_part,
-            contact.feature,
+            0,
         )
     });
     let active = joints
@@ -226,11 +226,12 @@ pub fn step(world: &mut World, delta: f32) {
         solver::solve_position(&mut bodies, &contacts);
         joint_solver::settle(&mut bodies, &mut constraints);
     }
-    for (body, driven) in bodies.iter_mut().zip(&driven) {
-        if !driven {
-            body.update_sleep(delta);
-        }
-    }
+    let mut links = contacts
+        .iter()
+        .map(|contact| (contact.first, contact.second))
+        .collect::<Vec<_>>();
+    links.extend_from_slice(&pairs);
+    island::settle(&mut bodies, &links, &driven, delta);
     let mut cache = ContactCache::default();
     for contact in &contacts {
         cache.insert(
@@ -238,13 +239,7 @@ pub fn step(world: &mut World, delta: f32) {
             bodies[contact.second].entity,
             contact.first_part,
             contact.second_part,
-            contact.feature,
             solver::cache(contact),
-        );
-        cache.insert_rebound(
-            bodies[contact.first].entity,
-            bodies[contact.second].entity,
-            contact.rebound,
         );
     }
     world.insert_resource(cache);
@@ -256,13 +251,5 @@ pub fn step(world: &mut World, delta: f32) {
     }
     for body in &bodies {
         body.sync(world);
-        match body.frame {
-            Some(frame) => {
-                world.insert(body.entity, ParentFrame(frame));
-            }
-            None => {
-                world.remove::<ParentFrame>(body.entity);
-            }
-        }
     }
 }

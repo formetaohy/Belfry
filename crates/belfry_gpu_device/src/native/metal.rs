@@ -139,6 +139,7 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
+    depths: Mutex<HashMap<(u32, u32), Weak<Depth>>>,
     pub(crate) gate: Arc<Gate>,
     window: Option<WindowHandle>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
@@ -178,7 +179,11 @@ pub(crate) struct Texture {
 
 struct Target {
     view: Retained<ProtocolObject<dyn MTLTexture>>,
-    depth: Retained<ProtocolObject<dyn MTLTexture>>,
+    depth: Arc<Depth>,
+}
+
+struct Depth {
+    raw: Retained<ProtocolObject<dyn MTLTexture>>,
 }
 
 pub(crate) struct Surface {
@@ -353,6 +358,9 @@ fn native_sampler(native: &crate::NativeSampler) -> &Sampler {
 unsafe impl Send for TextureResource {}
 unsafe impl Sync for TextureResource {}
 
+unsafe impl Send for Depth {}
+unsafe impl Sync for Depth {}
+
 pub(crate) struct GraphicsPipeline {
     resource: Arc<GraphicsPipelineResource>,
 }
@@ -509,6 +517,7 @@ fn assemble(
         raw,
         queue,
         state: Mutex::new(QueueState::default()),
+        depths: Mutex::new(HashMap::new()),
         gate: Gate::of(advance),
         window,
         _keep_alive: keep_alive,
@@ -839,7 +848,7 @@ impl Device {
                     };
                     Target {
                         view,
-                        depth: self.depth_texture(extent.0, extent.1),
+                        depth: self.depth(extent.0, extent.1),
                     }
                 })
                 .collect()
@@ -855,6 +864,20 @@ impl Device {
                 format,
             }),
         }
+    }
+
+    fn depth(self: &Arc<Self>, width: u32, height: u32) -> Arc<Depth> {
+        let key = (width, height);
+        let mut depths = self.depths.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(held) = depths.get(&key).and_then(Weak::upgrade) {
+            return held;
+        }
+        depths.retain(|_, held| held.strong_count() > 0);
+        let depth = Arc::new(Depth {
+            raw: self.depth_texture(width, height),
+        });
+        depths.insert(key, Arc::downgrade(&depth));
+        depth
     }
 
     fn depth_texture(&self, width: u32, height: u32) -> Retained<ProtocolObject<dyn MTLTexture>> {
@@ -1233,7 +1256,7 @@ impl Device {
                         alpha: f64::from(clear[3]),
                     });
                     let depth = pass.depthAttachment();
-                    depth.setTexture(Some(&target.depth));
+                    depth.setTexture(Some(&target.depth.raw));
                     depth.setLoadAction(MTLLoadAction::Clear);
                     depth.setStoreAction(MTLStoreAction::DontCare);
                     depth.setClearDepth(1.0);
@@ -1797,7 +1820,7 @@ impl Surface {
         let native = if let Some(held) = self.cache.get(&key) {
             held.clone()
         } else {
-            let depth = self.device.depth_texture(width, height);
+            let depth = self.device.depth(width, height);
             let native = Texture {
                 resource: Arc::new(TextureResource {
                     raw: texture.clone(),

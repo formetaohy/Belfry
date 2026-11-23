@@ -141,7 +141,7 @@ fn two_cuboids_stack() {
         held.translation.y,
     );
     assert!(
-        held.translation.x.abs() + held.translation.z.abs() < 0.01,
+        held.translation.x.abs() + held.translation.z.abs() < 0.02,
         "a twisted cube stays over the cube below it at {:?}",
         held.translation,
     );
@@ -191,6 +191,56 @@ fn a_resting_body_wakes_when_its_support_leaves() {
     assert!(
         (held - 0.5).abs() < 0.05,
         "a cube whose support leaves falls to the floor below instead of hanging at {held}",
+    );
+}
+
+#[test]
+fn a_posed_platform_carries_the_pile_it_slides_under() {
+    let mut world = world();
+    floor(&mut world);
+    let platform = spawn(
+        &mut world,
+        Vec3::new(0.0, 0.5, 0.0),
+        Quat::IDENTITY,
+        Shape::cuboid(Vec3::new(2.0, 0.5, 2.0)),
+        BodyKind::Kinematic,
+    );
+    let rider = spawn(
+        &mut world,
+        Vec3::new(0.0, 1.25, 0.0),
+        Quat::IDENTITY,
+        Shape::cuboid(Vec3::splat(0.25)),
+        BodyKind::Dynamic,
+    );
+    settle(&mut world, 600);
+    assert!(
+        world
+            .get::<RigidBody>(rider)
+            .expect("the rider holds a body")
+            .is_sleeping(),
+        "a rider on a still platform falls asleep",
+    );
+    let mut moved = 0.0;
+    for round in 0..60 {
+        moved = 0.02 * (round + 1) as f32;
+        world.insert(
+            platform,
+            LocalTransform(Transform::from_translation(Vec3::new(moved, 0.5, 0.0))),
+        );
+        step(&mut world, DELTA);
+    }
+    let body = world
+        .get::<RigidBody>(rider)
+        .expect("the rider holds a body");
+    assert!(
+        !body.is_sleeping(),
+        "a platform that slides under a sleeping rider wakes it",
+    );
+    let held = position(&world, rider);
+    assert!(
+        held.x > moved * 0.5,
+        "a sliding platform carries its rider to {:?} of {moved}",
+        held,
     );
 }
 

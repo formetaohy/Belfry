@@ -191,10 +191,10 @@ impl SceneComponent for Transform {
         value: &Value,
     ) -> Result<(), String> {
         let parent = match world.get::<Parent>(entity) {
-            Some(parent) => *world.get::<Transform>(parent.0).ok_or_else(|| {
+            Some(parent) => *world.get::<Transform>(parent.entity()).ok_or_else(|| {
                 format!(
                     "the runtime node {} holds no parent transform",
-                    parent.0.index()
+                    parent.entity().index()
                 )
             })?,
             None => Transform::IDENTITY,

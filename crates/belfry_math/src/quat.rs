@@ -128,6 +128,20 @@ impl Quat {
         }
     }
 
+    pub fn to_axis_angle(self) -> (Vec3, f32) {
+        let held = if self.w < 0.0 {
+            Self::new(-self.x, -self.y, -self.z, -self.w)
+        } else {
+            self
+        };
+        let axis = Vec3::new(held.x, held.y, held.z);
+        let sine = axis.length();
+        if sine <= 1e-9 {
+            return (Vec3::Y, 0.0);
+        }
+        (axis / sine, 2.0 * sine.atan2(held.w))
+    }
+
     pub fn rotate_vec3(self, vector: Vec3) -> Vec3 {
         let axis = Vec3::new(self.x, self.y, self.z);
         let doubled = axis.cross(vector) * 2.0;

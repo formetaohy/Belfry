@@ -69,7 +69,9 @@ fn mesh_convex(mesh: &Solid, convex: &Solid, flip: bool, gap: f32, contacts: &mu
         }
         let normal = mesh.rotation.rotate_vec3(manifold.normal);
         manifold.normal = if flip { -normal } else { normal };
-        manifold.feature = index;
+        for point in &mut manifold.points {
+            point.feature |= (index as u64) << 32;
+        }
         contacts.push(manifold);
     }
 }

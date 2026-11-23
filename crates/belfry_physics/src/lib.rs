@@ -9,6 +9,7 @@ mod debug;
 mod event;
 mod filter;
 mod gravity;
+mod island;
 mod joint;
 mod joint_solver;
 mod mesh;

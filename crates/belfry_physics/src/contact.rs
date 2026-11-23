@@ -14,23 +14,25 @@ const MANIFOLD_CANDIDATES: usize = 8;
 pub(crate) struct Manifold {
     pub normal: Vec3,
     pub points: Vec<ManifoldPoint>,
-    pub feature: u32,
 }
 
 pub(crate) struct ManifoldPoint {
     pub position: Vec3,
     pub separation: f32,
+    pub feature: u64,
 }
 
+pub(crate) type RawPoint = (Vec3, f32, u64);
+
 impl Manifold {
-    pub(crate) fn new(normal: Vec3, mut points: Vec<(Vec3, f32)>, gap: f32) -> Option<Self> {
+    pub(crate) fn new(normal: Vec3, mut points: Vec<RawPoint>, gap: f32) -> Option<Self> {
         let length = normal.length();
         assert!(
             length > DISTANCE_EPSILON,
             "a contact manifold carries no direction",
         );
         let normal = normal / length;
-        points.retain(|(_, separation)| *separation <= gap);
+        points.retain(|(_, separation, _)| *separation <= gap);
         points.sort_by(|left, right| lexicographic(left.0, right.0));
         points.dedup_by(|left, right| (left.0 - right.0).length_squared() < 1e-8);
         if points.is_empty() {
@@ -45,17 +47,17 @@ impl Manifold {
             normal,
             points: points
                 .into_iter()
-                .map(|(position, separation)| ManifoldPoint {
+                .map(|(position, separation, feature)| ManifoldPoint {
                     position,
                     separation,
+                    feature,
                 })
                 .collect(),
-            feature: 0,
         })
     }
 }
 
-fn spread(points: &[(Vec3, f32)], normal: Vec3) -> Vec<(Vec3, f32)> {
+fn spread(points: &[RawPoint], normal: Vec3) -> Vec<RawPoint> {
     assert!(
         points.len() <= MANIFOLD_CANDIDATES,
         "a contact manifold of {} points outruns the {MANIFOLD_CANDIDATES} a spread selects from",
@@ -63,7 +65,7 @@ fn spread(points: &[(Vec3, f32)], normal: Vec3) -> Vec<(Vec3, f32)> {
     );
     let basis = plane_basis(normal);
     let mut flat = [Vec2::ZERO; MANIFOLD_CANDIDATES];
-    for (at, (position, _)) in points.iter().enumerate() {
+    for (at, (position, _, _)) in points.iter().enumerate() {
         flat[at] = Vec2::new(basis.0.dot(*position), basis.1.dot(*position));
     }
     let mut chosen = [0usize; MANIFOLD_POINTS];
@@ -360,7 +362,7 @@ fn sphere_sphere(
     };
     let separation = distance - first_radius - second_radius;
     let point = first.position + normal * (first_radius + separation * 0.5);
-    Manifold::new(normal, vec![(point, separation)], gap)
+    Manifold::new(normal, vec![(point, separation, 0)], gap)
 }
 
 fn sphere_box(
@@ -394,7 +396,7 @@ fn sphere_box(
     };
     Manifold::new(
         if flip { -normal } else { normal },
-        vec![(point, separation)],
+        vec![(point, separation, 0)],
         gap,
     )
 }
@@ -421,7 +423,7 @@ fn sphere_capsule(
     let point = sphere.position + normal * (radius + separation * 0.5);
     Manifold::new(
         if flip { -normal } else { normal },
-        vec![(point, separation)],
+        vec![(point, separation, 0)],
         gap,
     )
 }
@@ -453,28 +455,37 @@ fn capsule_capsule(first: &Solid, second: &Solid, gap: f32) -> Option<Manifold> 
         return None;
     }
     let point = first_point + normal * (first_radius + separation * 0.5);
-    let mut points = vec![(point, separation)];
+    let mut points = vec![(point, separation, 0u64)];
     let parallel = first_direction.length_squared() > 1e-12
         && second_direction.length_squared() > 1e-12
         && first_direction.dot(second_direction).abs()
             > first_direction.length() * second_direction.length() * 0.999;
     if parallel {
+        let axis = first_direction.normalize();
+        let side = |point: Vec3| u64::from((point - first_segment.0).dot(axis) > 0.0) + 1;
         for endpoint in [first_segment.0, first_segment.1] {
             let closest = closest_point_segment(endpoint, second_segment);
             let held = (closest - endpoint).length() - first_radius - second_radius;
             if held <= gap {
-                points.push((endpoint + normal * (first_radius + held * 0.5), held));
+                points.push((
+                    endpoint + normal * (first_radius + held * 0.5),
+                    held,
+                    side(endpoint),
+                ));
             }
         }
         for endpoint in [second_segment.0, second_segment.1] {
             let closest = closest_point_segment(endpoint, first_segment);
             let held = (closest - endpoint).length() - first_radius - second_radius;
             if held <= gap {
-                points.push((closest + normal * (first_radius + held * 0.5), held));
+                points.push((
+                    closest + normal * (first_radius + held * 0.5),
+                    held,
+                    side(endpoint),
+                ));
             }
         }
         if points.len() > 2 {
-            let axis = first_direction.normalize();
             points.sort_by(|left, right| {
                 (left.0 - first_segment.0)
                     .dot(axis)
@@ -526,8 +537,8 @@ fn capsule_box(
     if separation > gap {
         return None;
     }
-    let mut points = vec![(point, separation)];
-    for endpoint in [segment.0, segment.1] {
+    let mut points = vec![(point, separation, 0u64)];
+    for (endpoint, id) in [(segment.0, 1u64), (segment.1, 2u64)] {
         let local = cuboid.to_local(endpoint);
         let closest = Vec3::new(
             local.x.clamp(-half_extents.x, half_extents.x),
@@ -540,7 +551,7 @@ fn capsule_box(
             (closest - local).length() - radius
         };
         if held <= gap {
-            points.push((endpoint + normal * (radius + held * 0.5), held));
+            points.push((endpoint + normal * (radius + held * 0.5), held, id));
         }
     }
     let direction = segment.1 - segment.0;

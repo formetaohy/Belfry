@@ -20,6 +20,8 @@ use crate::surface::WindowHandle;
 use crate::texture::TextureFormat;
 use ash::{Entry, Instance, vk};
 use belfry_gpu::shader::{ComputeProgram, GraphicsProgram, MAX_BINDING_BYTES};
+use gpu_allocator::MemoryLocation;
+use memory::{Block, Memory};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -28,6 +30,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
+
+mod memory;
 
 struct InstanceOwner {
     entry: Entry,
@@ -38,7 +42,6 @@ struct InstanceOwner {
 
 struct Facts {
     limits: Limits,
-    memory: vk::PhysicalDeviceMemoryProperties,
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
@@ -67,6 +70,7 @@ struct Parts {
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
     physical: vk::PhysicalDevice,
+    memory: Arc<Memory>,
     advance: Option<HostAdvance>,
     keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
@@ -78,7 +82,7 @@ struct Core {
     raw: ash::Device,
     instance: Option<InstanceOwner>,
     physical: vk::PhysicalDevice,
-    memory: vk::PhysicalDeviceMemoryProperties,
+    memory: Option<Arc<Memory>>,
 }
 
 impl std::ops::Deref for Core {
@@ -89,8 +93,17 @@ impl std::ops::Deref for Core {
     }
 }
 
+impl Core {
+    fn memory(&self) -> &Arc<Memory> {
+        self.memory
+            .as_ref()
+            .expect("a Vulkan device holds the pool its resources suballocate from")
+    }
+}
+
 impl Drop for Core {
     fn drop(&mut self) {
+        self.memory.take();
         if self.instance.is_some() {
             unsafe { self.raw.destroy_device(None) };
         }
@@ -598,7 +611,12 @@ impl Frame {
             first_dispatch: false,
             command,
             fence,
-            staging: device.allocate(STAGING_BYTES, vk::BufferUsageFlags::TRANSFER_SRC, true),
+            staging: device.allocate(
+                "belfry upload",
+                STAGING_BYTES,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                true,
+            ),
             cursor: 0,
             resources: Vec::new(),
         }
@@ -626,26 +644,21 @@ impl Frame {
             self.cursor = aligned + size;
             (self.staging.clone(), aligned)
         } else {
-            let staging = device.allocate(size, vk::BufferUsageFlags::TRANSFER_SRC, true);
+            let staging = device.allocate(
+                "belfry upload",
+                size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                true,
+            );
             self.resources.push(staging.clone());
             (staging, 0)
         };
-        let mapped = unsafe {
-            device.core.map_memory(
-                staging.memory,
-                0,
-                offset + size,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .unwrap_or_else(|error| panic!("mapping a Vulkan upload: {error:?}"));
+        let mapped = staging
+            .block
+            .mapped()
+            .unwrap_or_else(|| panic!("a Vulkan upload buffer holds no host memory"));
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                mapped.cast::<u8>().add(offset as usize),
-                bytes.len(),
-            );
-            device.core.unmap_memory(staging.memory);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.add(offset as usize), bytes.len());
         }
         (staging.handle, offset)
     }
@@ -676,6 +689,7 @@ pub(crate) struct Device {
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
     render_passes: Mutex<Vec<(TextureFormat, vk::RenderPass)>>,
+    depths: Mutex<HashMap<(u32, u32), Weak<Depth>>>,
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
@@ -698,9 +712,9 @@ struct Lent {
 static LENT: LazyLock<Mutex<Vec<Lent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) struct BufferResource {
-    core: Arc<Core>,
+    block: Block,
     handle: vk::Buffer,
-    memory: vk::DeviceMemory,
+    core: Arc<Core>,
 }
 
 #[derive(Clone)]
@@ -852,19 +866,43 @@ struct GroupResource {
 struct Target {
     view: vk::ImageView,
     owned_view: bool,
-    depth: vk::Image,
-    depth_memory: vk::DeviceMemory,
-    depth_view: vk::ImageView,
+    _depth: Arc<Depth>,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
     width: u32,
     height: u32,
 }
 
-struct TextureResource {
-    core: Arc<Core>,
+struct Depth {
+    _block: Block,
     image: vk::Image,
-    memory: Option<vk::DeviceMemory>,
+    view: vk::ImageView,
+    core: Arc<Core>,
+}
+
+#[derive(Clone, Copy)]
+struct Image<'a> {
+    name: &'a str,
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    aspect: vk::ImageAspectFlags,
+}
+
+impl Drop for Depth {
+    fn drop(&mut self) {
+        unsafe {
+            self.core.destroy_image_view(self.view, None);
+            self.core.destroy_image(self.image, None);
+        }
+    }
+}
+
+struct TextureResource {
+    block: Option<Block>,
+    image: vk::Image,
     view: vk::ImageView,
     targets: Vec<Target>,
     width: u32,
@@ -874,6 +912,7 @@ struct TextureResource {
     usages: TextureUsages,
     present: bool,
     layout: Mutex<vk::ImageLayout>,
+    core: Arc<Core>,
 }
 
 #[derive(Clone)]
@@ -1102,7 +1141,6 @@ impl Facts {
         limits.max_sampler_anisotropy = max_sampler_anisotropy;
         Ok(Self {
             limits,
-            memory,
             ticks,
             bits,
             uuid: properties.pipeline_cache_uuid,
@@ -1119,13 +1157,14 @@ impl Facts {
             raw: parts.raw,
             instance,
             physical: parts.physical,
-            memory: self.memory,
+            memory: Some(parts.memory),
         });
         Arc::new(Device {
             queue: parts.queue,
             pool: parts.pool,
             stamps: parts.stamps,
             render_passes: Mutex::new(Vec::new()),
+            depths: Mutex::new(HashMap::new()),
             ticks: self.ticks,
             bits: self.bits,
             uuid: self.uuid,
@@ -1234,12 +1273,14 @@ fn create(
             return Err(reason);
         }
     };
+    let memory = Memory::new(instance, &raw, physical);
     Ok(Parts {
         raw,
         queue,
         pool,
         stamps,
         physical,
+        memory,
         advance: None,
         keep_alive: None,
     })
@@ -1468,12 +1509,14 @@ impl Device {
         };
         let (pool, stamps) =
             pools(host.device, host.queue_family).map_err(DeviceFailure::reason)?;
+        let memory = Memory::new(host.instance, host.device, host.physical);
         let parts = Parts {
             raw: host.device.clone(),
             queue: host.queue,
             pool,
             stamps,
             physical: host.physical,
+            memory,
             advance,
             keep_alive,
         };
@@ -1554,7 +1597,13 @@ impl Device {
         });
     }
 
-    fn allocate(&self, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Arc<BufferResource> {
+    fn allocate(
+        &self,
+        name: &str,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        host: bool,
+    ) -> Arc<BufferResource> {
         let info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage)
@@ -1562,53 +1611,30 @@ impl Device {
         let handle = unsafe { self.core.create_buffer(&info, None) }
             .unwrap_or_else(|error| panic!("allocating {size} Vulkan buffer bytes: {error:?}"));
         let requirements = unsafe { self.core.get_buffer_memory_requirements(handle) };
-        let wanted = if host {
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        let location = if host {
+            MemoryLocation::CpuToGpu
         } else {
-            vk::MemoryPropertyFlags::DEVICE_LOCAL
+            MemoryLocation::GpuOnly
         };
-        let memory_type = (0..self.core.memory.memory_type_count)
-            .find(|index| {
-                (requirements.memory_type_bits & (1 << index)) != 0
-                    && self.core.memory.memory_types[*index as usize]
-                        .property_flags
-                        .contains(wanted)
-            })
-            .or_else(|| {
-                (!host)
-                    .then(|| {
-                        (0..self.core.memory.memory_type_count)
-                            .find(|index| (requirements.memory_type_bits & (1 << index)) != 0)
-                    })
-                    .flatten()
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "a Vulkan buffer has no suitable {} memory",
-                    if host { "coherent host" } else { "device" }
-                )
-            });
-        let memory = unsafe {
-            self.core.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(memory_type),
-                None,
-            )
+        let block = self
+            .core
+            .memory()
+            .allocate(name, requirements, location, true);
+        unsafe {
+            self.core
+                .bind_buffer_memory(handle, block.memory(), block.offset())
         }
-        .unwrap_or_else(|error| panic!("allocating Vulkan device memory: {error:?}"));
-        unsafe { self.core.bind_buffer_memory(handle, memory, 0) }
-            .unwrap_or_else(|error| panic!("binding Vulkan device memory: {error:?}"));
+        .unwrap_or_else(|error| panic!("binding Vulkan device memory: {error:?}"));
         Arc::new(BufferResource {
+            block,
             core: self.core.clone(),
             handle,
-            memory,
         })
     }
 
     pub(crate) fn create_buffer(
         self: &Arc<Self>,
-        _label: &str,
+        label: &str,
         size: u64,
         usage: BufferUsages,
     ) -> Buffer {
@@ -1627,6 +1653,7 @@ impl Device {
         }
         Buffer {
             resource: self.allocate(
+                label,
                 size,
                 flags,
                 usage.contains(BufferUsages::MAP_READ) || usage.contains(BufferUsages::MAP_WRITE),
@@ -1889,7 +1916,7 @@ impl Device {
 
     pub(crate) fn create_texture(
         self: &Arc<Self>,
-        _label: &str,
+        label: &str,
         width: u32,
         height: u32,
         mip_levels: u32,
@@ -1910,14 +1937,15 @@ impl Device {
         if usages.contains(TextureUsages::RENDER_ATTACHMENT) {
             flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
         }
-        let (image, memory, view) = self.attachment(
+        let (image, block, view) = self.attachment(Image {
+            name: label,
             width,
             height,
             mip_levels,
-            declared,
-            flags,
-            vk::ImageAspectFlags::COLOR,
-        );
+            format: declared,
+            usage: flags,
+            aspect: vk::ImageAspectFlags::COLOR,
+        });
         let targets = if usages.contains(TextureUsages::RENDER_ATTACHMENT) {
             (0..mip_levels)
                 .map(|level| {
@@ -1947,20 +1975,13 @@ impl Device {
                                 })
                         }
                     };
-                    let (depth, depth_memory, depth_view) = self.attachment(
-                        extent.0,
-                        extent.1,
-                        1,
-                        DEPTH_FORMAT,
-                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                        vk::ImageAspectFlags::DEPTH,
-                    );
+                    let depth = self.depth(extent.0, extent.1);
                     let pass = self.render_pass(format);
                     let framebuffer = unsafe {
                         self.core.create_framebuffer(
                             &vk::FramebufferCreateInfo::default()
                                 .render_pass(pass)
-                                .attachments(&[level_view, depth_view])
+                                .attachments(&[level_view, depth.view])
                                 .width(extent.0)
                                 .height(extent.1)
                                 .layers(1),
@@ -1971,9 +1992,7 @@ impl Device {
                     Target {
                         view: level_view,
                         owned_view: !shared,
-                        depth,
-                        depth_memory,
-                        depth_view,
+                        _depth: depth,
                         render_pass: pass,
                         framebuffer,
                         width: extent.0,
@@ -1986,9 +2005,9 @@ impl Device {
         };
         Texture {
             resource: Arc::new(TextureResource {
+                block: Some(block),
                 core: self.core.clone(),
                 image,
-                memory: Some(memory),
                 view,
                 targets,
                 width,
@@ -2000,6 +2019,32 @@ impl Device {
                 layout: Mutex::new(vk::ImageLayout::UNDEFINED),
             }),
         }
+    }
+
+    fn depth(self: &Arc<Self>, width: u32, height: u32) -> Arc<Depth> {
+        let key = (width, height);
+        let mut depths = self.depths.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(held) = depths.get(&key).and_then(Weak::upgrade) {
+            return held;
+        }
+        depths.retain(|_, held| held.strong_count() > 0);
+        let (image, block, view) = self.attachment(Image {
+            name: "belfry depth",
+            width,
+            height,
+            mip_levels: 1,
+            format: DEPTH_FORMAT,
+            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            aspect: vk::ImageAspectFlags::DEPTH,
+        });
+        let depth = Arc::new(Depth {
+            _block: block,
+            core: self.core.clone(),
+            image,
+            view,
+        });
+        depths.insert(key, Arc::downgrade(&depth));
+        depth
     }
 
     pub(crate) fn has_surface(&self) -> bool {
@@ -2042,7 +2087,7 @@ impl Device {
     }
 
     fn build_swapchain(
-        &self,
+        self: &Arc<Self>,
         loader: &ash::khr::swapchain::Device,
         surface: vk::SurfaceKHR,
         width: u32,
@@ -2148,7 +2193,7 @@ impl Device {
     }
 
     fn swapchain_texture(
-        &self,
+        self: &Arc<Self>,
         image: vk::Image,
         width: u32,
         height: u32,
@@ -2173,19 +2218,12 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("creating a Vulkan swapchain view: {error:?}"));
-        let (depth, depth_memory, depth_view) = self.attachment(
-            width,
-            height,
-            1,
-            DEPTH_FORMAT,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            vk::ImageAspectFlags::DEPTH,
-        );
+        let depth = self.depth(width, height);
         let framebuffer = unsafe {
             self.core.create_framebuffer(
                 &vk::FramebufferCreateInfo::default()
                     .render_pass(pass)
-                    .attachments(&[view, depth_view])
+                    .attachments(&[view, depth.view])
                     .width(width)
                     .height(height)
                     .layers(1),
@@ -2195,16 +2233,14 @@ impl Device {
         .unwrap_or_else(|error| panic!("creating a Vulkan swapchain framebuffer: {error:?}"));
         Texture {
             resource: Arc::new(TextureResource {
+                block: None,
                 core: self.core.clone(),
                 image,
-                memory: None,
                 view,
                 targets: vec![Target {
                     view,
                     owned_view: false,
-                    depth,
-                    depth_memory,
-                    depth_view,
+                    _depth: depth,
                     render_pass: pass,
                     framebuffer,
                     width,
@@ -2234,15 +2270,16 @@ impl Device {
         }
     }
 
-    fn attachment(
-        &self,
-        width: u32,
-        height: u32,
-        mip_levels: u32,
-        format: vk::Format,
-        usage: vk::ImageUsageFlags,
-        aspect: vk::ImageAspectFlags,
-    ) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
+    fn attachment(&self, image: Image<'_>) -> (vk::Image, Block, vk::ImageView) {
+        let Image {
+            name,
+            width,
+            height,
+            mip_levels,
+            format,
+            usage,
+            aspect,
+        } = image;
         let extent = vk::Extent3D {
             width,
             height,
@@ -2268,25 +2305,15 @@ impl Device {
             panic!("allocating a Vulkan attachment of {width} by {height}: {error:?}")
         });
         let requirements = unsafe { self.core.get_image_memory_requirements(image) };
-        let memory_type = (0..self.core.memory.memory_type_count)
-            .find(|index| {
-                (requirements.memory_type_bits & (1 << index)) != 0
-                    && self.core.memory.memory_types[*index as usize]
-                        .property_flags
-                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            })
-            .unwrap_or_else(|| panic!("a Vulkan attachment has no device local memory"));
-        let memory = unsafe {
-            self.core.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(memory_type),
-                None,
-            )
+        let block = self
+            .core
+            .memory()
+            .allocate(name, requirements, MemoryLocation::GpuOnly, false);
+        unsafe {
+            self.core
+                .bind_image_memory(image, block.memory(), block.offset())
         }
-        .unwrap_or_else(|error| panic!("allocating Vulkan attachment memory: {error:?}"));
-        unsafe { self.core.bind_image_memory(image, memory, 0) }
-            .unwrap_or_else(|error| panic!("binding Vulkan attachment memory: {error:?}"));
+        .unwrap_or_else(|error| panic!("binding Vulkan attachment memory: {error:?}"));
         let range = vk::ImageSubresourceRange::default()
             .aspect_mask(aspect)
             .base_mip_level(0)
@@ -2304,7 +2331,7 @@ impl Device {
             )
         }
         .unwrap_or_else(|error| panic!("creating a Vulkan attachment view: {error:?}"));
-        (image, memory, view)
+        (image, block, view)
     }
 
     pub(crate) fn create_graphics_pipeline(
@@ -3230,57 +3257,32 @@ impl Device {
     }
 
     pub(crate) fn write_host(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) {
-        let mapped = unsafe {
-            self.core.map_memory(
-                buffer.resource.memory,
-                0,
-                vk::WHOLE_SIZE,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .unwrap_or_else(|error| panic!("mapping a Vulkan mirror: {error:?}"));
+        let mapped = buffer
+            .resource
+            .block
+            .mapped()
+            .unwrap_or_else(|| panic!("a Vulkan mirror holds no host memory"));
         unsafe {
-            ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                mapped.cast::<u8>().add(offset as usize),
-                bytes.len(),
-            );
-            self.core.unmap_memory(buffer.resource.memory);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.add(offset as usize), bytes.len());
         }
     }
 
     pub(crate) fn read_host(&self, buffer: &Buffer, offset: u64, bytes: u64) -> Vec<u8> {
-        let mapped = unsafe {
-            self.core.map_memory(
-                buffer.resource.memory,
-                0,
-                vk::WHOLE_SIZE,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .unwrap_or_else(|error| panic!("mapping a Vulkan mirror: {error:?}"));
-        let result = unsafe {
-            std::slice::from_raw_parts(mapped.cast::<u8>().add(offset as usize), bytes as usize)
-                .to_vec()
-        };
-        unsafe { self.core.unmap_memory(buffer.resource.memory) };
-        result
+        let mapped = buffer
+            .resource
+            .block
+            .mapped()
+            .unwrap_or_else(|| panic!("a Vulkan mirror holds no host memory"));
+        unsafe { std::slice::from_raw_parts(mapped.add(offset as usize), bytes as usize).to_vec() }
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
-        let mapped = unsafe {
-            self.core.map_memory(
-                buffer.resource.memory,
-                0,
-                bytes,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .unwrap_or_else(|error| panic!("mapping a Vulkan readback: {error:?}"));
-        let result =
-            unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), bytes as usize) }.to_vec();
-        unsafe { self.core.unmap_memory(buffer.resource.memory) };
-        result
+        let mapped = buffer
+            .resource
+            .block
+            .mapped()
+            .unwrap_or_else(|| panic!("a Vulkan readback holds no host memory"));
+        unsafe { std::slice::from_raw_parts(mapped, bytes as usize) }.to_vec()
     }
 
     pub(crate) fn assert_alive(&self) {
@@ -3386,17 +3388,13 @@ impl Drop for TextureResource {
         unsafe {
             for target in &self.targets {
                 self.core.destroy_framebuffer(target.framebuffer, None);
-                self.core.destroy_image_view(target.depth_view, None);
-                self.core.destroy_image(target.depth, None);
-                self.core.free_memory(target.depth_memory, None);
                 if target.owned_view {
                     self.core.destroy_image_view(target.view, None);
                 }
             }
             self.core.destroy_image_view(self.view, None);
-            if let Some(memory) = self.memory {
+            if self.block.is_some() {
                 self.core.destroy_image(self.image, None);
-                self.core.free_memory(memory, None);
             }
         }
     }
@@ -3536,10 +3534,7 @@ impl Drop for GroupResource {
 
 impl Drop for BufferResource {
     fn drop(&mut self) {
-        unsafe {
-            self.core.destroy_buffer(self.handle, None);
-            self.core.free_memory(self.memory, None);
-        }
+        unsafe { self.core.destroy_buffer(self.handle, None) };
     }
 }
 

@@ -8,22 +8,20 @@ pub(crate) const POSITION_ITERATIONS: usize = 3;
 pub(crate) const LINEAR_SLOP: f32 = 0.005;
 pub(crate) const MAX_CORRECTION: f32 = 0.2;
 const RESTITUTION_VELOCITY: f32 = 1.0;
-const CACHE_DISTANCE: f32 = 0.05;
 
 pub(crate) struct Contact {
     pub first: usize,
     pub second: usize,
     pub first_part: usize,
     pub second_part: usize,
-    pub feature: u32,
     pub normal: Vec3,
     pub friction: f32,
     pub restitution: f32,
     pub points: Vec<ContactPoint>,
-    pub rebound: f32,
 }
 
 pub(crate) struct ContactPoint {
+    feature: u64,
     local_first: Vec3,
     local_second: Vec3,
     normal_local_first: Vec3,
@@ -35,6 +33,8 @@ pub(crate) struct ContactPoint {
     tangent_impulse: [f32; 2],
     active: bool,
     target: f32,
+    carried: f32,
+    rebound: f32,
 }
 
 pub(crate) fn contact(
@@ -50,13 +50,6 @@ pub(crate) fn contact(
     let other = &bodies[second];
     let held_collider = &held.parts[first_part].collider;
     let other_collider = &other.parts[second_part].collider;
-    let mut cached = cache.take(
-        held.entity,
-        other.entity,
-        first_part,
-        second_part,
-        manifold.feature,
-    );
     let friction = (held_collider.friction() * other_collider.friction()).sqrt();
     let restitution = held_collider
         .restitution()
@@ -75,12 +68,20 @@ pub(crate) fn contact(
                 .rotation
                 .inverse()
                 .rotate_vec3(point.position - other.position);
-            let impulses = take_match(&mut cached, local_first);
-            let (normal_impulse, tangent_impulse) = match impulses {
-                Some(held) => (held.normal, held.tangent),
-                None => (0.0, [0.0; 2]),
+            let cached = cache.take(
+                held.entity,
+                other.entity,
+                first_part,
+                second_part,
+                point.feature,
+            );
+            let (normal_impulse, tangent_impulse, carried) = match cached {
+                Some(held) => (held.normal, held.tangent, held.rebound),
+                None => (0.0, [0.0; 2], 0.0),
             };
+
             ContactPoint {
+                feature: point.feature,
                 local_first,
                 local_second,
                 normal_local_first,
@@ -92,6 +93,8 @@ pub(crate) fn contact(
                 tangent_impulse,
                 active: true,
                 target: 0.0,
+                carried,
+                rebound: 0.0,
             }
         })
         .collect();
@@ -100,12 +103,10 @@ pub(crate) fn contact(
         second,
         first_part,
         second_part,
-        feature: manifold.feature,
         normal: manifold.normal,
         friction,
         restitution,
         points,
-        rebound: cache.rebound(held.entity, other.entity),
     }
 }
 
@@ -114,8 +115,6 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
         let first = &bodies[contact.first];
         let second = &bodies[contact.second];
         let normal = contact.normal;
-        let carried = contact.rebound;
-        contact.rebound = 0.0;
         for point in &mut contact.points {
             let offset_first = first.rotation.rotate_vec3(point.local_first);
             let offset_second = second.rotation.rotate_vec3(point.local_second);
@@ -137,11 +136,13 @@ pub(crate) fn prepare(bodies: &[Body], contacts: &mut [Contact], delta: f32) {
             } else {
                 0.0
             };
+            let carried = point.carried;
+            point.rebound = 0.0;
             if point.separation > LINEAR_SLOP {
                 if -velocity * delta > point.separation {
                     point.active = true;
                     point.target = -point.separation / delta;
-                    contact.rebound = contact.rebound.max(rebound);
+                    point.rebound = rebound;
                 } else {
                     point.active = false;
                     point.target = 0.0;
@@ -253,21 +254,19 @@ pub(crate) fn solve_position(bodies: &mut [Body], contacts: &[Contact]) {
     }
 }
 
-pub(crate) fn cache(contact: &Contact) -> Vec<CachedPoint> {
-    contact
-        .points
-        .iter()
-        .filter(|point| {
-            point.normal_impulse > 0.0
-                || point.tangent_impulse[0] != 0.0
-                || point.tangent_impulse[1] != 0.0
-        })
-        .map(|point| CachedPoint {
-            local: point.local_first,
+pub(crate) fn cache(contact: &Contact) -> impl Iterator<Item = (u64, CachedPoint)> + '_ {
+    contact.points.iter().filter_map(|point| {
+        let held = CachedPoint {
             normal: point.normal_impulse,
             tangent: point.tangent_impulse,
-        })
-        .collect()
+            rebound: point.rebound,
+        };
+        (held.normal > 0.0
+            || held.tangent[0] != 0.0
+            || held.tangent[1] != 0.0
+            || held.rebound > 0.0)
+            .then_some((point.feature, held))
+    })
 }
 
 pub(crate) fn effective_mass(
@@ -304,27 +303,6 @@ fn tangent_basis(normal: Vec3) -> [Vec3; 2] {
     };
     let first = normal.cross(reference).normalize();
     [first, normal.cross(first)]
-}
-
-fn take_match(points: &mut [Option<CachedPoint>], local: Vec3) -> Option<CachedPoint> {
-    let mut best: Option<(usize, f32)> = None;
-    for (index, held) in points.iter().enumerate() {
-        let Some(held) = held else {
-            continue;
-        };
-        let distance = (held.local - local).length_squared();
-        if distance > CACHE_DISTANCE * CACHE_DISTANCE {
-            continue;
-        }
-        if best.is_none_or(|(_, closest)| distance < closest) {
-            best = Some((index, distance));
-        }
-    }
-    best.map(|(index, _)| {
-        points[index]
-            .take()
-            .expect("a matched contact point waits in its cache")
-    })
 }
 
 fn resting(bodies: &[Body], contact: &Contact) -> bool {

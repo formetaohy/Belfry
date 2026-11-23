@@ -1,11 +1,14 @@
 use crate::Shape;
-use crate::contact::Manifold;
+use crate::contact::{Manifold, RawPoint};
 use crate::segment::closest_segment_segment;
 use crate::solid::Solid;
 use belfry_math::Vec3;
 
 const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 const EDGE_BIAS: f32 = 1.05;
+const FACE_SECOND: u32 = 1 << 9;
+const EDGE: u32 = 1 << 10;
+const SUPPORT: u32 = 1 << 8;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -22,6 +25,14 @@ struct Axis {
     score: f32,
 }
 
+#[derive(Clone, Copy)]
+struct Face<'a> {
+    solid: &'a Solid,
+    half_extents: Vec3,
+    axis: usize,
+    normal: Vec3,
+}
+
 pub(crate) fn box_box(first: &Solid, second: &Solid, gap: f32) -> Option<Manifold> {
     let best = best_axis(first, second)?;
     if -best.overlap > gap {
@@ -31,23 +42,36 @@ pub(crate) fn box_box(first: &Solid, second: &Solid, gap: f32) -> Option<Manifol
     let second_he = half_extents(&second.shape);
     let normal = first.rotation.rotate_vec3(best.normal);
     let points = match best.kind {
-        Kind::FaceFirst(axis) => {
-            face_points(first, first_he, axis, best.normal, second, second_he, gap)
-        }
-        Kind::FaceSecond(axis) => face_points(
+        Kind::FaceFirst(axis) => face_points(
+            Face {
+                solid: first,
+                half_extents: first_he,
+                axis,
+                normal: best.normal,
+            },
             second,
             second_he,
-            axis,
-            second.rotation.inverse().rotate_vec3(-normal),
+            gap,
+            0,
+        ),
+        Kind::FaceSecond(axis) => face_points(
+            Face {
+                solid: second,
+                half_extents: second_he,
+                axis,
+                normal: second.rotation.inverse().rotate_vec3(-normal),
+            },
             first,
             first_he,
             gap,
+            FACE_SECOND,
         ),
         Kind::Edge(first_axis, second_axis) => {
             let first_edge = support_edge(first, first_he, first_axis, best.normal);
             let second_edge = support_edge(second, second_he, second_axis, -normal);
             let (held, other) = closest_segment_segment(first_edge, second_edge);
-            vec![((held + other) * 0.5, -best.overlap)]
+            let feature = u64::from(EDGE + (first_axis * 3 + second_axis) as u32);
+            vec![((held + other) * 0.5, -best.overlap, feature)]
         }
     };
     Manifold::new(normal, points, gap)
@@ -166,15 +190,13 @@ fn half_extents(shape: &Shape) -> Vec3 {
 }
 
 fn face_points(
-    reference: &Solid,
-    reference_half_extents: Vec3,
-    reference_axis: usize,
-    reference_normal: Vec3,
+    reference: Face<'_>,
     incident: &Solid,
     incident_half_extents: Vec3,
     gap: f32,
-) -> Vec<(Vec3, f32)> {
-    let incident_normal = -reference.rotation.rotate_vec3(reference_normal);
+    base: u32,
+) -> Vec<RawPoint> {
+    let incident_normal = -reference.solid.rotation.rotate_vec3(reference.normal);
     let mut incident_axis = 0;
     let mut incident_dot: f32 = 0.0;
     for (axis, &held) in AXES.iter().enumerate() {
@@ -194,61 +216,75 @@ fn face_points(
     let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
     let mut polygon = corners
         .iter()
-        .map(|(first_sign, second_sign)| {
+        .enumerate()
+        .map(|(at, (first_sign, second_sign))| {
             let mut local = [0.0; 3];
             local[incident_axis] = incident_sign * extent[incident_axis];
             local[first_side] = first_sign * extent[first_side];
             local[second_side] = second_sign * extent[second_side];
             let world = incident.position + incident.rotation.rotate_vec3(Vec3::from_array(local));
-            reference
+            let held = reference
+                .solid
                 .rotation
                 .inverse()
-                .rotate_vec3(world - reference.position)
+                .rotate_vec3(world - reference.solid.position);
+            (held, 1u32 << at)
         })
         .collect::<Vec<_>>();
+    let mut plane = 0;
     for axis in 0..3 {
-        if axis == reference_axis {
+        if axis == reference.axis {
             continue;
         }
-        let bound = reference_half_extents.to_array()[axis];
-        polygon = clip(polygon, axis, -bound, true);
-        polygon = clip(polygon, axis, bound, false);
+        let bound = reference.half_extents.to_array()[axis];
+        polygon = clip(polygon, axis, -bound, true, 1 << (4 + plane));
+        plane += 1;
+        polygon = clip(polygon, axis, bound, false, 1 << (4 + plane));
+        plane += 1;
         if polygon.is_empty() {
             break;
         }
     }
     let mut points = polygon
         .into_iter()
-        .map(|point| {
+        .map(|(point, feature)| {
             let separation =
-                reference_normal.dot(point) - reference_half_extents.to_array()[reference_axis];
+                reference.normal.dot(point) - reference.half_extents.to_array()[reference.axis];
             (
-                reference.position + reference.rotation.rotate_vec3(point),
+                reference.solid.position + reference.solid.rotation.rotate_vec3(point),
                 separation,
+                u64::from(base | feature),
             )
         })
-        .filter(|(_, separation)| *separation <= gap)
+        .filter(|(_, separation, _)| *separation <= gap)
         .collect::<Vec<_>>();
     if points.is_empty() {
         let support = support_vertex(incident, incident_half_extents, incident_normal);
         let local = reference
+            .solid
             .rotation
             .inverse()
-            .rotate_vec3(support - reference.position);
+            .rotate_vec3(support - reference.solid.position);
         let separation =
-            reference_normal.dot(local) - reference_half_extents.to_array()[reference_axis];
+            reference.normal.dot(local) - reference.half_extents.to_array()[reference.axis];
         if separation <= gap {
-            points.push((support, separation));
+            points.push((support, separation, u64::from(base | SUPPORT)));
         }
     }
     points
 }
 
-fn clip(polygon: Vec<Vec3>, axis: usize, bound: f32, greater: bool) -> Vec<Vec3> {
+fn clip(
+    polygon: Vec<(Vec3, u32)>,
+    axis: usize,
+    bound: f32,
+    greater: bool,
+    plane: u32,
+) -> Vec<(Vec3, u32)> {
     let mut clipped = Vec::with_capacity(polygon.len() + 1);
     for index in 0..polygon.len() {
-        let current = polygon[index];
-        let next = polygon[(index + 1) % polygon.len()];
+        let (current, current_feature) = polygon[index];
+        let (next, next_feature) = polygon[(index + 1) % polygon.len()];
         let current_value = current.to_array()[axis] - bound;
         let next_value = next.to_array()[axis] - bound;
         let current_inside = if greater {
@@ -262,11 +298,14 @@ fn clip(polygon: Vec<Vec3>, axis: usize, bound: f32, greater: bool) -> Vec<Vec3>
             next_value <= 0.0
         };
         if current_inside {
-            clipped.push(current);
+            clipped.push((current, current_feature));
         }
         if current_inside != next_inside {
             let phase = current_value / (current_value - next_value);
-            clipped.push(current.lerp(next, phase));
+            clipped.push((
+                current.lerp(next, phase),
+                current_feature | next_feature | plane,
+            ));
         }
     }
     clipped

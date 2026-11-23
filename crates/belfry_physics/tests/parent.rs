@@ -1,4 +1,4 @@
-use belfry_ecs::{Entity, LocalTransform, Parent, World};
+use belfry_ecs::{Entity, LocalTransform, World, set_parent};
 use belfry_math::{Quat, Transform, Vec3};
 use belfry_physics::{
     BodyKind, Collider, CollisionFilter, Gravity, RigidBody, Shape, raycast, step,
@@ -7,7 +7,7 @@ use std::f32::consts::FRAC_PI_2;
 
 const DELTA: f32 = 1.0 / 60.0;
 
-fn world(gravity: Vec3) -> World {
+fn empty(gravity: Vec3) -> World {
     let mut world = World::new();
     world.insert_resource(Gravity(gravity));
     world
@@ -17,7 +17,7 @@ fn node(world: &mut World, parent: Option<Entity>, transform: Transform) -> Enti
     let entity = world.spawn();
     world.insert(entity, LocalTransform(transform));
     if let Some(parent) = parent {
-        world.insert(entity, Parent(parent));
+        set_parent(world, entity, parent);
     }
     entity
 }
@@ -56,8 +56,8 @@ fn local(world: &World, entity: Entity) -> Transform {
 }
 
 #[test]
-fn a_movable_body_hangs_under_a_parent_and_keeps_its_local_pose() {
-    let mut world = world(Vec3::new(0.0, -9.81, 0.0));
+fn a_movable_body_follows_the_frame_of_its_parent() {
+    let mut world = empty(Vec3::new(0.0, -9.81, 0.0));
     floor(&mut world);
     let parent = node(
         &mut world,
@@ -114,13 +114,11 @@ fn a_movable_body_hangs_under_a_parent_and_keeps_its_local_pose() {
             .is_sleeping(),
         "a still parent lets its body sleep",
     );
-}
 
-#[test]
-fn a_movable_body_turns_with_its_parent_frame() {
-    let mut world = world(Vec3::ZERO);
+    let mut turning = empty(Vec3::ZERO);
+
     let parent = node(
-        &mut world,
+        &mut turning,
         None,
         Transform::from_scale_rotation_translation(
             Vec3::ONE,
@@ -129,20 +127,20 @@ fn a_movable_body_turns_with_its_parent_frame() {
         ),
     );
     let body = sphere(
-        &mut world,
+        &mut turning,
         Some(parent),
         Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
     );
-    step(&mut world, DELTA);
-    let held = world
+    step(&mut turning, DELTA);
+    let held = turning
         .get::<Transform>(body)
-        .expect("the body holds its world transform");
+        .expect("the body holds its turning transform");
     assert!(
         (held.translation - Vec3::new(0.0, 2.0, -2.0)).length() < 0.02,
         "the body turns into the parent frame at {:?}",
         held.translation,
     );
-    let held = local(&world, body);
+    let held = local(&turning, body);
     assert!(
         (held.translation - Vec3::new(2.0, 0.0, 0.0)).length() < 0.02,
         "the body keeps its local offset {:?}",
@@ -154,7 +152,7 @@ fn a_movable_body_turns_with_its_parent_frame() {
         held.rotation,
     );
     let hit = raycast(
-        &world,
+        &turning,
         Vec3::new(0.0, 2.0, 0.0),
         Vec3::new(0.0, 0.0, -1.0),
         10.0,

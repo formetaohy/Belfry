@@ -1,3 +1,4 @@
+use super::world::children;
 use crate::{Entity, LocalTransform, Parent, World};
 use belfry_math::Transform;
 
@@ -11,9 +12,6 @@ pub(crate) struct Propagation {
     parents: Vec<Option<Entity>>,
     slots: Vec<u32>,
     touched: Vec<u32>,
-    offsets: Vec<u32>,
-    cursor: Vec<u32>,
-    children: Vec<u32>,
     worlds: Vec<Transform>,
     adopted: Vec<bool>,
     stack: Vec<u32>,
@@ -45,7 +43,7 @@ impl Propagation {
             self.entities.push(entity);
             self.locals.push(local.0);
             self.parents
-                .push(world.get::<Parent>(entity).map(|parent| parent.0));
+                .push(world.get::<Parent>(entity).map(Parent::entity));
         }
     }
 
@@ -69,34 +67,13 @@ impl Propagation {
 
     fn order(&mut self, world: &mut World) {
         let count = self.entities.len();
-        self.offsets.clear();
-        self.offsets.resize(count + 1, 0);
-        for (at, parent) in self.parents.iter().enumerate() {
-            if let Some(parent) = self.parent(*parent, at) {
-                self.offsets[parent as usize + 1] += 1;
-            }
-        }
-        for at in 0..count {
-            self.offsets[at + 1] += self.offsets[at];
-        }
-        self.cursor.clear();
-        self.cursor.extend_from_slice(&self.offsets[..count]);
-        self.children.clear();
-        self.children.resize(self.offsets[count] as usize, 0);
-        for (at, parent) in self.parents.iter().enumerate() {
-            if let Some(parent) = self.parent(*parent, at) {
-                self.children[self.cursor[parent as usize] as usize] = at as u32;
-                self.cursor[parent as usize] += 1;
-            }
-        }
         self.worlds.clear();
         self.worlds.resize(count, Transform::IDENTITY);
         self.adopted.clear();
         self.adopted.resize(count, false);
         self.stack.clear();
         for at in 0..count {
-            let parent = self.parents[at];
-            if self.parent(parent, at).is_none() {
+            if self.parent(self.parents[at], at).is_none() {
                 self.stack.push(at as u32);
             }
         }
@@ -109,10 +86,8 @@ impl Propagation {
             };
             self.worlds[at] = world_at;
             self.adopted[at] = true;
-            let start = self.offsets[at] as usize;
-            let end = self.offsets[at + 1] as usize;
-            for child in &self.children[start..end] {
-                self.stack.push(*child);
+            for child in children(world, self.entities[at]) {
+                self.stack.push(self.slot(*child, self.entities[at]));
             }
         }
         if let Some(at) = self.adopted.iter().position(|held| !held) {
@@ -124,6 +99,20 @@ impl Propagation {
         for (at, entity) in self.entities.iter().enumerate() {
             world.insert(*entity, self.worlds[at]);
         }
+    }
+
+    fn slot(&self, child: Entity, parent: Entity) -> u32 {
+        let slot = self
+            .slots
+            .get(child.index() as usize)
+            .copied()
+            .unwrap_or(VACANT);
+        assert!(
+            slot != VACANT && self.entities[slot as usize] == child,
+            "the node below entity {} holds no local transform",
+            parent.index(),
+        );
+        slot
     }
 
     fn parent(&self, parent: Option<Entity>, at: usize) -> Option<u32> {

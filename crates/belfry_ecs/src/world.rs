@@ -1,7 +1,7 @@
 use crate::column::Column;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
-use crate::hierarchy::{LocalTransform, Parent};
+use crate::hierarchy::{LocalTransform, Parent, Tree};
 use crate::resource::Resource;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -32,7 +32,8 @@ pub struct World {
     columns: Vec<Box<dyn ErasedColumn>>,
     index: HashMap<TypeId, usize>,
     resources: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    hierarchy: u64,
+    pub(crate) hierarchy: u64,
+    pub(crate) tree: Tree,
 }
 
 impl World {
@@ -45,13 +46,28 @@ impl World {
     }
 
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        if !self.entities.release(entity) {
+        if !self.entities.is_alive(entity) {
             return false;
         }
-        for column in &mut self.columns {
-            column.remove_entity(entity);
+        let mut held = vec![entity];
+        let mut at = 0;
+        while at < held.len() {
+            let children = self.tree.children(held[at]);
+            held.extend_from_slice(children);
+            at += 1;
         }
-        self.hierarchy = self.hierarchy.wrapping_add(1);
+        let parent = self.get::<Parent>(entity).map(Parent::entity);
+        if let Some(parent) = parent {
+            self.tree.detach(entity, parent);
+        }
+        for dead in &held {
+            self.tree.release(*dead);
+            for column in &mut self.columns {
+                column.remove_entity(*dead);
+            }
+            self.entities.release(*dead);
+            self.hierarchy = self.hierarchy.wrapping_add(1);
+        }
         true
     }
 
@@ -76,13 +92,23 @@ impl World {
             self.entities.is_alive(entity),
             "a component belongs to a live entity"
         );
+        assert!(
+            !Self::holds_parent::<T>(),
+            "the parent of entity {} belongs to set_parent",
+            entity.index(),
+        );
         if Self::moves_hierarchy::<T>() {
-            self.hierarchy = self.hierarchy.wrapping_add(1);
+            self.bump_hierarchy();
         }
         self.column_or_insert::<T>().insert(entity, value)
     }
 
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
+        assert!(
+            !Self::holds_parent::<T>(),
+            "the parent of entity {} belongs to clear_parent",
+            entity.index(),
+        );
         self.column_mut::<T>()?.remove(entity)
     }
 
@@ -108,9 +134,13 @@ impl World {
         self.columns[index].as_any().downcast_ref()
     }
 
-    pub fn column_mut<T: Component>(&mut self) -> Option<&mut Column<T>> {
+    pub(crate) fn column_mut<T: Component>(&mut self) -> Option<&mut Column<T>> {
+        assert!(
+            !Self::holds_parent::<T>(),
+            "the parent column belongs to the hierarchy index",
+        );
         if Self::moves_hierarchy::<T>() {
-            self.hierarchy = self.hierarchy.wrapping_add(1);
+            self.bump_hierarchy();
         }
         let index = *self.index.get(&TypeId::of::<T>())?;
         self.columns[index].as_any_mut().downcast_mut()
@@ -120,9 +150,28 @@ impl World {
         self.hierarchy
     }
 
+    pub(crate) fn bump_hierarchy(&mut self) {
+        self.hierarchy = self.hierarchy.wrapping_add(1);
+    }
+
+    pub(crate) fn store<T: Component>(&mut self, entity: Entity, value: T) -> Option<T> {
+        self.column_or_insert::<T>().insert(entity, value)
+    }
+
+    pub(crate) fn drop_component<T: Component>(&mut self, entity: Entity) -> Option<T> {
+        let index = *self.index.get(&TypeId::of::<T>())?;
+        self.columns[index]
+            .as_any_mut()
+            .downcast_mut::<Column<T>>()?
+            .remove(entity)
+    }
+
     fn moves_hierarchy<T: Component>() -> bool {
-        let held = TypeId::of::<T>();
-        held == TypeId::of::<LocalTransform>() || held == TypeId::of::<Parent>()
+        TypeId::of::<T>() == TypeId::of::<LocalTransform>()
+    }
+
+    fn holds_parent<T: Component>() -> bool {
+        TypeId::of::<T>() == TypeId::of::<Parent>()
     }
 
     pub fn iter<T: Component>(&self) -> impl Iterator<Item = (Entity, &T)> + '_ {

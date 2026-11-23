@@ -1,12 +1,10 @@
+use crate::island::{SLEEP_ANGULAR, SLEEP_LINEAR};
 use crate::part::Part;
 use belfry_ecs::{Entity, LocalTransform, World};
 use belfry_math::{Aabb, Mat3, Quat, Transform, Vec3};
 
 const DEFAULT_MASS: f32 = 1.0;
 const BROAD_MARGIN: f32 = 0.02;
-const SLEEP_LINEAR: f32 = 0.03;
-const SLEEP_ANGULAR: f32 = 0.03;
-const SLEEP_TIME: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyKind {
@@ -192,6 +190,14 @@ impl RigidBody {
         }
     }
 
+    pub(crate) fn sleep_time(&self) -> f32 {
+        self.sleep_time
+    }
+
+    pub(crate) fn set_sleep_time(&mut self, sleep_time: f32) {
+        self.sleep_time = sleep_time;
+    }
+
     pub fn wake(&mut self) {
         self.sleeping = false;
         self.sleep_time = 0.0;
@@ -222,8 +228,34 @@ impl Travel {
     };
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Velocity {
+    pub linear: Vec3,
+    pub angular: Vec3,
+}
+
+impl Velocity {
+    pub(crate) const STILL: Self = Self {
+        linear: Vec3::ZERO,
+        angular: Vec3::ZERO,
+    };
+
+    pub(crate) fn of(previous: Transform, current: Transform, delta: f32) -> Self {
+        let relative = current.rotation * previous.rotation.inverse();
+        let (axis, angle) = relative.to_axis_angle();
+        Self {
+            linear: (current.translation - previous.translation) / delta,
+            angular: axis * (angle / delta),
+        }
+    }
+
+    pub(crate) fn moves(self) -> bool {
+        self.linear.length_squared() > 1e-8 || self.angular.length_squared() > 1e-6
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ParentFrame(pub Transform);
+pub(crate) struct LastPose(pub Transform);
 
 pub(crate) struct Body {
     pub entity: Entity,
@@ -235,7 +267,7 @@ pub(crate) struct Body {
     pub center_offset: Vec3,
     pub transform: Transform,
     pub frame: Option<Transform>,
-    pub parent_moved: bool,
+    pub carried: Velocity,
     pub inverse_mass: f32,
     pub inverse_inertia: Mat3,
 }
@@ -247,6 +279,7 @@ impl Body {
         mut parts: Vec<Part>,
         transform: Transform,
         frame: Option<Transform>,
+        carried: Velocity,
     ) -> Self {
         let has_body = rigid.is_some();
         let rigid = rigid.unwrap_or_else(|| RigidBody::new(BodyKind::Static));
@@ -277,7 +310,7 @@ impl Body {
             center_offset,
             transform,
             frame,
-            parent_moved: false,
+            carried,
             inverse_mass: if dynamic { 1.0 / rigid.mass } else { 0.0 },
             inverse_inertia,
         }
@@ -300,9 +333,10 @@ impl Body {
             return Some((aabb, Travel::STILL));
         }
         let reach = aabb.half_extents().length();
+        let velocity = self.velocity();
         let travel = Travel {
-            linear: self.rigid.linear_velocity * delta,
-            angular: self.rigid.angular_velocity.length() * reach * delta,
+            linear: velocity.linear * delta,
+            angular: velocity.angular.length() * reach * delta,
         };
         let margin = travel.linear.abs() + Vec3::splat(travel.angular);
         Some((Aabb::new(aabb.min - margin, aabb.max + margin), travel))
@@ -314,14 +348,18 @@ impl Body {
         self.rotation.rotate_vec3(scaled - self.center_offset)
     }
 
+    pub(crate) fn velocity(&self) -> Velocity {
+        Velocity {
+            linear: self.rigid.linear_velocity + self.carried.linear,
+            angular: self.rigid.angular_velocity + self.carried.angular,
+        }
+    }
+
     pub(crate) fn active(&self) -> bool {
         match self.rigid.kind {
             BodyKind::Static => false,
             BodyKind::Dynamic => !self.rigid.sleeping,
-            BodyKind::Kinematic => {
-                self.rigid.linear_velocity.length_squared() > 1e-8
-                    || self.rigid.angular_velocity.length_squared() > 1e-8
-            }
+            BodyKind::Kinematic => self.velocity().moves(),
         }
     }
 
@@ -346,7 +384,10 @@ impl Body {
     }
 
     pub(crate) fn point_velocity(&self, offset: Vec3) -> Vec3 {
-        self.rigid.linear_velocity + self.rigid.angular_velocity.cross(offset)
+        self.rigid.linear_velocity
+            + self.rigid.angular_velocity.cross(offset)
+            + self.carried.linear
+            + self.carried.angular.cross(offset)
     }
 
     pub(crate) fn apply_impulse(&mut self, offset: Vec3, impulse: Vec3) {
@@ -392,22 +433,16 @@ impl Body {
         self.rotation = integrate_rotation(self.rotation, self.rigid.angular_velocity * delta);
     }
 
-    pub(crate) fn update_sleep(&mut self, delta: f32) {
-        if self.rigid.kind != BodyKind::Dynamic || self.rigid.sleeping {
-            return;
-        }
-        let slow = self.rigid.linear_velocity.length_squared() <= SLEEP_LINEAR * SLEEP_LINEAR
-            && self.rigid.angular_velocity.length_squared() <= SLEEP_ANGULAR * SLEEP_ANGULAR;
-        if !slow || !self.rigid.can_sleep {
-            self.rigid.sleep_time = 0.0;
-            return;
-        }
-        self.rigid.sleep_time += delta;
-        if self.rigid.sleep_time >= SLEEP_TIME {
-            self.rigid.sleeping = true;
-            self.rigid.linear_velocity = Vec3::ZERO;
-            self.rigid.angular_velocity = Vec3::ZERO;
-        }
+    pub(crate) fn slow(&self) -> bool {
+        self.rigid.linear_velocity.length_squared() <= SLEEP_LINEAR * SLEEP_LINEAR
+            && self.rigid.angular_velocity.length_squared() <= SLEEP_ANGULAR * SLEEP_ANGULAR
+    }
+
+    pub(crate) fn sleep(&mut self) {
+        self.rigid.sleeping = true;
+        self.rigid.linear_velocity = Vec3::ZERO;
+        self.rigid.angular_velocity = Vec3::ZERO;
+        self.rigid.sleep_time = 0.0;
     }
 
     pub(crate) fn sync(&self, world: &mut World) {
@@ -422,6 +457,7 @@ impl Body {
                 Some(frame) => frame.decompose(transform),
                 None => transform,
             };
+            world.insert(self.entity, LastPose(transform));
             world.insert(self.entity, LocalTransform(local));
             world.insert(self.entity, transform);
             for part in &self.parts {
