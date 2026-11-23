@@ -124,6 +124,7 @@ impl Renderer {
             capture: &self.capture_draw,
             blended: &self.transparent_draw,
             motion: self.temporality.motion(),
+            motion_blended: self.temporality.motion_blended(),
             shadow: &self.shadow,
         };
         let textures = self.materials.textures();
@@ -187,7 +188,8 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>();
             submission.render(
-                Pass::new(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0]),
+                Pass::new(&self.captures.shadow, [1.0, 0.0, 0.0, 1.0])
+                    .depth(&self.captures.shadow_depth, DepthOps::CLEAR_STORED),
                 &casters,
             );
         }

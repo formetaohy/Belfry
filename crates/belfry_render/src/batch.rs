@@ -12,6 +12,7 @@ pub(crate) struct Pipelines<'a> {
     pub(crate) capture: &'a GraphicsPipeline,
     pub(crate) blended: &'a GraphicsPipeline,
     pub(crate) motion: &'a GraphicsPipeline,
+    pub(crate) motion_blended: &'a GraphicsPipeline,
     pub(crate) shadow: &'a GraphicsPipeline,
 }
 
@@ -89,7 +90,12 @@ impl SlotGroups {
                 Binding::buffer(program::DRAW_LIGHTS, shared.lighting),
             ],
         );
-        let motion = pipelines.motion.bind_group(
+        let motion_pipeline = if blended {
+            pipelines.motion_blended
+        } else {
+            pipelines.motion
+        };
+        let motion = motion_pipeline.bind_group(
             0,
             &[
                 Binding::buffer(program::MOTION_VIEW, shared.motion_view),

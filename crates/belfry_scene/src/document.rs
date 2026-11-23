@@ -168,14 +168,13 @@ fn mark_prefab(fields: &mut Vec<(String, Toml)>, owner: Option<&Path>) {
     let Some(owner) = owner else {
         return;
     };
-    fields.push((
-        String::from("prefab"),
-        Toml::string(
-            owner
-                .to_str()
-                .unwrap_or_else(|| panic!("a prefab path of {} holds no text", owner.display())),
-        ),
-    ));
+    fields.push((String::from("prefab"), Toml::string(written_path(owner))));
+}
+
+fn written_path(path: &Path) -> String {
+    path.to_str()
+        .unwrap_or_else(|| panic!("the asset path {} holds no text", path.display()))
+        .replace('\\', "/")
 }
 
 fn model(entry: &ModelEntry, owner: Option<&Path>) -> Toml {
@@ -183,9 +182,7 @@ fn model(entry: &ModelEntry, owner: Option<&Path>) -> Toml {
         (String::from("id"), Toml::string(entry.id.as_str())),
         (
             String::from("path"),
-            Toml::string(entry.path.to_str().unwrap_or_else(|| {
-                panic!("a model path of {} holds no text", entry.path.display())
-            })),
+            Toml::string(written_path(&entry.path)),
         ),
     ];
     mark_prefab(&mut fields, owner);
@@ -197,9 +194,7 @@ fn sound(entry: &SoundEntry, owner: Option<&Path>) -> Toml {
         (String::from("id"), Toml::string(entry.id.as_str())),
         (
             String::from("path"),
-            Toml::string(entry.path.to_str().unwrap_or_else(|| {
-                panic!("a sound path of {} holds no text", entry.path.display())
-            })),
+            Toml::string(written_path(&entry.path)),
         ),
         (String::from("stream"), Toml::boolean(entry.stream)),
     ];
@@ -210,13 +205,9 @@ fn sound(entry: &SoundEntry, owner: Option<&Path>) -> Toml {
 fn environment(entry: &EnvironmentEntry, owner: Option<&Path>) -> Toml {
     let mut fields = vec![(String::from("id"), Toml::string(entry.id.as_str()))];
     match &entry.source {
-        EnvironmentSource::Panorama(path) => fields.push((
-            String::from("path"),
-            Toml::string(
-                path.to_str()
-                    .unwrap_or_else(|| panic!("an environment path holds no text")),
-            ),
-        )),
+        EnvironmentSource::Panorama(path) => {
+            fields.push((String::from("path"), Toml::string(written_path(path))))
+        }
         EnvironmentSource::Atmosphere(atmosphere) => fields.push((
             String::from("atmosphere"),
             Toml::object([
@@ -240,12 +231,9 @@ fn environment(entry: &EnvironmentEntry, owner: Option<&Path>) -> Toml {
 fn image(entry: &ImageEntry, owner: Option<&Path>) -> Toml {
     let mut fields = vec![(String::from("id"), Toml::string(entry.id.as_str()))];
     match &entry.source {
-        ImageSource::Path(path) => fields.push((
-            String::from("path"),
-            Toml::string(path.to_str().unwrap_or_else(|| {
-                panic!("a scene image path of {} holds no text", path.display())
-            })),
-        )),
+        ImageSource::Path(path) => {
+            fields.push((String::from("path"), Toml::string(written_path(path))))
+        }
         ImageSource::Model { model, image } => {
             fields.push((String::from("model"), Toml::string(model.as_str())));
             fields.push((String::from("image"), Toml::from(*image)));
@@ -422,14 +410,7 @@ fn node(node: &Node, registry: &Registry, presentation: Presentation) -> Toml {
         fields.push((String::from("parent"), Toml::string(parent)));
     }
     if let Some(prefab) = node.prefab() {
-        fields.push((
-            String::from("prefab"),
-            Toml::string(
-                prefab.to_str().unwrap_or_else(|| {
-                    panic!("a prefab path of {} holds no text", prefab.display())
-                }),
-            ),
-        ));
+        fields.push((String::from("prefab"), Toml::string(written_path(prefab))));
     }
     if presentation == Presentation::Observed
         && let Some(owner) = node.owner()

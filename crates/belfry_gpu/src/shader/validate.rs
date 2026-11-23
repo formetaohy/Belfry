@@ -991,7 +991,13 @@ impl<'m> Checker<'m> {
                 "the device function {} returns a different type",
                 self.function.name
             ),
-            Instruction::Discard => {}
+            Instruction::Discard => assert!(
+                !matches!(
+                    self.module.stage_of(self.index),
+                    Some(crate::shader::Stage::Vertex | crate::shader::Stage::Compute)
+                ),
+                "a device discard belongs to the fragment stage"
+            ),
             Instruction::Block(body) => self.block(body),
         }
     }

@@ -12,6 +12,7 @@ use belfry_render::{
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 const ITEM_LIMIT: usize = 64;
 const EMPTY_TEXEL: &[u8] = &[0, 0, 0, 0, 0, 0, 0x00, 0x3C];
@@ -468,7 +469,8 @@ impl Library {
             MeshRecord {
                 fingerprint: item.fingerprint,
                 mesh,
-                shape: item.data.shape.clone(),
+                positions: Arc::clone(&item.data.positions),
+                shape: OnceLock::new(),
             },
         );
     }

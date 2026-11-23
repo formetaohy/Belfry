@@ -153,9 +153,7 @@ impl<A: Clone> Ui<A> {
                         self.tree.nodes[press].content,
                         Content::Segment(_) | Content::Tabs(_)
                     );
-                let clicked = self.drag.is_none()
-                    && released.is_none_or(|hover| hover == press)
-                    && !self.edit_drag;
+                let clicked = self.drag.is_none() && released == Some(press) && !self.edit_drag;
                 if dragged && switch {
                     self.commit_toggle(press);
                 } else if segment {

@@ -341,8 +341,7 @@ impl Pending {
         accesses: &mut Accesses,
         texture: &TextureResource,
         next: vk::ImageLayout,
-        stage: vk::PipelineStageFlags,
-        access: vk::AccessFlags,
+        next_access: Access,
     ) {
         let resource = Resource::Image(texture.image);
         let mut layout = texture
@@ -351,7 +350,7 @@ impl Pending {
             .expect("a Vulkan texture layout is never poisoned");
         if *layout == next {
             drop(layout);
-            self.touch(accesses, resource, Access::read(stage, access));
+            self.touch(accesses, resource, next_access);
             return;
         }
         let held = accesses.held(resource);
@@ -368,16 +367,16 @@ impl Pending {
                     .layer_count(1),
             )
             .src_access_mask(held.access)
-            .dst_access_mask(access);
+            .dst_access_mask(next_access.access);
         self.images.push(barrier);
         self.src_stage |= held.stage;
         self.src_access |= held.access;
-        self.dst_stage |= stage;
-        self.dst_access |= access;
+        self.dst_stage |= next_access.stage;
+        self.dst_access |= next_access.access;
         self.touched = true;
         *layout = next;
         drop(layout);
-        accesses.write(resource, Access::read(stage, access));
+        accesses.write(resource, next_access);
     }
 
     fn flush(&mut self, raw: &ash::Device, command: vk::CommandBuffer) {
@@ -2753,8 +2752,10 @@ impl Device {
                                     accesses,
                                     held,
                                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                                    vk::AccessFlags::SHADER_READ,
+                                    Access::read(
+                                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                        vk::AccessFlags::SHADER_READ,
+                                    ),
                                 );
                             }
                             for held in &group.buffers {
@@ -2910,8 +2911,10 @@ impl Device {
                         accesses,
                         texture,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::AccessFlags::TRANSFER_WRITE,
+                        Access::write(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                        ),
                     );
                     pending.flush(&self.core, command);
                     let width = (texture.width >> level).max(1);
@@ -2955,8 +2958,10 @@ impl Device {
                             accesses,
                             texture,
                             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                            vk::PipelineStageFlags::FRAGMENT_SHADER,
-                            vk::AccessFlags::SHADER_READ,
+                            Access::read(
+                                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                                vk::AccessFlags::SHADER_READ,
+                            ),
                         );
                         pending.flush(&self.core, command);
                     }
@@ -2973,8 +2978,10 @@ impl Device {
                         accesses,
                         texture,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::AccessFlags::TRANSFER_READ,
+                        Access::read(
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::AccessFlags::TRANSFER_READ,
+                        ),
                     );
                     pending.touch(
                         accesses,
@@ -3029,8 +3036,10 @@ impl Device {
                         accesses,
                         texture,
                         vk::ImageLayout::PRESENT_SRC_KHR,
-                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                        vk::AccessFlags::empty(),
+                        Access::read(
+                            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                            vk::AccessFlags::empty(),
+                        ),
                     );
                     pending.flush(&self.core, command);
                     frame.resources.push(texture.clone());
@@ -3048,8 +3057,10 @@ impl Device {
                             accesses,
                             texture,
                             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                            vk::AccessFlags::SHADER_READ,
+                            Access::read(
+                                vk::PipelineStageFlags::COMPUTE_SHADER,
+                                vk::AccessFlags::SHADER_READ,
+                            ),
                         );
                     }
                     for held in &group.buffers {

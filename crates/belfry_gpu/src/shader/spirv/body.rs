@@ -697,6 +697,12 @@ impl<'w, 'm> FunctionWriter<'w, 'm> {
                         .operand(self.value(*pointer))
                         .operands(operands),
                 );
+                self.push(
+                    Instruction::plain(CONTROL_BARRIER)
+                        .operand(workgroup)
+                        .operand(workgroup)
+                        .operand(ordering),
+                );
             }
             DeviceInstruction::Sample {
                 image,

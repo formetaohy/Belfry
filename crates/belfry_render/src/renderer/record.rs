@@ -18,6 +18,7 @@ pub(super) struct FrameRecord<'a> {
     pub(super) aspect: f32,
     pub(super) point_lights: &'a [PointLightRecord],
     pub(super) probe_count: u32,
+    pub(super) spheres: &'a [(Vec3, f32)],
     pub(super) total: u32,
     pub(super) highlight: u32,
     pub(super) world: &'a World,
@@ -53,6 +54,7 @@ impl Renderer {
             aspect,
             point_lights,
             probe_count,
+            spheres,
             total,
             highlight,
             world,
@@ -65,7 +67,7 @@ impl Renderer {
             aspect,
             light,
             &travel,
-            &[],
+            spheres,
             self.device.clip_space(),
         );
         let direction = travel.direction();

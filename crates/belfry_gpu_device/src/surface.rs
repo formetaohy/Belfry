@@ -174,6 +174,12 @@ impl Drop for SurfaceFrame {
     }
 }
 
+impl Drop for Surface {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 impl SurfaceFrame {
     pub fn texture(&self) -> &Texture {
         &self.texture

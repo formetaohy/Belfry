@@ -76,23 +76,13 @@ impl Watch {
                 desired.insert(dependency.clone(), Kind::Asset);
             }
         }
-        let previous = std::mem::take(&mut self.files)
-            .into_iter()
-            .map(|(path, kind, digest)| (path, (kind, digest)))
-            .collect::<BTreeMap<_, _>>();
         let mut files = Vec::with_capacity(desired.len());
         for (path, kind) in desired {
-            let held = match previous.get(&path) {
-                Some((held, digest)) if *held == kind => Some(*digest),
-                _ => None,
-            };
-            let digest = match held {
-                Some(digest) => digest,
-                None => self.sources.digest(&path).ok(),
-            };
-            files.push((path, kind, digest));
+            files.push((path.clone(), kind, self.sources.digest(&path).ok()));
         }
         self.files = files;
+        self.pending = None;
+        self.held = 0;
     }
 
     pub fn changed(&mut self) -> Option<Change> {
@@ -102,10 +92,13 @@ impl Watch {
             pending.scene |= changed.scene;
             pending.model |= changed.model;
             pending.asset |= changed.asset;
-            self.held = self.held.saturating_add(1);
-            if self.held < SETTLE_POLLS {
-                return None;
-            }
+            self.held = 0;
+            return None;
+        }
+        self.pending.as_ref()?;
+        self.held = self.held.saturating_add(1);
+        if self.held < SETTLE_POLLS {
+            return None;
         }
         self.held = 0;
         self.pending.take()

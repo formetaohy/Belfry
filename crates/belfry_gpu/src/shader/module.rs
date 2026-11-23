@@ -523,7 +523,7 @@ impl Module {
     pub fn alignment(&self, ty: TypeId) -> u32 {
         match self.ty(ty) {
             Type::Scalar(scalar) => scalar.bytes(),
-            Type::Vector { scalar, length } => scalar.bytes() * length,
+            Type::Vector { scalar, length } => scalar.bytes() * length.next_multiple_of(2),
             Type::Array { element, .. } => self.alignment(*element),
             Type::Struct { members, .. } => members
                 .iter()

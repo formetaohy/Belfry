@@ -1,8 +1,8 @@
 use super::prepare::{
     ImageBytes, Prepare, animation_data, animation_fingerprint, atmosphere_fingerprint,
-    collided_meshes, environment_data, environment_fingerprint, fail, image_data_of,
-    image_fingerprint, image_source, material_fingerprint, mesh_data, mesh_fingerprint, skin_data,
-    skin_fingerprint, sound_data, sound_fingerprint, validate_material,
+    environment_data, environment_fingerprint, fail, image_data_of, image_fingerprint,
+    image_source, material_fingerprint, mesh_data, mesh_fingerprint, skin_data, skin_fingerprint,
+    sound_data, sound_fingerprint, validate_material,
 };
 use super::work::{
     ImageMips, Job, Prepared, PreparedAnimation, PreparedEnvironment, PreparedImage,
@@ -24,7 +24,6 @@ pub(super) fn plan(job: Job) -> Prepared {
     let mut errors = Vec::new();
     let mut files = BTreeSet::new();
     let mut prepare = Prepare::new(&scene, sources);
-    let collided = collided_meshes(&scene);
 
     let mut effective_images = HashMap::new();
     let mut pending_images = Vec::new();
@@ -187,7 +186,6 @@ pub(super) fn plan(job: Job) -> Prepared {
 
     let mut meshes = Vec::new();
     for entry in scene.meshes() {
-        let wanted = collided.contains(entry.id.as_str());
         let model = match &entry.asset.geometry {
             crate::mesh::Geometry::Model { model, .. } => prepare.models.digest(
                 model.as_str(),
@@ -199,13 +197,13 @@ pub(super) fn plan(job: Job) -> Prepared {
                 Ok(crate::digest::Digest::default())
             }
         };
-        let fingerprint = mesh_fingerprint(entry, model.as_ref().ok().copied(), wanted);
+        let fingerprint = mesh_fingerprint(entry, model.as_ref().ok().copied());
         let previous = fingerprints.meshes.get(&entry.id).copied();
         if previous == Some(fingerprint) {
             continue;
         }
         let prepared =
-            model.and_then(|_| mesh_data(entry, wanted, &mut prepare.models, &mut prepare.sources));
+            model.and_then(|_| mesh_data(entry, &mut prepare.models, &mut prepare.sources));
         match prepared {
             Ok(data) => meshes.push(PreparedMesh {
                 entry: entry.clone(),

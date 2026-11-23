@@ -308,11 +308,20 @@ pub(crate) fn group_specs(bindings: &[BindingSpec], group: u32, label: &str) -> 
         group < groups,
         "{label} declares {groups} bind groups where {group} is requested"
     );
-    bindings
+    let mut specs = bindings
         .iter()
         .filter(|binding| binding.group == group)
         .copied()
-        .collect()
+        .collect::<Vec<_>>();
+    specs.sort_unstable_by_key(|spec| spec.binding);
+    for (index, spec) in specs.iter().enumerate() {
+        assert_eq!(
+            spec.binding as usize, index,
+            "{label} numbers its bindings {} where its group holds {index}",
+            spec.binding,
+        );
+    }
+    specs
 }
 
 fn bounded(

@@ -125,6 +125,7 @@ pub(crate) struct Captures {
     pub(crate) atlas: Texture,
     pub(crate) depth: DepthTexture,
     pub(crate) shadow: Texture,
+    pub(crate) shadow_depth: DepthTexture,
     pub(crate) shadow_sampler: Sampler,
     pub(crate) views: GpuBuffer,
     pub(crate) skies: GpuBuffer,
@@ -153,6 +154,13 @@ impl Captures {
         let queue = Queue::of(device);
         let attachment = TextureUsages::SAMPLED | TextureUsages::RENDER_ATTACHMENT;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+        let sky_span = crate::span::padded(
+            device
+                .limits()
+                .min_storage_buffer_offset_alignment
+                .max(WORD_BYTES),
+            SKY_BYTES,
+        );
         let setup = GpuBuffer::new(device, "belfry capture atlas", SETUP_BYTES, storage);
         setup.write(
             &queue,
@@ -188,6 +196,12 @@ impl Captures {
                 TextureFormat::R32Float,
                 attachment,
             ),
+            shadow_depth: DepthTexture::new(
+                device,
+                "belfry capture shadow depth",
+                SHADOW_SIDE,
+                SHADOW_SIDE,
+            ),
             shadow_sampler: Sampler::new(
                 device,
                 SamplerDesc {
@@ -207,7 +221,7 @@ impl Captures {
             skies: GpuBuffer::new(
                 device,
                 "belfry capture skies",
-                u64::from(FACES) * SKY_BYTES,
+                u64::from(FACES) * sky_span,
                 storage,
             ),
             cascades: GpuBuffer::new(
@@ -234,7 +248,7 @@ impl Captures {
             batches: 0,
             point_bytes: 0,
             cluster_base: 0,
-            sky_span: SKY_BYTES,
+            sky_span,
             cluster_span: FACE_CLUSTER_BYTES,
             drawn_span: DRAW_BYTES,
             argument_span: ARGUMENT_BYTES,

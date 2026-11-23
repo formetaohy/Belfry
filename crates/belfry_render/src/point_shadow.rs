@@ -3,8 +3,8 @@ use crate::frame::record_of_view;
 use crate::growing::Growing;
 use crate::view::View;
 use belfry_gpu_device::{
-    AddressMode, BufferBinding, BufferUsages, ClipSpace, Device, Filter, GpuBuffer, Queue, Sampler,
-    SamplerDesc, Texture, TextureFormat, TextureUsages, Viewport,
+    AddressMode, BufferBinding, BufferUsages, ClipSpace, DepthTexture, Device, Filter, GpuBuffer,
+    Queue, Sampler, SamplerDesc, Texture, TextureFormat, TextureUsages, Viewport,
 };
 use belfry_math::{Mat4, Vec3};
 use std::mem::size_of;
@@ -40,6 +40,7 @@ pub(crate) struct PointShadowFrame<'a> {
 
 pub(crate) struct PointShadows {
     atlas: Texture,
+    depth: DepthTexture,
     sampler: Sampler,
     views: GpuBuffer,
     drawn: Growing,
@@ -53,8 +54,10 @@ pub(crate) struct PointShadows {
 
 impl PointShadows {
     pub(crate) fn new(device: &Device) -> Self {
+        let (atlas, depth) = atlas(device, 1);
         Self {
-            atlas: atlas(device, 1),
+            atlas,
+            depth,
             sampler: Sampler::new(
                 device,
                 SamplerDesc {
@@ -90,7 +93,7 @@ impl PointShadows {
         if self.rows == rows {
             return;
         }
-        self.atlas = atlas(device, rows);
+        (self.atlas, self.depth) = atlas(device, rows);
         self.views = GpuBuffer::new(
             device,
             "belfry point shadow views",
@@ -184,6 +187,10 @@ impl PointShadows {
         &self.atlas
     }
 
+    pub(crate) fn depth(&self) -> &DepthTexture {
+        &self.depth
+    }
+
     pub(crate) fn sampler(&self) -> &Sampler {
         &self.sampler
     }
@@ -240,15 +247,20 @@ impl PointShadows {
     }
 }
 
-fn atlas(device: &Device, rows: u32) -> Texture {
-    Texture::new(
-        device,
-        "belfry point shadows",
-        POINT_SHADOW_FACES * POINT_SHADOW_SIDE,
-        rows * POINT_SHADOW_SIDE,
-        1,
-        TextureFormat::R32Float,
-        TextureUsages::RENDER_ATTACHMENT | TextureUsages::SAMPLED,
+fn atlas(device: &Device, rows: u32) -> (Texture, DepthTexture) {
+    let width = POINT_SHADOW_FACES * POINT_SHADOW_SIDE;
+    let height = rows * POINT_SHADOW_SIDE;
+    (
+        Texture::new(
+            device,
+            "belfry point shadows",
+            width,
+            height,
+            1,
+            TextureFormat::R32Float,
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::SAMPLED,
+        ),
+        DepthTexture::new(device, "belfry point shadow depth", width, height),
     )
 }
 

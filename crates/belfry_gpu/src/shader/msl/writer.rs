@@ -925,14 +925,16 @@ impl<'m> Writer<'m> {
                 let held = format!("expected_{target}");
                 self.out.line(format!("auto {held} = {expected};"));
                 self.out.line(format!(
-                    "{target} = atomic_compare_exchange_weak_explicit(&{cell}, &{held}, {desired}, memory_order_acq_rel, memory_order_relaxed);"
+                    "atomic_compare_exchange_weak_explicit(&{cell}, &{held}, {desired}, memory_order_acq_rel, memory_order_relaxed);"
                 ));
+                self.out.line(format!("{target} = {held};"));
             }
             Instruction::WorkGroupUniformLoad { pointer, result } => {
                 self.barrier(Barrier::WorkGroup);
                 let target = self.target(*result);
                 let text = self.place_value(*pointer);
                 self.out.line(format!("{target} = {text};"));
+                self.barrier(Barrier::WorkGroup);
             }
             Instruction::Barrier(barrier) => self.barrier(*barrier),
             Instruction::If {

@@ -175,6 +175,7 @@ impl Renderer {
             capture: &self.capture_draw,
             blended: &self.transparent_draw,
             motion: self.temporality.motion(),
+            motion_blended: self.temporality.motion_blended(),
             shadow: &self.shadow,
         };
         let mut slots_in = Vec::with_capacity(batches.len());
@@ -266,6 +267,13 @@ impl Renderer {
             textures,
             samplers,
         );
+        let motion_blended_tables = table(
+            pipelines.motion_blended,
+            program::MOTION_TEXTURE,
+            program::MOTION_SAMPLER,
+            textures,
+            samplers,
+        );
         let depth_groups = (0..depth_batches as usize)
             .map(|index| {
                 [
@@ -282,14 +290,15 @@ impl Renderer {
         for (index, slot) in groups.iter().enumerate() {
             if index < depth_batches as usize {
                 main_groups.push([slot.shade().clone(), tables.clone(), self.shade.clone()]);
+                motion_groups.push([slot.motion().clone(), motion_tables.clone()]);
             } else {
                 main_groups.push([
                     slot.shade().clone(),
                     transparent_tables.clone(),
                     self.transparent_shade.clone(),
                 ]);
+                motion_groups.push([slot.motion().clone(), motion_blended_tables.clone()]);
             }
-            motion_groups.push([slot.motion().clone(), motion_tables.clone()]);
         }
         let mut cast_groups = Vec::with_capacity(CASCADE_COUNT as usize * depth_batches as usize);
         for cascade in 0..CASCADE_COUNT as usize {
@@ -336,7 +345,7 @@ impl Renderer {
             .collect::<Vec<_>>();
         let sky_groups = [self.sky_view.clone(), self.sky_shade.clone()];
         if sky {
-            main.insert(0, Draw::new(&self.sky, &sky_groups, SKY_VERTICES));
+            main.push(Draw::new(&self.sky, &sky_groups, SKY_VERTICES));
         }
         if !line_groups.is_empty() {
             main.push(Draw::new(&self.line_pipeline, line_groups, line_vertices));
@@ -366,7 +375,11 @@ impl Renderer {
                 ))
             })
             .collect::<Vec<_>>();
-        submission.render(Pass::new(&self.shadow_map, [1.0, 0.0, 0.0, 1.0]), &cast);
+        submission.render(
+            Pass::new(&self.shadow_map, [1.0, 0.0, 0.0, 1.0])
+                .depth(&self.shadow_depth, DepthOps::CLEAR_STORED),
+            &cast,
+        );
         if point_light_count > 0 {
             let palette = self.palettes.binding();
             let materials = self
@@ -421,11 +434,16 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>();
             submission.render(
-                Pass::new(self.point_shadows.atlas(), self.point_shadows.clear()),
+                Pass::new(self.point_shadows.atlas(), self.point_shadows.clear())
+                    .depth(self.point_shadows.depth(), DepthOps::CLEAR_STORED),
                 &draws,
             );
         }
-        self.transparency.clear(submission);
+        if depth_batches < batches.len() as u32 {
+            self.transparency.clear_layers(submission);
+        } else {
+            self.transparency.clear_dropped(submission);
+        }
         submission.render(
             Pass::new(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0])
                 .depth(scene_depth, DepthOps::KEEP),
@@ -435,8 +453,13 @@ impl Renderer {
             .iter()
             .enumerate()
             .map(|(index, groups)| {
+                let pipeline = if index < depth_batches as usize {
+                    &self.temporality.motion()
+                } else {
+                    &self.temporality.motion_blended()
+                };
                 Draw::indirect(
-                    self.temporality.motion(),
+                    pipeline,
                     groups,
                     self.main_arguments
                         .buffer()
@@ -446,7 +469,7 @@ impl Renderer {
             .collect::<Vec<_>>();
         submission.render(
             Pass::new(self.temporality.target(), [0.0, 0.0, 0.0, 0.0])
-                .depth(scene_depth, DepthOps::CLEAR),
+                .depth(scene_depth, DepthOps::KEEP),
             &motion,
         );
         Channels { arguments }

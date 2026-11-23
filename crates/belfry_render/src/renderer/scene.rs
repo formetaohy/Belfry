@@ -60,8 +60,11 @@ impl Renderer {
         palettes.begin();
         let mut scratch = Vec::new();
         for index in 0..instances.len() {
-            let entity = instances.at(index).entity;
-            let source = instances.at(index).source();
+            let slot = instances.at_mut(index);
+            let entity = slot.entity;
+            let source = slot.source();
+            slot.skinning = crate::palette::NONE;
+            slot.bounds = None;
             let Some(skin) = world.get::<Skin>(entity) else {
                 continue;
             };

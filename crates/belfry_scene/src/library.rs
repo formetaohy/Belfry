@@ -21,6 +21,7 @@ use belfry_render::{
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use work::Fingerprints;
 use work::ImageMips;
 use work::Job;
@@ -96,7 +97,8 @@ type TextureKey = (String, TextureFormat, ColorSpace);
 struct MeshRecord {
     fingerprint: Digest,
     mesh: Mesh,
-    shape: Option<Arc<TriangleMesh>>,
+    positions: Arc<[[f32; 3]]>,
+    shape: OnceLock<Arc<TriangleMesh>>,
 }
 
 struct MaterialRecord {
@@ -455,13 +457,13 @@ impl Assets for Library {
     }
 
     fn mesh_shape(&self, id: &str) -> Arc<TriangleMesh> {
+        let held = self
+            .meshes
+            .get(id)
+            .unwrap_or_else(|| panic!("the scene collides the mesh {id}, which it does not hold"));
         Arc::clone(
-            self.meshes
-                .get(id)
-                .and_then(|held| held.shape.as_ref())
-                .unwrap_or_else(|| {
-                    panic!("the scene collides the mesh {id}, which it does not hold")
-                }),
+            held.shape
+                .get_or_init(|| Arc::new(TriangleMesh::from_positions(&held.positions))),
         )
     }
 

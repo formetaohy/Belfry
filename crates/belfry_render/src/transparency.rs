@@ -108,13 +108,21 @@ impl Transparency {
         });
     }
 
-    pub(crate) fn clear(&self, submission: &mut Submission) {
+    pub(crate) fn clear_layers(&self, submission: &mut Submission) {
         let screen = self
             .screen
             .as_ref()
             .expect("a transparent frame holds its layers");
         let layers = u64::from(screen.width) * u64::from(screen.height) * u64::from(screen.layers);
         submission.clear(&screen.keys, 0, layers * WORD_BYTES);
+        submission.clear(&screen.dropped, 0, WORD_BYTES);
+    }
+
+    pub(crate) fn clear_dropped(&self, submission: &mut Submission) {
+        let screen = self
+            .screen
+            .as_ref()
+            .expect("a transparent frame holds its layers");
         submission.clear(&screen.dropped, 0, WORD_BYTES);
     }
 

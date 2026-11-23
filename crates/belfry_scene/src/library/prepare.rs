@@ -1,7 +1,6 @@
 use super::AssetError;
 use super::work::EnvironmentData;
 use crate::animation::AnimationEntry;
-use crate::collider::{ColliderRef, ShapeKind};
 use crate::digest::{Digest, DigestBuilder};
 use crate::environment::{EnvironmentEntry, EnvironmentSource};
 use crate::image::{ImageEntry, ImageSource};
@@ -17,11 +16,10 @@ use belfry_gltf::Model;
 use belfry_image::Image;
 use belfry_image::Radiance;
 use belfry_math::Mat4;
-use belfry_physics::TriangleMesh;
 use belfry_render::environment::Panorama;
 use belfry_render::{AddressMode, Filter, SamplerDesc, SkinVertexRecord, Vertex};
 use std::any::Any;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +33,7 @@ pub(super) struct ImageBytes {
 pub(super) struct MeshData {
     pub(super) vertices: Vec<Vertex>,
     pub(super) skin: Option<Vec<SkinVertexRecord>>,
-    pub(super) shape: Option<Arc<TriangleMesh>>,
+    pub(super) positions: Arc<[[f32; 3]]>,
 }
 
 pub(super) struct Models<'a> {
@@ -287,7 +285,6 @@ pub(super) fn image_data_of(
 
 pub(super) fn mesh_data(
     entry: &MeshEntry,
-    wanted: bool,
     models: &mut Models<'_>,
     sources: &mut Sources,
 ) -> Result<MeshData, String> {
@@ -318,19 +315,10 @@ pub(super) fn mesh_data(
     if vertices.is_empty() {
         return Err(format!("the mesh {} holds no vertex", entry.id));
     }
-    let shape = if wanted {
-        let points = positions(&vertices);
-        Some(Arc::new(
-            catch_unwind(AssertUnwindSafe(|| TriangleMesh::from_positions(&points)))
-                .map_err(|payload| panic_message(payload.as_ref()))?,
-        ))
-    } else {
-        None
-    };
     Ok(MeshData {
+        positions: positions(&vertices).into(),
         vertices,
         skin,
-        shape,
     })
 }
 
@@ -480,17 +468,6 @@ pub(super) fn environment_fingerprint(entry: &EnvironmentEntry, digest: Option<D
     fingerprint.finish()
 }
 
-pub(super) fn collided_meshes(scene: &Scene) -> HashSet<String> {
-    scene
-        .nodes()
-        .iter()
-        .filter_map(|node| node.component::<ColliderRef>())
-        .filter(|collider| collider.shape == ShapeKind::Mesh)
-        .filter_map(|collider| collider.mesh.as_ref())
-        .map(|mesh| String::from(mesh.as_str()))
-        .collect()
-}
-
 fn positions(vertices: &[Vertex]) -> Vec<[f32; 3]> {
     vertices.iter().map(|vertex| vertex.position).collect()
 }
@@ -576,7 +553,7 @@ pub(super) fn material_fingerprint(entry: &MaterialEntry, images: &[Digest]) -> 
     digest.finish()
 }
 
-pub(super) fn mesh_fingerprint(entry: &MeshEntry, model: Option<Digest>, wanted: bool) -> Digest {
+pub(super) fn mesh_fingerprint(entry: &MeshEntry, model: Option<Digest>) -> Digest {
     let mut digest = Digest::builder();
     digest.text("mesh").text(&entry.id);
     match &entry.asset.geometry {
@@ -605,7 +582,7 @@ pub(super) fn mesh_fingerprint(entry: &MeshEntry, model: Option<Digest>, wanted:
         Some(model) => digest.digest(model),
         None => digest.number(0),
     };
-    digest.number(wanted as u64).finish()
+    digest.finish()
 }
 
 pub(super) fn skin_fingerprint(entry: &SkinEntry, model: Option<Digest>) -> Digest {

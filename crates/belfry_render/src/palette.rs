@@ -1,7 +1,7 @@
 use belfry_ecs::Entity;
 use belfry_gpu_device::{BufferBinding, BufferUsages, Device, GpuBuffer, Queue, Submission};
 use belfry_math::Mat4;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const JOINT_BYTES: u64 = std::mem::size_of::<Mat4>() as u64;
 const POOL_BYTES: u64 = 4096;
@@ -35,6 +35,7 @@ pub(crate) struct Palettes {
     free: Vec<Range>,
     matrices: Vec<Mat4>,
     staged: Vec<Staged>,
+    posed_entities: HashSet<Entity>,
     pool: Option<GpuBuffer>,
     joints: u32,
     used: u32,
@@ -49,6 +50,7 @@ impl Palettes {
             free: Vec::new(),
             matrices: Vec::new(),
             staged: Vec::new(),
+            posed_entities: HashSet::new(),
             pool: None,
             joints: 0,
             used: 0,
@@ -60,6 +62,7 @@ impl Palettes {
     pub(crate) fn begin(&mut self) {
         self.matrices.clear();
         self.staged.clear();
+        self.posed_entities.clear();
     }
 
     pub(crate) fn push(&mut self, entity: Entity, joints: &[Mat4]) -> Skinning {
@@ -87,6 +90,7 @@ impl Palettes {
             .expect("a posed entity holds the range it claimed");
         let first = self.matrices.len();
         self.matrices.extend_from_slice(joints);
+        self.posed_entities.insert(entity);
         self.staged.push(Staged {
             range,
             first,
@@ -100,36 +104,82 @@ impl Palettes {
     }
 
     pub(crate) fn commit(&mut self, device: &Device, queue: &Queue) {
+        self.release_stale();
         self.fit(device, queue, self.used);
         self.posed = self.base();
+        let other = self.previous_base();
         let pool = self
             .pool
             .as_ref()
             .expect("a committed frame holds the buffer its poses write");
-        let other = self.previous_base();
-        for staged in &self.staged {
-            let records = self.records(staged);
-            let bytes = bytemuck::cast_slice(&records);
-            pool.write_at(
-                queue,
-                u64::from(self.posed + staged.range.palette) * JOINT_BYTES,
-                bytes,
-            );
-            if staged.fresh {
-                pool.write_at(
-                    queue,
-                    u64::from(other + staged.range.palette) * JOINT_BYTES,
-                    bytes,
+        for run in self.runs() {
+            let mut records = Vec::new();
+            for staged in &run {
+                records.extend(
+                    self.matrices[staged.first..staged.first + staged.joints]
+                        .iter()
+                        .map(joint_record),
                 );
+            }
+            let bytes = bytemuck::cast_slice(&records);
+            let palette = run[0].range.palette;
+            pool.write_at(queue, u64::from(self.posed + palette) * JOINT_BYTES, bytes);
+            if run[0].fresh {
+                pool.write_at(queue, u64::from(other + palette) * JOINT_BYTES, bytes);
             }
         }
     }
 
-    fn records(&self, staged: &Staged) -> Vec<crate::abi::JointRecord> {
-        self.matrices[staged.first..staged.first + staged.joints]
+    fn release_stale(&mut self) {
+        let held = std::mem::take(&mut self.posed_entities);
+        let stale = self
+            .placed
             .iter()
-            .map(joint_record)
-            .collect()
+            .filter(|(entity, _)| !held.contains(entity))
+            .map(|(entity, range)| (*entity, *range))
+            .collect::<Vec<_>>();
+        for (entity, range) in stale {
+            self.placed.remove(&entity);
+            self.release(range.palette, range.joints);
+        }
+        self.posed_entities = held;
+        self.coalesce();
+    }
+
+    fn coalesce(&mut self) {
+        if self.free.len() < 2 {
+            return;
+        }
+        self.free.sort_unstable_by_key(|range| range.palette);
+        let mut merged: Vec<Range> = Vec::with_capacity(self.free.len());
+        for range in self.free.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.palette + last.joints == range.palette => {
+                    last.joints += range.joints
+                }
+                _ => merged.push(range),
+            }
+        }
+        self.free = merged;
+    }
+
+    fn runs(&self) -> Vec<Vec<&Staged>> {
+        let mut order = (0..self.staged.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|index| self.staged[*index].range.palette);
+        let mut runs: Vec<Vec<&Staged>> = Vec::new();
+        let mut end = 0u32;
+        let mut fresh = false;
+        for index in order {
+            let staged = &self.staged[index];
+            if runs.is_empty() || staged.fresh != fresh || staged.range.palette != end {
+                runs.push(Vec::new());
+                fresh = staged.fresh;
+            }
+            let run = runs.last_mut().expect("a run opens before its stages");
+            end = staged.range.palette + staged.range.joints;
+            run.push(staged);
+        }
+        runs
     }
 
     pub(crate) fn finish(&mut self) {

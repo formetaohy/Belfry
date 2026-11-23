@@ -415,7 +415,7 @@ mod sky {
         if vertex == 2u32 {
             y = 3.0;
         }
-        position = fvec4(x, y, 0.0, 1.0);
+        position = fvec4(x, y, 1.0, 1.0);
         screen = fvec2(x, y);
     }
 

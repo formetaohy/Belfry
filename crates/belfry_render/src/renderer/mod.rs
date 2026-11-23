@@ -123,6 +123,7 @@ pub struct Renderer {
     shade: BindGroup,
     transparent_shade: BindGroup,
     shadow_map: Texture,
+    shadow_depth: DepthTexture,
     views: GpuBuffer,
     shadow_views: GpuBuffer,
     light: GpuBuffer,
@@ -236,14 +237,16 @@ impl Renderer {
             &device,
             program::sky_program(),
             TextureFormat::Rgba16Float,
-            PipelineState::SCREEN,
+            PipelineState::COVERED,
         );
-        let shadow = GraphicsPipeline::new(
+        let shadow = GraphicsPipeline::new_depth(
             &device,
             program::shadowing(),
             TextureFormat::R32Float,
-            PipelineState::SCREEN,
+            PipelineState::DEPTH_WRITE,
         );
+        let shadow_depth =
+            DepthTexture::new(&device, "belfry shadow depth", SHADOW_ATLAS, SHADOW_ATLAS);
         let depth = GraphicsPipeline::new_depth(
             &device,
             program::depth_prepass(),
@@ -363,6 +366,7 @@ impl Renderer {
             shade,
             transparent_shade,
             shadow_map,
+            shadow_depth,
             views,
             shadow_views,
             light,
@@ -698,6 +702,7 @@ impl Renderer {
             aspect,
             point_lights: &point_light_records,
             probe_count,
+            spheres: &collection.spheres,
             highlight: collection.highlight,
             total: collection.total,
             world,
@@ -732,19 +737,17 @@ impl Renderer {
                 Pass::new(self.temporality.target(), [0.0, 0.0, 0.0, 0.0]),
                 &[],
             );
-            self.transparency.clear(&mut submission);
+            self.transparency.clear_dropped(&mut submission);
             submission.render(
                 Pass::new(self.post.hdr(), [clear[0], clear[1], clear[2], 0.0])
                     .depth(&depth, DepthOps::CLEAR),
                 &debug_draws,
             );
-            self.transparency
-                .resolve(&mut submission, self.post.hdr(), self.post.lit());
             self.temporality.resolve(
                 &self.queue,
                 &mut submission,
                 Frame {
-                    source: self.post.lit(),
+                    source: self.post.hdr(),
                     pose,
                     near: camera.near,
                     far: camera.far,
@@ -795,6 +798,7 @@ impl Renderer {
                 .collect(),
             entities: collection.entities.clone(),
         });
+        let blended = collection.depth_batches < collection.batches.len() as u32;
         let channels = self.channels(
             &mut submission,
             ChannelFrame {
@@ -818,13 +822,18 @@ impl Renderer {
             },
         );
         let arguments = channels.arguments;
-        self.transparency
-            .resolve(&mut submission, self.post.hdr(), self.post.lit());
+        let lit = if blended {
+            self.transparency
+                .resolve(&mut submission, self.post.hdr(), self.post.lit());
+            self.post.lit()
+        } else {
+            self.post.hdr()
+        };
         self.temporality.resolve(
             &self.queue,
             &mut submission,
             Frame {
-                source: self.post.lit(),
+                source: lit,
                 pose,
                 near: camera.near,
                 far: camera.far,

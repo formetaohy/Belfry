@@ -45,6 +45,7 @@ struct Screen {
 
 pub(crate) struct Temporality {
     motion_pipeline: GraphicsPipeline,
+    motion_blended_pipeline: GraphicsPipeline,
     temporal_pipeline: GraphicsPipeline,
     filter: Sampler,
     nearest: Sampler,
@@ -62,7 +63,13 @@ impl Temporality {
                 device,
                 program::motion_vectors(),
                 FORMAT,
-                PipelineState::DEPTH_WRITE,
+                PipelineState::COVERED,
+            ),
+            motion_blended_pipeline: GraphicsPipeline::new_depth(
+                device,
+                program::motion_vectors(),
+                FORMAT,
+                PipelineState::TRANSPARENT,
             ),
             temporal_pipeline: GraphicsPipeline::new(
                 device,
@@ -151,6 +158,10 @@ impl Temporality {
 
     pub(crate) fn motion(&self) -> &GraphicsPipeline {
         &self.motion_pipeline
+    }
+
+    pub(crate) fn motion_blended(&self) -> &GraphicsPipeline {
+        &self.motion_blended_pipeline
     }
 
     pub(crate) fn view(&self) -> BufferBinding<'_> {
